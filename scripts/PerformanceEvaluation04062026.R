@@ -342,8 +342,10 @@ sim_obs_sum1 <- sim_obs1 %>%
 ##   - Saves each scenario to disk as RDS so the 16-scenario set can be
 ##     reloaded without re-simulating
 ## ============================================================================
-## Creat 16 scenarios with different combinations of covariate effects----------
-## BW on CL, CrCL on CL, BW on V, sex on V
+
+#Strategy1:  use omega metrix to sample etas and residual error automically by the popPKmodel------
+             #only half of datasets meet the eta correlation constraint, but it's straightforward and preserves the full variability in the model.
+## 16 scenarios: BW on CL, CrCL on CL, BW on V, sex on V
 PsN_scenarios <- data.frame(
   scenario = 1:16,
   I_BW_CL = c(0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1),
@@ -464,73 +466,6 @@ sim_obs_all <- readRDS("sim_obs_all_scenarios.rds")
 
 #write.csv(sim_obs_all, "sim_obs_all_scenarios.csv", row.names = FALSE) too large, didn't excute.
 
-
-## ============================================================================
-## True parameter table per scenario (for RMRSE)
-## ----------------------------------------------------------------------------
-##   RMRSE = sqrt(mean(((estimate - true) / true)^2)) per parameter, per scenario.
-##   Long format makes joining estimates (one row per parameter per fit) trivial.
-##
-##   Mapping (article name -> simulation symbol):
-##     CL      <- TVCL              Vc       <- TVVc
-##     Q       <- TVQ               Vp       <- TVVp
-##     KA      <- TVKA              ResErr   <- prop_err  (proportional SD)
-##     CLBW    <- TH_BW_CL  * I_BW_CL
-##     CLcrCL  <- TH_CRCL_CL * I_CRCL_CL
-##     VcBW    <- TH_BW_VC   * I_BW_VC
-##     VcSEX   <- TH_SEX_VC  * I_SEX_VC
-##     var_CL  <- omega(eta_cl, eta_cl) = 0.1
-##     var_Vc  <- omega(eta_vc, eta_vc) = 0.1
-##     cov_VcCL<- omega(eta_vc, eta_cl) = 0.02
-## ============================================================================
-
-true_params_long <- function(scenarios = PsN_scenarios,
-                             theta = c(TVCL = 0.6, TVQ = 1.8, TVVc = 20,
-                                       TVVp = 80, TVKA = 0.7,
-                                       TH_BW_CL = 0.75, TH_CRCL_CL = 0.5,
-                                       TH_BW_VC = 1.0, TH_SEX_VC = 0.5),
-                             omega = c(var_cl = 0.1, var_vc = 0.1,
-                                       cov_cl_vc = 0.02),
-                             prop_err = 0.1) {
-  scenarios %>%
-    dplyr::rowwise() %>%
-    dplyr::mutate(
-      TVCL       = theta[["TVCL"]],
-      TVVc       = theta[["TVVc"]],
-      TVQ        = theta[["TVQ"]],
-      TVVp       = theta[["TVVp"]],
-      TVKA       = theta[["TVKA"]],
-      CLBW     = theta[["TH_BW_CL"]]   * I_BW_CL,
-      CLcrCL   = theta[["TH_CRCL_CL"]] * I_CRCL_CL,
-      VcBW     = theta[["TH_BW_VC"]]   * I_BW_VC,
-      VcSEX    = theta[["TH_SEX_VC"]]  * I_SEX_VC,
-      var_CL   = omega[["var_cl"]], #Variance
-      var_Vc   = omega[["var_vc"]], #variance
-      cov_VcCL = omega[["cov_cl_vc"]],#covariance
-      ResErr   = prop_err #standard deviation
-    ) %>%
-    dplyr::ungroup() %>%
-    tidyr::pivot_longer(
-      cols      = c(TVCL, TVVc, TVQ, TVVp, TVKA,
-                    CLBW, CLcrCL, VcBW, VcSEX,
-                    var_CL, var_Vc, cov_VcCL, ResErr),
-      names_to  = "parameter",
-      values_to = "true_value"
-    ) %>%
-    dplyr::select(scenario, parameter, true_value,
-                  I_BW_CL, I_CRCL_CL, I_BW_VC, I_SEX_VC)
-}
-
-true_params <- true_params_long()
-saveRDS(true_params, file.path(out_dir, "true_params_long.rds"))
-
-## Convenience wide table (one row per scenario, one column per parameter)
-true_params_wide <- true_params %>%
-  tidyr::pivot_wider(id_cols = scenario,
-                     names_from = parameter,
-                     values_from = true_value)
-
-
 ## ============================================================================
 ## Eta-correlation QC per (SCENARIO, DATASET)
 ## ----------------------------------------------------------------------------
@@ -568,22 +503,13 @@ eta_cor_summary <- eta_cor_per_dataset %>%
 
 saveRDS(eta_cor_per_dataset, file.path(out_dir, "eta_cor_per_dataset.rds"))
 saveRDS(eta_cor_summary,     file.path(out_dir, "eta_cor_summary.rds"))
-
-## Subset of valid datasets for downstream SSE/SCM analyses
-valid_datasets <- eta_cor_per_dataset %>%
-  dplyr::filter(pass_eta_cor) %>%
-  dplyr::select(SCENARIO, DATASET)
-
-sim_obs_valid <- sim_obs_all %>%
-  dplyr::semi_join(valid_datasets, by = c("SCENARIO", "DATASET"))
-
-saveRDS(sim_obs_valid, file.path(out_dir, "sim_obs_valid.rds"))
 ## Take-home message: ~58%-68% meet the condition of covCL_Vc0.15-0.25
 
 
 
 
-
+#Strategy2:  use the pre-sampled etas (with guaranteed correlation) and add residual error manually after solving the ODE with fixed etas (no random sampling). 
+# This is more complex but guarantees all datasets meet the eta correlation constraint.
 ## ============================================================================
 ## Rejection-sampled etas: guarantee 250 valid datasets per scenario
 ## ----------------------------------------------------------------------------
@@ -802,6 +728,80 @@ eta_cor_summary_v2 <- eta_cor_v2 %>%
 saveRDS(eta_cor_summary_v2, file.path(out_dir_v2, "eta_cor_summary_v2.rds"))
 
 
+
+## ============================================================================
+## True parameter table per scenario (for RMRSE)----------
+## ----------------------------------------------------------------------------
+##   RMRSE = sqrt(mean(((estimate - true) / true)^2)) per parameter, per scenario.
+##   Long format makes joining estimates (one row per parameter per fit) trivial.
+##
+##   Mapping (article name -> simulation symbol):
+##     CL      <- TVCL              Vc       <- TVVc
+##     Q       <- TVQ               Vp       <- TVVp
+##     KA      <- TVKA              ResErr   <- prop_err  (proportional SD)
+##     CLBW    <- TH_BW_CL  * I_BW_CL
+##     CLcrCL  <- TH_CRCL_CL * I_CRCL_CL
+##     VcBW    <- TH_BW_VC   * I_BW_VC
+##     VcSEX   <- TH_SEX_VC  * I_SEX_VC
+##     var_CL  <- omega(eta_cl, eta_cl) = 0.1
+##     var_Vc  <- omega(eta_vc, eta_vc) = 0.1
+##     cov_VcCL<- omega(eta_vc, eta_cl) = 0.02
+## ============================================================================
+out_dir <- "simulated_virtual_dataset"
+true_params_long <- function(scenarios = PsN_scenarios,
+                             theta = c(TVCL = 0.6, TVQ = 1.8, TVVc = 20,
+                                       TVVp = 80, TVKA = 0.7,
+                                       TH_BW_CL = 0.75, TH_CRCL_CL = 0.5,
+                                       TH_BW_VC = 1.0, TH_SEX_VC = 0.5),
+                             omega = c(var_cl = 0.1, var_vc = 0.1,
+                                       cov_cl_vc = 0.02),
+                             prop_err = 0.1) {
+  scenarios %>%
+    dplyr::rowwise() %>%
+    dplyr::mutate(
+      TVCL       = theta[["TVCL"]],
+      TVVc       = theta[["TVVc"]],
+      TVQ        = theta[["TVQ"]],
+      TVVp       = theta[["TVVp"]],
+      TVKA       = theta[["TVKA"]],
+      CLBW     = theta[["TH_BW_CL"]]   * I_BW_CL,
+      CLcrCL   = theta[["TH_CRCL_CL"]] * I_CRCL_CL,
+      VcBW     = theta[["TH_BW_VC"]]   * I_BW_VC,
+      VcSEX    = theta[["TH_SEX_VC"]]  * I_SEX_VC,
+      var_CL   = omega[["var_cl"]], #Variance
+      var_Vc   = omega[["var_vc"]], #variance
+      cov_VcCL = omega[["cov_cl_vc"]],#covariance
+      ResErr   = prop_err #standard deviation
+    ) %>%
+    dplyr::ungroup() %>%
+    tidyr::pivot_longer(
+      cols      = c(TVCL, TVVc, TVQ, TVVp, TVKA,
+                    CLBW, CLcrCL, VcBW, VcSEX,
+                    var_CL, var_Vc, cov_VcCL, ResErr),
+      names_to  = "parameter",
+      values_to = "true_value"
+    ) %>%
+    dplyr::select(scenario, parameter, true_value,
+                  I_BW_CL, I_CRCL_CL, I_BW_VC, I_SEX_VC)
+}
+
+true_params <- true_params_long()
+saveRDS(true_params, file.path(out_dir, "true_params_long.rds"))
+true_params <- readRDS(file.path(out_dir, "true_params_long.rds"))
+
+## Convenience wide table (one row per scenario, one column per parameter)
+true_params_wide <- true_params %>%
+  tidyr::pivot_wider(id_cols = scenario,
+                     names_from = parameter,
+                     values_from = true_value)
+
+
+
+## Use Scenario 9 [beta_WtCl=0.75]to test for nlmixr2 model refitting/runSCM
+## Test every feature of runscm(): forward selection, backwald elimination, user-specified covariate; full covariate building
+## work on a single dataset with 300 patients first, benchmark the runtime. 
+
+
 ## ============================================================================
 ## Convert to NONMEM-format dataset for nlmixr2 fitting / runSCM
 ## ----------------------------------------------------------------------------
@@ -842,6 +842,506 @@ to_nm_dataset <- function(sim_obs) {
     dplyr::arrange(SCENARIO, DATASET, ID, TIME, dplyr::desc(EVID))
 }
 
-## Example: NM-format dataset for scenario 1 only
-nm_scenario_01 <- to_nm_dataset(sim_obs_list$scenario_01)
-saveRDS(nm_scenario_01, file.path(out_dir, "nm_scenario_01.rds")) 
+
+## ############################################################################
+## STAGE 1 SMOKE TEST -- one dataset from scenario 9
+## ############################################################################
+##
+## Goal of this stage
+## ------------------
+## (1) Confirm the simulation output can be re-fitted with the *true* model.
+## (2) Quantify estimation bias / precision against `true_params` using relative squared error
+## (3) Exercise every feature of `nlmixr2scm::runSCM()`:
+##       a. forward selection only             searchType = "forward"
+##       b. backward elimination only          searchType = "backward"
+##       c. full SCM (forward then backward)   searchType = "scm"
+##       d. user-specified candidate pairs     pairsVec = ...
+##       e. full covariate building            (b) with all candidates pre-included
+## (4) Benchmark wall-clock runtime for every step so the 250-dataset / 16-
+##     scenario sweep can be sized.
+##
+## Why scenario 9
+## --------------
+## Scenario 9 = the simplest non-null scenario:
+##   I_BW_CL = 1, I_CRCL_CL = 0, I_BW_VC = 0, I_SEX_VC = 0
+## Only BW->CL has a true effect (TH_BW_CL = 0.75), so SCM should:
+##   - keep CLBW (true positive)
+##   - reject CLcrCL, VcBW, VcSEX (true negatives at the article p-values)
+##
+## Article parameters to recover (true_params)
+## -------------------------------------------
+##   Structural    : CL, Vc, Q, Vp, KA
+##   Covariate     : CLBW (only nonzero in scenario 9)
+##                   CLcrCL, VcBW, VcSEX (zero -> not estimated by base model)
+##   Random effects: var_CL, var_Vc, cov_VcCL
+##   Residual      : ResErr
+##
+## RMRSE
+## -----
+##   RMRSE_p = sqrt( mean_d ( ((est_p,d - true_p) / true_p)^2 ) )
+## With one dataset this collapses to relative error=|est - true| / |true|; we compute it as
+## a smoke test, then expand to 250 datasets in stage 2.
+## ############################################################################
+
+## ############################################################################
+## STAGE 1 SMOKE TEST -- one dataset from scenario 9
+## ############################################################################
+##
+## Analytical plan
+## ---------------
+## Part 1: Robustness of model refitting (true model)
+##   1.1 Load scenario 9, dataset 1.
+##   1.2 Convert to NONMEM-style dataset.
+##   1.3 Fit the *true* scenario-9 model (no covariates EXCEPT BW->CL).
+##   1.4 Extract parameter estimates, relative error vs `true_params`,
+##       convergence status, OFV, runtime.
+##
+## Part 2: runSCM feature tests (base model = no covariates)
+##   2.1 Fit base model (no covariates) -- this is the SCM starting point.
+##   2.2 SCM forward selection only
+##   2.3 SCM backward elimination only
+##   2.4 User-specified single covariate relationship (BW on CL)
+##   2.5 Full SCM (forward then backward)
+##   For each SCM run, capture:
+##       - final selected covariates
+##       - SCM step history (summaryTable)
+##       - final-model parameter estimates (with covariate coefficients)
+##       - runtime
+##
+## Why scenario 9
+## --------------
+## Scenario 9 = simplest non-null scenario:
+##   I_BW_CL = 1, I_CRCL_CL = 0, I_BW_VC = 0, I_SEX_VC = 0
+## Only BW->CL has a true effect (TH_BW_CL = 0.75), so SCM should:
+##   - keep CLBW (true positive)
+##   - reject CLcrCL, VcBW, VcSEX, plus BMI/RACE on CL and Vc (true negatives)
+##
+## Article parameters (true_params, scenario 9)
+## --------------------------------------------
+##   Structural    : CL = 0.6, Vc = 20, Q = 1.8, Vp = 80, KA = 0.7
+##   Covariate     : CLBW = 0.75   (only nonzero in scenario 9)
+##                   CLcrCL = VcBW = VcSEX = 0
+##   Random effects: var_CL = 0.1, var_Vc = 0.1, cov_VcCL = 0.02
+##   Residual      : ResErr = 0.1
+##
+## Relative error per parameter (one dataset)
+##   rel_err_p = (estimate_p - true_p) / true_p
+## (The full RMRSE definition collapses to this when N_dataset = 1.)
+## ############################################################################
+
+library(nlmixr2scm)
+
+stage1_dir <- file.path(out_dir_v2 , "stage1_smoke_scn09_ds01")
+if (!dir.exists(stage1_dir)) dir.create(stage1_dir, recursive = TRUE)
+
+
+## ============================================================================
+## Part 1: Robustness of model refitting -- TRUE scenario-9 model
+## ============================================================================
+
+## ---- 1.1 / 1.2  Build NM-format dataset for SCENARIO = 9, DATASET = 1 ----
+out_dir_v2 <- "simulated_virtual_dataset_eta_filtered"
+DOSE_MG <- 100
+
+TVCL <- 0.6;  TVQ <- 1.8;  TVVc <- 20;  TVVp <- 80
+k10_typ <- TVCL / TVVc
+k12_typ <- TVQ  / TVVc
+k21_typ <- TVQ  / TVVp
+sum_k    <- k10_typ + k12_typ + k21_typ
+beta_typ <- 0.5 * (sum_k - sqrt(sum_k^2 - 4 * k10_typ * k21_typ))
+t_half_typ <- log(2) / beta_typ
+cat(sprintf("Typical terminal half-life: %.2f h\n", t_half_typ)) #Typical terminal half-life: 141.29 h
+
+hl_mult      <- c(0, 0.05, 0.1, 0.5, 1, 3)
+sample_times <- hl_mult * t_half_typ
+
+
+sim_obs_scn09 <- readRDS(file.path(out_dir_v2, "sim_obs_scenario_09.rds"))
+
+ds01 <- to_nm_dataset(sim_obs_scn09) %>%
+  dplyr::filter(DATASET == 1) %>%
+  dplyr::select(-SCENARIO, -DATASET) %>%
+  dplyr::mutate(
+    ID   = as.integer(ID),
+    SEX  = as.integer(SEX),
+    RACE = as.integer(RACE)
+  )
+
+stopifnot(
+  dplyr::n_distinct(ds01$ID) == 300,
+  sum(ds01$EVID == 1) == 300,
+  sum(ds01$EVID == 0) == 300 * length(sample_times)
+)
+saveRDS(ds01, file.path(stage1_dir, "nm_scn09_ds01.rds"))
+
+
+## ---- 1.3  TRUE model: BW on CL covariate baked in -----------------------
+##   Same structure as scm_2cmt_oral_rx() with the scenario-9 indicators
+##   hard-wired. Used to re-estimate parameters and assess bias.
+##   - BW reference value: 70 kg (matches simulation)
+##   - Covariate term:  (BW / 70) ^ TH_BW_CL  with TH_BW_CL estimated.
+##   - Fixed effects on log scale; covariate coefficient on natural scale.
+true_2cmt_scn09 <- function() {
+  ini({
+    lTVCL    <- log(0.6)
+    lTVQ     <- log(1.8)
+    lTVVc    <- log(20)
+    lTVVp    <- log(80)
+    lTVKA    <- log(0.7)
+    TH_BW_CL <- 0.75    # power exponent for BW on CL
+
+    eta.cl + eta.vc ~ c(
+      0.1,
+      0.02,
+      0.1
+    )
+
+    prop.err <- 0.1
+  })
+  model({
+    cl_typ <- exp(lTVCL) * (BW / 70)^TH_BW_CL
+    cl     <- cl_typ * exp(eta.cl)
+    vc     <- exp(lTVVc + eta.vc)
+    q      <- exp(lTVQ)
+    vp     <- exp(lTVVp)
+    ka     <- exp(lTVKA)
+
+    k10 <- cl / vc
+    k12 <- q  / vc
+    k21 <- q  / vp
+
+    d/dt(depot)      = -ka * depot
+    d/dt(central)    =  ka * depot - k10 * central - k12 * central + k21 * peripheral
+    d/dt(peripheral) =  k12 * central - k21 * peripheral
+
+    cp = central / vc
+    cp ~ prop(prop.err)
+  })
+}
+
+
+## ---- 1.4  Fit true model + extract estimates / relative error -----------
+t_fit_true <- system.time({
+  fit_true <- nlmixr2::nlmixr2(
+    true_2cmt_scn09,
+    ds01,
+    est = "focei",
+    control = nlmixr2est::foceiControl(print = 0, calcTables = TRUE)
+  )
+})
+saveRDS(fit_true, file.path(stage1_dir, "fit_true_scn09_ds01.rds"))
+
+## Convergence diagnostics
+diagnose_fit <- function(fit) {
+  list(
+    converged = !is.null(fit$objf) && is.finite(fit$objf),
+    objf      = if (!is.null(fit$objf)) fit$objf else NA_real_,
+    cond_num  = if (!is.null(fit$conditionNumber)) fit$conditionNumber else NA_real_,
+    cov_ok    = isTRUE(!is.null(fit$cov) && all(is.finite(diag(fit$cov))))
+  )
+}
+diag_true <- diagnose_fit(fit_true)
+
+## Map fit$theta + fit$omega -> article parameter names
+extract_params_long <- function(fit, includeCov = TRUE) {
+  theta <- fit$theta
+  om    <- fit$omega
+
+  fe_long <- tibble::tibble(
+    parameter = c("CL", "Vc", "Q", "Vp", "KA"),
+    src_name  = c("lTVCL", "lTVVc", "lTVQ", "lTVVp", "lTVKA")
+  ) %>%
+    dplyr::mutate(estimate = exp(unname(theta[src_name]))) %>%
+    dplyr::select(parameter, estimate)
+
+  rand_long <- tibble::tibble(
+    parameter = c("var_CL", "var_Vc", "cov_VcCL"),
+    estimate  = c(om["eta.cl", "eta.cl"],
+                  om["eta.vc", "eta.vc"],
+                  om["eta.vc", "eta.cl"])
+  )
+
+  res_long <- tibble::tibble(
+    parameter = "ResErr",
+    estimate  = unname(theta["prop.err"])
+  )
+
+  ## Covariate effects: read from fit$theta if present, else NA
+  cov_names_in_fit <- names(theta)
+  cov_map <- list(
+    CLBW   = c("TH_BW_CL", grep("^cov_(bw|wt)_power_cl$",   cov_names_in_fit, value = TRUE)),
+    CLcrCL = c("TH_CRCL_CL", grep("^cov_crcl_power_cl$",    cov_names_in_fit, value = TRUE)),
+    VcBW   = c("TH_BW_VC", grep("^cov_(bw|wt)_power_vc$",   cov_names_in_fit, value = TRUE)),
+    VcSEX  = c("TH_SEX_VC", grep("^cov_sex(_male)?_cat_vc$", cov_names_in_fit, value = TRUE))
+  )
+  cov_long <- tibble::tibble(
+    parameter = names(cov_map),
+    estimate  = vapply(cov_map, function(nms) {
+      hit <- intersect(nms, cov_names_in_fit)
+      if (length(hit) == 1L) unname(theta[hit]) else NA_real_
+    }, numeric(1))
+  )
+
+  out <- dplyr::bind_rows(fe_long, rand_long, res_long, cov_long)
+  if (!includeCov) out <- dplyr::filter(out, !parameter %in% names(cov_map))
+  out
+}
+
+est_true <- extract_params_long(fit_true)
+
+## Relative error per parameter (one dataset)
+rel_err_one <- function(est_long, true_long, scenario_id) {
+  true_long %>%
+    dplyr::filter(scenario == scenario_id) %>%
+    dplyr::select(parameter, true_value) %>%
+    dplyr::full_join(est_long, by = "parameter") %>%
+    dplyr::mutate(
+      abs_err  = estimate - true_value,
+      rel_err  = ifelse(is.na(estimate) | is.na(true_value) |
+                          true_value == 0, NA_real_,
+                        (estimate - true_value) / true_value),
+      rel_err_pct = rel_err * 100
+    )
+}
+
+err_true <- rel_err_one(est_true, true_params, scenario_id = 9)
+saveRDS(err_true, file.path(stage1_dir, "rel_err_true_scn09_ds01.rds"))
+
+part1_summary <- tibble::tibble(
+  step           = "true_model_fit",
+  scenario       = 9,
+  dataset        = 1,
+  converged      = diag_true$converged,
+  objf           = diag_true$objf,
+  cov_step_ok    = diag_true$cov_ok,
+  cond_num       = diag_true$cond_num,
+  runtime_sec    = unname(t_fit_true["elapsed"])
+)
+saveRDS(part1_summary, file.path(stage1_dir, "part1_summary.rds"))
+
+
+## ============================================================================
+## Part 2: runSCM feature tests -- BASE (no-covariate) model as starting point
+## ============================================================================
+
+## ---- 2.1  Base model (no covariates) ------------------------------------
+base_2cmt_oral <- function() {
+  ini({
+    lTVCL <- log(0.6)
+    lTVQ  <- log(1.8)
+    lTVVc <- log(20)
+    lTVVp <- log(80)
+    lTVKA <- log(0.7)
+
+    eta.cl + eta.vc ~ c(
+      0.1,
+      0.02,
+      0.1
+    )
+
+    prop.err <- 0.1
+  })
+  model({
+    cl <- exp(lTVCL + eta.cl)
+    vc <- exp(lTVVc + eta.vc)
+    q  <- exp(lTVQ)
+    vp <- exp(lTVVp)
+    ka <- exp(lTVKA)
+
+    k10 <- cl / vc
+    k12 <- q  / vc
+    k21 <- q  / vp
+
+    d/dt(depot)      = -ka * depot
+    d/dt(central)    =  ka * depot - k10 * central - k12 * central + k21 * peripheral
+    d/dt(peripheral) =  k12 * central - k21 * peripheral
+
+    cp = central / vc
+    cp ~ prop(prop.err)
+  })
+}
+
+t_fit_base <- system.time({
+  fit_base <- nlmixr2::nlmixr2(
+    base_2cmt_oral,
+    ds01,
+    est = "focei",
+    control = nlmixr2est::foceiControl(print = 0, calcTables = TRUE)
+  )
+})
+saveRDS(fit_base, file.path(stage1_dir, "fit_base_scn09_ds01.rds"))
+
+
+## ---- Helper: package one runSCM result for downstream comparison --------
+##   Returns:
+##     - selected:    accepted (var, covar, shape) pairs
+##     - step_hist:   full SCM step history (forward + backward summary)
+##     - final_est:   extract_params_long() of the final model
+##     - rel_err:     relative error vs true scenario-9 parameters
+##     - runtime_sec: wall-clock seconds for the runSCM call
+##     - diag:        convergence diagnostics for the final fit
+package_scm_result <- function(label, scm_res, runtime_sec,
+                               true_long = true_params, scenario_id = 9) {
+  ## Pick the final fit (backward if available, else forward, else base)
+  final_fit <-
+    if (!is.null(scm_res$resBck) && !is.null(scm_res$resBck$finalFit)) {
+      scm_res$resBck$finalFit
+    } else if (!is.null(scm_res$resFwd) && !is.null(scm_res$resFwd$finalFit)) {
+      scm_res$resFwd$finalFit
+    } else {
+      NULL
+    }
+
+  ## Selected pairs from summaryTable (rows where the relation is in final model)
+  selected <- if (!is.null(scm_res$summaryTable)) {
+    st <- as.data.frame(scm_res$summaryTable)
+    keep_col <- intersect(c("inFinal", "accepted", "kept"), colnames(st))
+    if (length(keep_col) >= 1L) st[as.logical(st[[keep_col[1]]]), , drop = FALSE]
+    else st
+  } else {
+    NULL
+  }
+
+  final_est <- if (!is.null(final_fit)) extract_params_long(final_fit) else NULL
+  rel_err   <- if (!is.null(final_est)) {
+    rel_err_one(final_est, true_long, scenario_id)
+  } else NULL
+  diag      <- if (!is.null(final_fit)) diagnose_fit(final_fit) else NULL
+
+  list(
+    label        = label,
+    selected     = selected,
+    step_hist    = scm_res$summaryTable,
+    final_est    = final_est,
+    rel_err      = rel_err,
+    diag         = diag,
+    runtime_sec  = runtime_sec,
+    raw          = scm_res
+  )
+}
+
+
+## ---- Candidate covariate-parameter pairs --------------------------------
+candidate_pairs_full <- list(
+  list(var = "cl", covar = "BW",   shapes = "power"),
+  list(var = "cl", covar = "CrCL", shapes = "power"),
+  list(var = "cl", covar = "BMI",  shapes = "power"),
+  list(var = "cl", covar = "RACE", shapes = "cat"),
+  list(var = "cl", covar = "SEX",  shapes = "cat"),
+  list(var = "vc", covar = "BW",   shapes = "power"),
+  list(var = "vc", covar = "CrCL", shapes = "power"),
+  list(var = "vc", covar = "BMI",  shapes = "power"),
+  list(var = "vc", covar = "RACE", shapes = "cat"),
+  list(var = "vc", covar = "SEX",  shapes = "cat")
+)
+
+
+## ---- 2.2  Forward selection only ----------------------------------------
+t_fwd <- system.time({
+  res_fwd <- nlmixr2scm::runSCM(
+    fit         = fit_base,
+    pairsVec    = candidate_pairs_full,
+    catvarsVec  = c("SEX", "RACE"),
+    searchType  = "forward",
+    saveModels  = FALSE,
+    workers     = 1L,
+    print       = 0
+  )
+})
+test_fwd <- package_scm_result("forward_only", res_fwd,
+                               unname(t_fwd["elapsed"]))
+
+
+## ---- 2.3  Backward elimination only -------------------------------------
+##   Start with all 10 candidate relations included, then prune.
+t_bck <- system.time({
+  res_bck <- nlmixr2scm::runSCM(
+    fit                = fit_base,
+    pairsVec           = candidate_pairs_full,
+    catvarsVec         = c("SEX", "RACE"),
+    searchType         = "backward",
+    includedRelations  = candidate_pairs_full,
+    saveModels         = FALSE,
+    workers            = 1L,
+    print              = 0
+  )
+})
+test_bck <- package_scm_result("backward_only", res_bck,
+                               unname(t_bck["elapsed"]))
+
+
+## ---- 2.4  User-specified single covariate relationship (BW on CL) -------
+t_user <- system.time({
+  res_user <- nlmixr2scm::runSCM(
+    fit         = fit_base,
+    pairsVec    = list(list(var = "cl", covar = "BW", shapes = "power")),
+    searchType  = "scm",
+    saveModels  = FALSE,
+    workers     = 1L,
+    print       = 0
+  )
+})
+test_user <- package_scm_result("user_specified_BWonCL", res_user,
+                                unname(t_user["elapsed"]))
+
+
+## ---- 2.5  Full SCM (forward then backward) ------------------------------
+t_full <- system.time({
+  res_full <- nlmixr2scm::runSCM(
+    fit         = fit_base,
+    pairsVec    = candidate_pairs_full,
+    catvarsVec  = c("SEX", "RACE"),
+    searchType  = "scm",
+    saveModels  = FALSE,
+    workers     = 1L,
+    print       = 0
+  )
+})
+test_full <- package_scm_result("full_scm", res_full,
+                                unname(t_full["elapsed"]))
+
+
+## ---- Aggregate Part 2 results -------------------------------------------
+scm_tests <- list(
+  forward_only          = test_fwd,
+  backward_only         = test_bck,
+  user_specified_BWonCL = test_user,
+  full_scm              = test_full
+)
+saveRDS(scm_tests, file.path(stage1_dir, "scm_tests.rds"))
+
+## Per-test summary tibble
+part2_summary <- purrr::map_dfr(scm_tests, function(x) {
+  tibble::tibble(
+    test           = x$label,
+    n_selected     = if (is.null(x$selected)) NA_integer_ else nrow(x$selected),
+    converged      = if (is.null(x$diag)) NA else x$diag$converged,
+    objf           = if (is.null(x$diag)) NA_real_ else x$diag$objf,
+    cov_step_ok    = if (is.null(x$diag)) NA else x$diag$cov_ok,
+    cond_num       = if (is.null(x$diag)) NA_real_ else x$diag$cond_num,
+    runtime_sec    = x$runtime_sec
+  )
+})
+saveRDS(part2_summary, file.path(stage1_dir, "part2_summary.rds"))
+
+
+## ============================================================================
+## Stage-1 reporting
+## ============================================================================
+overall_runtime <- dplyr::bind_rows(
+  tibble::tibble(step = "fit_true_model", runtime_sec = unname(t_fit_true["elapsed"])),
+  tibble::tibble(step = "fit_base_model", runtime_sec = unname(t_fit_base["elapsed"])),
+  part2_summary %>% dplyr::transmute(step = paste0("scm_", test), runtime_sec)
+) %>%
+  dplyr::mutate(
+    minutes        = runtime_sec / 60,
+    proj_250_min   = minutes * 250,             # one scenario, all datasets
+    proj_4000_hr   = minutes * 250 * 16 / 60    # all 16 scenarios x 250 datasets
+  )
+saveRDS(overall_runtime, file.path(stage1_dir, "overall_runtime.rds"))
+
+cat("\n========== STAGE 1 SMOKE TEST -- summary ==========\n\n")
+cat("Part 1 (true-model robustness):\n"); print(part1_summary)
+cat("\nPart 1 relative error per parameter:\n"); print(err_true)
+cat("\nPart 2 (runSCM feature tests):\n"); print(part2_summary)
+cat("\nOverall runtime + projections:\n"); print(overall_runtime)
