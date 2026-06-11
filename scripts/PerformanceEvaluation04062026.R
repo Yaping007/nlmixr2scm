@@ -2,11 +2,10 @@
 #options(repos = c(CRAN = "https://cran.rstudio.com"))
 #options(download.file.method = "wininet")
 #install.packages("remotes")
-
 #remotes::install_github("kestrel99/nlmixr2utils")
 #remotes::install_github("kestrel99/nlmixr2scm")
-
 ##updated all R packages. 
+
 
 ##1. Run test suites first for nlmixr2scm
 ## NOTE: ~/.Rprofile sets options(rxode2.cache.dir = ...);
@@ -1127,6 +1126,17 @@ true_2cmt_scn09_lin <- function() {
     cp ~ prop(prop.err)
   })
 }
+
+
+t_fit_lin09 <- system.time({
+  fit_lin09 <- nlmixr2(
+    true_2cmt_scn09_lin,
+    ds01,
+    est = "focei",
+    control = nlmixr2est::foceiControl(print = 0, calcTables = TRUE)
+  )
+})
+saveRDS(fit_base, file.path(stage1_dir, "fit_base_scn09_ds01.rds"))
 
 
 ## ---- 1.4  Fit BOTH parameterisations + extract estimates / relative error
