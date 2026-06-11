@@ -1,13 +1,39 @@
+##Install remote & install nlmixr2utils and nlmixr2scm from GitHub
+#options(repos = c(CRAN = "https://cran.rstudio.com"))
+#options(download.file.method = "wininet")
+#install.packages("remotes")
+
+#remotes::install_github("kestrel99/nlmixr2utils")
+#remotes::install_github("kestrel99/nlmixr2scm")
+
+##updated all R packages. 
+
+##1. Run test suites first for nlmixr2scm
+## NOTE: ~/.Rprofile sets options(rxode2.cache.dir = ...);
+##       ~/.Renviron sets TMPDIR (must be in .Renviron, not .Rprofile,
+##       because R locks tempdir() at start-up).
+##       Open them manually only if you need to inspect / edit:
+# usethis::edit_r_profile(scope = "user")
+# file.edit("C:/Users/LIUYA8J/.Renviron")
+
+library(testthat)
+library(nlmixr2scm)
+library(nlmixr2utils)
+#testthat::test_file("tests/testthat/test-scm.R") #Pass228, warning from nlmixrest[near-singular cov on toy fixture]
+#testthat::test_file("tests/testthat/test-parsing.R")#pass29, after fixing the function calling issue
+
+
+## Run once per R session, before any nlmixr2() fit on Windows
+rxode2::rxClean()                       # drop stale compiled DLLs
+rxode2::setRxThreads(1L)                # rxode2 inner solver: 1 thread
+data.table::setDTthreads(1L)            # data.table: 1 thread
+Sys.setenv(OMP_NUM_THREADS = "1")       # any other OpenMP code: 1 thread
 library(nlmixr2)
 library(rxode2)
 library(tidyverse)
 library(devtools)
 library(nhanesA)
 library(haven)
-
-#options(download.file.method = "wininet")
-#options(repos = c(CRAN = "https://cloud.r-project.org"))
-#install.packages("nhanesA")
 
 #BenchMark Article Journal of Pharmacokinetics and Pharmacodynamics (2019) 46:273–285
 ## rxode popPK model scenarios-------
@@ -508,7 +534,7 @@ saveRDS(eta_cor_summary,     file.path(out_dir, "eta_cor_summary.rds"))
 
 
 
-#Strategy2:  use the pre-sampled etas (with guaranteed correlation) and add residual error manually after solving the ODE with fixed etas (no random sampling). 
+#Strategy2:  use the pre-sampled etas (with guaranteed correlation) and add residual error manually after solving the ODE with fixed etas (no random sampling)----------
 # This is more complex but guarantees all datasets meet the eta correlation constraint.
 ## ============================================================================
 ## Rejection-sampled etas: guarantee 250 valid datasets per scenario
@@ -748,6 +774,14 @@ saveRDS(eta_cor_summary_v2, file.path(out_dir_v2, "eta_cor_summary_v2.rds"))
 ##     cov_VcCL<- omega(eta_vc, eta_cl) = 0.02
 ## ============================================================================
 out_dir <- "simulated_virtual_dataset"
+PsN_scenarios <- data.frame(
+  scenario = 1:16,
+  I_BW_CL = c(0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1),
+  I_CRCL_CL = c(0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1),
+  I_BW_VC = c(0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1),
+  I_SEX_VC = c(0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1)
+)
+
 true_params_long <- function(scenarios = PsN_scenarios,
                              theta = c(TVCL = 0.6, TVQ = 1.8, TVVc = 20,
                                        TVVp = 80, TVKA = 0.7,
@@ -787,8 +821,9 @@ true_params_long <- function(scenarios = PsN_scenarios,
 
 true_params <- true_params_long()
 saveRDS(true_params, file.path(out_dir, "true_params_long.rds"))
-true_params <- readRDS(file.path(out_dir, "true_params_long.rds"))
 
+
+true_params <- readRDS(file.path(out_dir, "true_params_long.rds"))
 ## Convenience wide table (one row per scenario, one column per parameter)
 true_params_wide <- true_params %>%
   tidyr::pivot_wider(id_cols = scenario,
@@ -803,7 +838,7 @@ true_params_wide <- true_params %>%
 
 
 ## ============================================================================
-## Convert to NONMEM-format dataset for nlmixr2 fitting / runSCM
+## Convert to NONMEM-format dataset for nlmixr2 fitting / runSCM-------
 ## ----------------------------------------------------------------------------
 ##   For each (SCENARIO, DATASET, SUBJECT) we create:
 ##     - one EVID = 1 dose row at TIME = 0 with AMT = DOSE_MG, CMT = "depot"
@@ -844,7 +879,7 @@ to_nm_dataset <- function(sim_obs) {
 
 
 ## ############################################################################
-## STAGE 1 SMOKE TEST -- one dataset from scenario 9
+## STAGE 1 SMOKE TEST -- one dataset from scenario 9------------
 ## ############################################################################
 ##
 ## Goal of this stage
@@ -929,18 +964,38 @@ to_nm_dataset <- function(sim_obs) {
 ## (The full RMRSE definition collapses to this when N_dataset = 1.)
 ## ############################################################################
 
-library(nlmixr2scm)
-
-stage1_dir <- file.path(out_dir_v2 , "stage1_smoke_scn09_ds01")
-if (!dir.exists(stage1_dir)) dir.create(stage1_dir, recursive = TRUE)
-
-
 ## ============================================================================
 ## Part 1: Robustness of model refitting -- TRUE scenario-9 model
 ## ============================================================================
 
+## ---- 1.0  Defensive run-time setup (Windows + OneDrive + nlmixr2 FOCEi) ----
+##   FOCEi crashes on Windows are usually one of:
+##     (a) BLAS/OpenMP thread storms (multi-threaded inner-Hessian on Windows)
+##     (b) stale rxode2 anonymous DLLs left in this R process
+##     (c) tempdir / cache pointing into OneDrive (locks, sync, special chars)
+##   The .Renviron + .Rprofile already pin tempdir + rxode2.cache.dir to
+##   %LOCALAPPDATA%, which addresses (c). We address (a) and (b) here.
+suppressPackageStartupMessages({
+  invisible(rxode2::rxClean())                  # drop any stale anonymous DLLs
+})
+rxode2::setRxThreads(1L)                        # nlmixr2 FOCEi inner solver
+data.table::setDTthreads(1L)                    # data.table reductions
+Sys.setenv(OMP_NUM_THREADS = "1")               # OpenMP for any BLAS that uses it
+options(nlmixr2.useColor = FALSE)               # cleaner logs in Positron
+
+cat(sprintf(
+  "[stage1] tempdir=%s | rxode2.cache.dir=%s | rxThreads=%d | dtThreads=%d\n",
+  tempdir(),
+  getOption("rxode2.cache.dir", "<unset>"),
+  rxode2::getRxThreads(),
+  data.table::getDTthreads()
+))
+
 ## ---- 1.1 / 1.2  Build NM-format dataset for SCENARIO = 9, DATASET = 1 ----
 out_dir_v2 <- "simulated_virtual_dataset_eta_filtered"
+stage1_dir <- file.path(out_dir_v2, "stage1_smoke_scn09_ds01")
+if (!dir.exists(stage1_dir)) dir.create(stage1_dir, recursive = TRUE)
+
 DOSE_MG <- 100
 
 TVCL <- 0.6;  TVQ <- 1.8;  TVVc <- 20;  TVVp <- 80
@@ -972,8 +1027,12 @@ stopifnot(
   sum(ds01$EVID == 1) == 300,
   sum(ds01$EVID == 0) == 300 * length(sample_times)
 )
+
 saveRDS(ds01, file.path(stage1_dir, "nm_scn09_ds01.rds"))
 
+out_dir_v2 <- "simulated_virtual_dataset_eta_filtered"
+stage1_dir <- file.path(out_dir_v2, "stage1_smoke_scn09_ds01")
+ds01 <- readRDS(file.path(stage1_dir, "nm_scn09_ds01.rds"))
 
 ## ---- 1.3  TRUE model: BW on CL covariate baked in -----------------------
 ##   Same structure as scm_2cmt_oral_rx() with the scenario-9 indicators
@@ -981,7 +1040,7 @@ saveRDS(ds01, file.path(stage1_dir, "nm_scn09_ds01.rds"))
 ##   - BW reference value: 70 kg (matches simulation)
 ##   - Covariate term:  (BW / 70) ^ TH_BW_CL  with TH_BW_CL estimated.
 ##   - Fixed effects on log scale; covariate coefficient on natural scale.
-true_2cmt_scn09 <- function() {
+true_2cmt_scn09_refexp <- function() {
   ini({
     lTVCL    <- log(0.6)
     lTVQ     <- log(1.8)
@@ -999,7 +1058,7 @@ true_2cmt_scn09 <- function() {
     prop.err <- 0.1
   })
   model({
-    cl_typ <- exp(lTVCL) * (BW / 70)^TH_BW_CL
+    cl_typ <- exp(lTVCL) * (BW / 70)^TH_BW_CL  
     cl     <- cl_typ * exp(eta.cl)
     vc     <- exp(lTVVc + eta.vc)
     q      <- exp(lTVQ)
@@ -1020,15 +1079,138 @@ true_2cmt_scn09 <- function() {
 }
 
 
-## ---- 1.4  Fit true model + extract estimates / relative error -----------
-t_fit_true <- system.time({
-  fit_true <- nlmixr2::nlmixr2(
-    true_2cmt_scn09,
-    ds01,
-    est = "focei",
-    control = nlmixr2est::foceiControl(print = 0, calcTables = TRUE)
+## ---- 1.3 (b)  TRUE model -- LINEAR-ON-LOG-SCALE parameterisation --------
+##   Algebraically identical to true_2cmt_scn09_refexp:
+##     refexp:  cl_typ = exp(lTVCL) * (BW/70)^TH_BW_CL ;  cl = cl_typ*exp(eta.cl)
+##     lin   :  lTVCL_typ = lTVCL + TH_BW_CL*log(BW/70) ; cl = exp(lTVCL_typ + eta.cl)
+##   Both expand to  exp( lTVCL + TH_BW_CL*log(BW/70) + eta.cl ).
+##   The `lin` form is the more idiomatic nlmixr2 parameterisation: FOCEI
+##   gradients are computed directly on log-scale, which is usually more
+##   numerically stable.  Fitting BOTH provides a sanity check on the
+##   simulation-then-estimation loop -- estimates should match to within
+##   numerical tolerance.  Disagreement flags a FOCEI-stability issue
+##   in one of the parameterisations.
+true_2cmt_scn09_lin <- function() {
+  ini({
+    lTVCL    <- log(0.6)
+    lTVQ     <- log(1.8)
+    lTVVc    <- log(20)
+    lTVVp    <- log(80)
+    lTVKA    <- log(0.7)
+    TH_BW_CL <- 0.75    # log-scale slope of BW on CL (== power exponent)
+
+    eta.cl + eta.vc ~ c(
+      0.1,
+      0.02,
+      0.1
+    )
+
+    prop.err <- 0.1
+  })
+  model({
+    lTVCL_typ <- lTVCL + TH_BW_CL * log(BW / 70)   # linear on log scale
+    cl        <- exp(lTVCL_typ + eta.cl)
+    vc        <- exp(lTVVc + eta.vc)
+    q         <- exp(lTVQ)
+    vp        <- exp(lTVVp)
+    ka        <- exp(lTVKA)
+
+    k10 <- cl / vc
+    k12 <- q  / vc
+    k21 <- q  / vp
+
+    d/dt(depot)      = -ka * depot
+    d/dt(central)    =  ka * depot - k10 * central - k12 * central + k21 * peripheral
+    d/dt(peripheral) =  k12 * central - k21 * peripheral
+
+    cp = central / vc
+    cp ~ prop(prop.err)
+  })
+}
+
+
+## ---- 1.4  Fit BOTH parameterisations + extract estimates / relative error
+##   Strategy:
+##     0. ISOLATION SMOKE-FIT on 5 subjects (bounded iter, FOCEi)
+##        -- if R restarts here, the issue is environmental, not data-size.
+##     1. Fit refexp form (centre-then-power) on full ds01
+##     2. Fit lin    form (linear-on-log)    on full ds01  -- canonical
+##     3. Compare estimates side-by-side as a virtual-cohort sanity check
+##
+##   `fit_true` / `t_fit_true` are aliased to the LIN fit so the existing
+##   downstream code (overall_runtime, etc.) works unchanged.
+##
+##   Bounded foceiControl (maxOuter=200, maxInner=200) prevents a runaway
+##   numerical loop from masquerading as a "crash".
+
+stage1_focei <- nlmixr2est::foceiControl(
+  print              = 1,         # show iteration progress (helps diagnose hangs)
+  calcTables         = TRUE,
+  maxOuterIterations = 200,
+  maxInnerIterations = 200,
+  noAbort            = TRUE,
+  covMethod          = "r,s"
+)
+
+stage1_focei_fast <- nlmixr2est::foceiControl(
+  print              = 0,
+  calcTables         = FALSE,
+  maxOuterIterations = 50,
+  maxInnerIterations = 50,
+  noAbort            = TRUE,
+  covMethod          = ""
+)
+
+## ---- 1.4.0  Isolation smoke-fit on 5 subjects ---------------------------
+ds01_tiny <- ds01 %>% dplyr::filter(ID %in% sort(unique(ID))[1:5])
+cat(sprintf("[stage1] isolation smoke-fit: %d subj, %d rows\n",
+            dplyr::n_distinct(ds01_tiny$ID), nrow(ds01_tiny)))
+
+fit_smoke <- tryCatch(
+  nlmixr2(true_2cmt_scn09_lin, ds01_tiny,
+          est = "focei", control = stage1_focei_fast),
+  error = function(e) {
+    message("[stage1] SMOKE FIT ERROR: ", conditionMessage(e))
+    NULL
+  }
+)
+if (is.null(fit_smoke)) {
+  stop("[stage1] Isolation smoke-fit failed -- aborting before full fits. ",
+       "Check rxode2 cache, threading, and tempdir; do NOT proceed.")
+}
+cat(sprintf("[stage1] smoke-fit OK | objf = %.3f\n", fit_smoke$objf))
+
+## ---- 1.4.1  Full-data fits ----------------------------------------------
+fit_or_stop <- function(model, data, label, control = stage1_focei) {
+  cat(sprintf("[stage1] starting full FOCEi fit: %s\n", label))
+  t0  <- proc.time()
+  fit <- tryCatch(
+    nlmixr2(model, data, est = "focei", control = control),
+    error = function(e) {
+      message(sprintf("[stage1] FIT ERROR (%s): %s", label, conditionMessage(e)))
+      NULL
+    }
   )
-})
+  if (is.null(fit)) stop(sprintf("[stage1] '%s' failed -- aborting.", label))
+  attr(fit, "fit_time") <- proc.time() - t0
+  cat(sprintf("[stage1] %s done | objf = %.3f | %.1f s\n",
+              label, fit$objf, attr(fit, "fit_time")[["elapsed"]]))
+  fit
+}
+
+fit_true_refexp <- fit_or_stop(true_2cmt_scn09_refexp, ds01, "refexp")
+t_fit_true_refexp <- attr(fit_true_refexp, "fit_time")
+saveRDS(fit_true_refexp,
+        file.path(stage1_dir, "fit_true_scn09_ds01_refexp.rds"))
+
+fit_true_lin <- fit_or_stop(true_2cmt_scn09_lin, ds01, "lin")
+t_fit_true_lin <- attr(fit_true_lin, "fit_time")
+saveRDS(fit_true_lin,
+        file.path(stage1_dir, "fit_true_scn09_ds01_lin.rds"))
+
+## Backwards-compat aliases (canonical = lin form)
+fit_true   <- fit_true_lin
+t_fit_true <- t_fit_true_lin
 saveRDS(fit_true, file.path(stage1_dir, "fit_true_scn09_ds01.rds"))
 
 ## Convergence diagnostics
@@ -1040,7 +1222,9 @@ diagnose_fit <- function(fit) {
     cov_ok    = isTRUE(!is.null(fit$cov) && all(is.finite(diag(fit$cov))))
   )
 }
-diag_true <- diagnose_fit(fit_true)
+diag_true_refexp <- diagnose_fit(fit_true_refexp)
+diag_true_lin    <- diagnose_fit(fit_true_lin)
+diag_true        <- diag_true_lin   # alias (canonical = lin)
 
 ## Map fit$theta + fit$omega -> article parameter names
 extract_params_long <- function(fit, includeCov = TRUE) {
@@ -1087,7 +1271,9 @@ extract_params_long <- function(fit, includeCov = TRUE) {
   out
 }
 
-est_true <- extract_params_long(fit_true)
+est_true_refexp <- extract_params_long(fit_true_refexp)
+est_true_lin    <- extract_params_long(fit_true_lin)
+est_true        <- est_true_lin   # alias (canonical = lin)
 
 ## Relative error per parameter (one dataset)
 rel_err_one <- function(est_long, true_long, scenario_id) {
@@ -1104,18 +1290,59 @@ rel_err_one <- function(est_long, true_long, scenario_id) {
     )
 }
 
-err_true <- rel_err_one(est_true, true_params, scenario_id = 9)
+err_true_refexp <- rel_err_one(est_true_refexp, true_params, scenario_id = 9)
+err_true_lin    <- rel_err_one(est_true_lin,    true_params, scenario_id = 9)
+err_true        <- err_true_lin   # alias (canonical = lin)
+
+## Long-format side-by-side comparison
+err_true_compare <- dplyr::bind_rows(
+  err_true_refexp %>% dplyr::mutate(parameterisation = "refexp"),
+  err_true_lin    %>% dplyr::mutate(parameterisation = "lin")
+) %>%
+  dplyr::select(parameterisation, parameter, true_value,
+                estimate, abs_err, rel_err, rel_err_pct)
+
+## Wide view: estimate + rel_err_pct per parameter, side-by-side
+err_true_wide <- err_true_compare %>%
+  tidyr::pivot_wider(
+    id_cols     = c(parameter, true_value),
+    names_from  = parameterisation,
+    values_from = c(estimate, rel_err_pct),
+    names_glue  = "{.value}_{parameterisation}"
+  ) %>%
+  dplyr::mutate(
+    abs_diff_estimate     = abs(estimate_refexp - estimate_lin),
+    abs_diff_rel_err_pct  = abs(rel_err_pct_refexp - rel_err_pct_lin)
+  )
+
+saveRDS(err_true_refexp,
+        file.path(stage1_dir, "rel_err_true_scn09_ds01_refexp.rds"))
+saveRDS(err_true_lin,
+        file.path(stage1_dir, "rel_err_true_scn09_ds01_lin.rds"))
+saveRDS(err_true_compare,
+        file.path(stage1_dir, "rel_err_true_scn09_ds01_compare.rds"))
+saveRDS(err_true_wide,
+        file.path(stage1_dir, "rel_err_true_scn09_ds01_wide.rds"))
+## Keep the single-form file too (alias) so older downstream code still loads
 saveRDS(err_true, file.path(stage1_dir, "rel_err_true_scn09_ds01.rds"))
 
-part1_summary <- tibble::tibble(
-  step           = "true_model_fit",
-  scenario       = 9,
-  dataset        = 1,
-  converged      = diag_true$converged,
-  objf           = diag_true$objf,
-  cov_step_ok    = diag_true$cov_ok,
-  cond_num       = diag_true$cond_num,
-  runtime_sec    = unname(t_fit_true["elapsed"])
+## ---- Per-model summary tibble (one row per parameterisation) -----------
+.build_part1_row <- function(label, diag_x, t_x) {
+  tibble::tibble(
+    step             = "true_model_fit",
+    parameterisation = label,
+    scenario         = 9,
+    dataset          = 1,
+    converged        = diag_x$converged,
+    objf             = diag_x$objf,
+    cov_step_ok      = diag_x$cov_ok,
+    cond_num         = diag_x$cond_num,
+    runtime_sec      = unname(t_x["elapsed"])
+  )
+}
+part1_summary <- dplyr::bind_rows(
+  .build_part1_row("refexp", diag_true_refexp, t_fit_true_refexp),
+  .build_part1_row("lin",    diag_true_lin,    t_fit_true_lin)
 )
 saveRDS(part1_summary, file.path(stage1_dir, "part1_summary.rds"))
 
@@ -1329,8 +1556,12 @@ saveRDS(part2_summary, file.path(stage1_dir, "part2_summary.rds"))
 ## Stage-1 reporting
 ## ============================================================================
 overall_runtime <- dplyr::bind_rows(
-  tibble::tibble(step = "fit_true_model", runtime_sec = unname(t_fit_true["elapsed"])),
-  tibble::tibble(step = "fit_base_model", runtime_sec = unname(t_fit_base["elapsed"])),
+  tibble::tibble(step = "fit_true_model_refexp",
+                 runtime_sec = unname(t_fit_true_refexp["elapsed"])),
+  tibble::tibble(step = "fit_true_model_lin",
+                 runtime_sec = unname(t_fit_true_lin["elapsed"])),
+  tibble::tibble(step = "fit_base_model",
+                 runtime_sec = unname(t_fit_base["elapsed"])),
   part2_summary %>% dplyr::transmute(step = paste0("scm_", test), runtime_sec)
 ) %>%
   dplyr::mutate(
@@ -1341,7 +1572,11 @@ overall_runtime <- dplyr::bind_rows(
 saveRDS(overall_runtime, file.path(stage1_dir, "overall_runtime.rds"))
 
 cat("\n========== STAGE 1 SMOKE TEST -- summary ==========\n\n")
-cat("Part 1 (true-model robustness):\n"); print(part1_summary)
-cat("\nPart 1 relative error per parameter:\n"); print(err_true)
+cat("Part 1 (true-model robustness, refexp + lin parameterisations):\n")
+print(part1_summary)
+cat("\nPart 1 relative error per parameter (long, refexp vs lin):\n")
+print(err_true_compare)
+cat("\nPart 1 estimate side-by-side (wide):\n")
+print(err_true_wide)
 cat("\nPart 2 (runSCM feature tests):\n"); print(part2_summary)
 cat("\nOverall runtime + projections:\n"); print(overall_runtime)
