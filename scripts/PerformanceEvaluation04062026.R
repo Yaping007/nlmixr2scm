@@ -22,16 +22,16 @@ library(nlmixr2utils)
 #testthat::test_file("tests/testthat/test-parsing.R")#pass29, after fixing the function calling issue
 
 
-## Run once per R session, before any nlmixr2() fit on Windows
-rxode2::rxClean()                       # drop stale compiled DLLs
-rxode2::setRxThreads(1L)                # rxode2 inner solver: 1 thread
-data.table::setDTthreads(1L)            # data.table: 1 thread
-Sys.setenv(OMP_NUM_THREADS = "1")       # any other OpenMP code: 1 thread
+## Run once per R session, before any nlmixr2() fit
+##   With dev rxode2 (PR-1072) + nlmixr2est (PR-664) the cross-DLL OpenMP
+##   bug on Windows is fixed -- multi-threaded FOCEi is now safe. We just
+##   drop any stale compiled DLLs from prior runs and let the packages pick
+##   their own thread counts (rxode2 defaults to detectCores()).
+rxode2::rxClean()
 library(nlmixr2)
 library(rxode2)
 library(tidyverse)
 library(devtools)
-library(nhanesA)
 library(haven)
 
 #BenchMark Article Journal of Pharmacokinetics and Pharmacodynamics (2019) 46:273–285
@@ -817,7 +817,6 @@ true_params_long <- function(scenarios = PsN_scenarios,
     dplyr::select(scenario, parameter, true_value,
                   I_BW_CL, I_CRCL_CL, I_BW_VC, I_SEX_VC)
 }
-
 true_params <- true_params_long()
 saveRDS(true_params, file.path(out_dir, "true_params_long.rds"))
 
@@ -966,37 +965,12 @@ to_nm_dataset <- function(sim_obs) {
 ## ============================================================================
 ## Part 1: Robustness of model refitting -- TRUE scenario-9 model
 ## ============================================================================
-
-## ---- 1.0  Defensive run-time setup (Windows + OneDrive + nlmixr2 FOCEi) ----
-##   FOCEi crashes on Windows are usually one of:
-##     (a) BLAS/OpenMP thread storms (multi-threaded inner-Hessian on Windows)
-##     (b) stale rxode2 anonymous DLLs left in this R process
-##     (c) tempdir / cache pointing into OneDrive (locks, sync, special chars)
-##   The .Renviron + .Rprofile already pin tempdir + rxode2.cache.dir to
-##   %LOCALAPPDATA%, which addresses (c). We address (a) and (b) here.
-suppressPackageStartupMessages({
-  invisible(rxode2::rxClean())                  # drop any stale anonymous DLLs
-})
-rxode2::setRxThreads(1L)                        # nlmixr2 FOCEi inner solver
-data.table::setDTthreads(1L)                    # data.table reductions
-Sys.setenv(OMP_NUM_THREADS = "1")               # OpenMP for any BLAS that uses it
-options(nlmixr2.useColor = FALSE)               # cleaner logs in Positron
-
-cat(sprintf(
-  "[stage1] tempdir=%s | rxode2.cache.dir=%s | rxThreads=%d | dtThreads=%d\n",
-  tempdir(),
-  getOption("rxode2.cache.dir", "<unset>"),
-  rxode2::getRxThreads(),
-  data.table::getDTthreads()
-))
-
 ## ---- 1.1 / 1.2  Build NM-format dataset for SCENARIO = 9, DATASET = 1 ----
 out_dir_v2 <- "simulated_virtual_dataset_eta_filtered"
 stage1_dir <- file.path(out_dir_v2, "stage1_smoke_scn09_ds01")
 if (!dir.exists(stage1_dir)) dir.create(stage1_dir, recursive = TRUE)
 
 DOSE_MG <- 100
-
 TVCL <- 0.6;  TVQ <- 1.8;  TVVc <- 20;  TVVp <- 80
 k10_typ <- TVCL / TVVc
 k12_typ <- TVQ  / TVVc
@@ -1009,9 +983,7 @@ cat(sprintf("Typical terminal half-life: %.2f h\n", t_half_typ)) #Typical termin
 hl_mult      <- c(0, 0.05, 0.1, 0.5, 1, 3)
 sample_times <- hl_mult * t_half_typ
 
-
 sim_obs_scn09 <- readRDS(file.path(out_dir_v2, "sim_obs_scenario_09.rds"))
-
 ds01 <- to_nm_dataset(sim_obs_scn09) %>%
   dplyr::filter(DATASET == 1) %>%
   dplyr::select(-SCENARIO, -DATASET) %>%
@@ -1020,13 +992,11 @@ ds01 <- to_nm_dataset(sim_obs_scn09) %>%
     SEX  = as.integer(SEX),
     RACE = as.integer(RACE)
   )
-
 stopifnot(
   dplyr::n_distinct(ds01$ID) == 300,
   sum(ds01$EVID == 1) == 300,
   sum(ds01$EVID == 0) == 300 * length(sample_times)
 )
-
 saveRDS(ds01, file.path(stage1_dir, "nm_scn09_ds01.rds"))
 
 out_dir_v2 <- "simulated_virtual_dataset_eta_filtered"
@@ -1127,101 +1097,37 @@ true_2cmt_scn09_lin <- function() {
   })
 }
 
-
-t_fit_lin09 <- system.time({
-  fit_lin09 <- nlmixr2(
-    true_2cmt_scn09_lin,
-    ds01,
-    est = "focei",
-    control = nlmixr2est::foceiControl(print = 0, calcTables = TRUE)
-  )
-})
-saveRDS(fit_base, file.path(stage1_dir, "fit_base_scn09_ds01.rds"))
-
-
 ## ---- 1.4  Fit BOTH parameterisations + extract estimates / relative error
 ##   Strategy:
-##     0. ISOLATION SMOKE-FIT on 5 subjects (bounded iter, FOCEi)
-##        -- if R restarts here, the issue is environmental, not data-size.
 ##     1. Fit refexp form (centre-then-power) on full ds01
 ##     2. Fit lin    form (linear-on-log)    on full ds01  -- canonical
 ##     3. Compare estimates side-by-side as a virtual-cohort sanity check
 ##
 ##   `fit_true` / `t_fit_true` are aliased to the LIN fit so the existing
 ##   downstream code (overall_runtime, etc.) works unchanged.
-##
-##   Bounded foceiControl (maxOuter=200, maxInner=200) prevents a runaway
-##   numerical loop from masquerading as a "crash".
 
 stage1_focei <- nlmixr2est::foceiControl(
-  print              = 1,         # show iteration progress (helps diagnose hangs)
-  calcTables         = TRUE,
-  maxOuterIterations = 200,
-  maxInnerIterations = 200,
-  noAbort            = TRUE,
-  covMethod          = "r,s"
+  print      = 0,        # silent: per-iteration log is noisy in Positron
+  calcTables = TRUE,     # keep IPRED / CWRES / NPDE tables
+  covMethod  = "r,s",     # sandwich SEs (the article default)
+  sigdig     = 4,
+  foceiControl(outerOpt = "bobyqa")
 )
 
-stage1_focei_fast <- nlmixr2est::foceiControl(
-  print              = 0,
-  calcTables         = FALSE,
-  maxOuterIterations = 50,
-  maxInnerIterations = 50,
-  noAbort            = TRUE,
-  covMethod          = ""
+t_fit_true_refexp <- system.time(
+  fit_true_refexp <- nlmixr2(true_2cmt_scn09_refexp, ds01,
+                             est = "focei", control = stage1_focei)
 )
-
-## ---- 1.4.0  Isolation smoke-fit on 5 subjects ---------------------------
-ds01_tiny <- ds01 %>% dplyr::filter(ID %in% sort(unique(ID))[1:5])
-cat(sprintf("[stage1] isolation smoke-fit: %d subj, %d rows\n",
-            dplyr::n_distinct(ds01_tiny$ID), nrow(ds01_tiny)))
-
-fit_smoke <- tryCatch(
-  nlmixr2(true_2cmt_scn09_lin, ds01_tiny,
-          est = "focei", control = stage1_focei_fast),
-  error = function(e) {
-    message("[stage1] SMOKE FIT ERROR: ", conditionMessage(e))
-    NULL
-  }
-)
-if (is.null(fit_smoke)) {
-  stop("[stage1] Isolation smoke-fit failed -- aborting before full fits. ",
-       "Check rxode2 cache, threading, and tempdir; do NOT proceed.")
-}
-cat(sprintf("[stage1] smoke-fit OK | objf = %.3f\n", fit_smoke$objf))
-
-## ---- 1.4.1  Full-data fits ----------------------------------------------
-fit_or_stop <- function(model, data, label, control = stage1_focei) {
-  cat(sprintf("[stage1] starting full FOCEi fit: %s\n", label))
-  t0  <- proc.time()
-  fit <- tryCatch(
-    nlmixr2(model, data, est = "focei", control = control),
-    error = function(e) {
-      message(sprintf("[stage1] FIT ERROR (%s): %s", label, conditionMessage(e)))
-      NULL
-    }
-  )
-  if (is.null(fit)) stop(sprintf("[stage1] '%s' failed -- aborting.", label))
-  attr(fit, "fit_time") <- proc.time() - t0
-  cat(sprintf("[stage1] %s done | objf = %.3f | %.1f s\n",
-              label, fit$objf, attr(fit, "fit_time")[["elapsed"]]))
-  fit
-}
-
-fit_true_refexp <- fit_or_stop(true_2cmt_scn09_refexp, ds01, "refexp")
-t_fit_true_refexp <- attr(fit_true_refexp, "fit_time")
 saveRDS(fit_true_refexp,
         file.path(stage1_dir, "fit_true_scn09_ds01_refexp.rds"))
 
-fit_true_lin <- fit_or_stop(true_2cmt_scn09_lin, ds01, "lin")
-t_fit_true_lin <- attr(fit_true_lin, "fit_time")
+t_fit_true_lin <- system.time(
+  fit_true_lin <- nlmixr2(true_2cmt_scn09_lin, ds01,
+                          est = "focei", control = stage1_focei)
+)
 saveRDS(fit_true_lin,
         file.path(stage1_dir, "fit_true_scn09_ds01_lin.rds"))
 
-## Backwards-compat aliases (canonical = lin form)
-fit_true   <- fit_true_lin
-t_fit_true <- t_fit_true_lin
-saveRDS(fit_true, file.path(stage1_dir, "fit_true_scn09_ds01.rds"))
 
 ## Convergence diagnostics
 diagnose_fit <- function(fit) {
@@ -1232,9 +1138,104 @@ diagnose_fit <- function(fit) {
     cov_ok    = isTRUE(!is.null(fit$cov) && all(is.finite(diag(fit$cov))))
   )
 }
-diag_true_refexp <- diagnose_fit(fit_true_refexp)
-diag_true_lin    <- diagnose_fit(fit_true_lin)
-diag_true        <- diag_true_lin   # alias (canonical = lin)
+diag_true_refexp <- diagnose_fit(fit_true_refexp) #-16805
+diag_true_lin    <- diagnose_fit(fit_true_lin) #-16345- not global mininum
+
+## ---- Benchmark: parameterisation × foceiControl × n_reps -----------------
+##   Cross both parameterisations (refexp, lin) with three control settings
+##   to see whether the `sigdig = 3` convergence break is unique to `lin`
+##   or also bites `refexp`. 6 configs × 3 reps = 18 fits (~30 min total).
+
+benchmark_fit <- function(model, data, control,
+                          par_name, setting_name, n_reps = 3L) {
+  purrr::map_dfr(seq_len(n_reps), function(rep) {
+    rxode2::rxClean()                          # clean state per rep
+    t <- system.time(
+      fit <- tryCatch(
+        nlmixr2(model, data, est = "focei", control = control),
+        error = function(e) NULL
+      )
+    )
+    tibble::tibble(
+      par_name  = par_name,
+      setting   = setting_name,
+      label     = paste(par_name, setting_name, sep = "_"),
+      rep       = rep,
+      elapsed_s = unname(t["elapsed"]),
+      objf      = if (is.null(fit)) NA_real_ else fit$objf,
+      converged = !is.null(fit) && is.finite(fit$objf)
+    )
+  })
+}
+
+bench_models <- list(
+  refexp = true_2cmt_scn09_refexp,
+  lin    = true_2cmt_scn09_lin
+)
+
+bench_controls <- list(
+  sigdig3        = nlmixr2est::foceiControl(sigdig = 3, print = 0,
+                                            calcTables = FALSE),
+  sigdig4        = nlmixr2est::foceiControl(sigdig = 4, print = 0,
+                                            calcTables = FALSE),
+  sigdig4_bobyqa = nlmixr2est::foceiControl(sigdig = 4, outerOpt = "bobyqa",
+                                            print = 0, calcTables = FALSE)
+)
+
+bench_grid <- tidyr::expand_grid(
+  par_name     = names(bench_models),
+  setting_name = names(bench_controls)
+)
+
+t_bench <- system.time({
+  bench_results <- purrr::pmap_dfr(
+    bench_grid,
+    function(par_name, setting_name) {
+      benchmark_fit(
+        model        = bench_models[[par_name]],
+        data         = ds01,
+        control      = bench_controls[[setting_name]],
+        par_name     = par_name,
+        setting_name = setting_name
+      )
+    }
+  )
+})
+saveRDS(bench_results, file.path(stage1_dir, "bench_results.rds"))
+
+## Per-(parameterisation, setting) summary
+bench_summary <- bench_results |>
+  dplyr::group_by(par_name, setting) |>
+  dplyr::summarise(
+    n          = dplyr::n(),
+    mean_s     = mean(elapsed_s),
+    median_s   = median(elapsed_s),
+    sd_s       = stats::sd(elapsed_s),
+    objf_med   = median(objf),
+    n_converged = sum(converged),
+    .groups    = "drop"
+  ) |>
+  dplyr::arrange(par_name, setting)
+saveRDS(bench_summary, file.path(stage1_dir, "bench_summary.rds"))
+
+## Wide view: setting on rows, parameterisation on cols, for direct comparison
+bench_wide <- bench_summary |>
+  dplyr::select(par_name, setting, median_s, objf_med) |>
+  tidyr::pivot_wider(
+    id_cols     = setting,
+    names_from  = par_name,
+    values_from = c(median_s, objf_med),
+    names_glue  = "{par_name}_{.value}"
+  )
+
+
+
+
+
+
+
+
+
 
 ## Map fit$theta + fit$omega -> article parameter names
 extract_params_long <- function(fit, includeCov = TRUE) {
@@ -1283,7 +1284,8 @@ extract_params_long <- function(fit, includeCov = TRUE) {
 
 est_true_refexp <- extract_params_long(fit_true_refexp)
 est_true_lin    <- extract_params_long(fit_true_lin)
-est_true        <- est_true_lin   # alias (canonical = lin)
+
+
 
 ## Relative error per parameter (one dataset)
 rel_err_one <- function(est_long, true_long, scenario_id) {
@@ -1302,7 +1304,6 @@ rel_err_one <- function(est_long, true_long, scenario_id) {
 
 err_true_refexp <- rel_err_one(est_true_refexp, true_params, scenario_id = 9)
 err_true_lin    <- rel_err_one(est_true_lin,    true_params, scenario_id = 9)
-err_true        <- err_true_lin   # alias (canonical = lin)
 
 ## Long-format side-by-side comparison
 err_true_compare <- dplyr::bind_rows(
@@ -1333,8 +1334,6 @@ saveRDS(err_true_compare,
         file.path(stage1_dir, "rel_err_true_scn09_ds01_compare.rds"))
 saveRDS(err_true_wide,
         file.path(stage1_dir, "rel_err_true_scn09_ds01_wide.rds"))
-## Keep the single-form file too (alias) so older downstream code still loads
-saveRDS(err_true, file.path(stage1_dir, "rel_err_true_scn09_ds01.rds"))
 
 ## ---- Per-model summary tibble (one row per parameterisation) -----------
 .build_part1_row <- function(label, diag_x, t_x) {
@@ -1398,14 +1397,10 @@ base_2cmt_oral <- function() {
   })
 }
 
-t_fit_base <- system.time({
-  fit_base <- nlmixr2::nlmixr2(
-    base_2cmt_oral,
-    ds01,
-    est = "focei",
-    control = nlmixr2est::foceiControl(print = 0, calcTables = TRUE)
-  )
-})
+t_fit_base <- system.time(
+  fit_base <- nlmixr2(base_2cmt_oral, ds01,
+                      est = "focei", control = stage1_focei)
+)
 saveRDS(fit_base, file.path(stage1_dir, "fit_base_scn09_ds01.rds"))
 
 
