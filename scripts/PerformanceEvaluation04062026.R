@@ -1202,7 +1202,7 @@ t_bench <- system.time({
   )
 })
 saveRDS(bench_results, file.path(stage1_dir, "bench_results.rds"))
-
+bench_results <- readRDS(file.path(stage1_dir, "bench_results.rds"))
 ## Per-(parameterisation, setting) summary
 bench_summary <- bench_results |>
   dplyr::group_by(par_name, setting) |>
@@ -1218,8 +1218,69 @@ bench_summary <- bench_results |>
   dplyr::arrange(par_name, setting)
 saveRDS(bench_summary, file.path(stage1_dir, "bench_summary.rds"))
 
-## Wide view: setting on rows, parameterisation on cols, for direct comparison
-bench_wide <- bench_summary |>
+##Also test another optimizer (lbfgsb3c) and combine with the original
+##sigdig3 / sigdig4 / sigdig4_bobyqa runs into one unified bench_summary.
+##
+##  Reuses the existing `benchmark_fit()` defined above -- no need to clone it.
+##  The original `bench_results` is reloaded from disk so this block is
+##  idempotent: re-running it appends fresh lbfgsb3c rows without re-running
+##  the 6 already-completed configurations.
+
+bench_controls_lbfgs <- list(
+  sigdig3_lbfgsb3c = nlmixr2est::foceiControl(sigdig = 3, outerOpt = "lbfgsb3c",
+                                              print = 0, calcTables = FALSE),
+  sigdig4_lbfgsb3c = nlmixr2est::foceiControl(sigdig = 4, outerOpt = "lbfgsb3c",
+                                              print = 0, calcTables = FALSE)
+)
+
+bench_grid_lbfgs <- tidyr::expand_grid(
+  par_name     = names(bench_models),
+  setting_name = names(bench_controls_lbfgs)
+)
+
+t_bench_lbfgs <- system.time({
+  bench_results_lbfgs <- purrr::pmap_dfr(
+    bench_grid_lbfgs,
+    function(par_name, setting_name) {
+      benchmark_fit(
+        model        = bench_models[[par_name]],
+        data         = ds01,
+        control      = bench_controls_lbfgs[[setting_name]],
+        par_name     = par_name,
+        setting_name = setting_name
+      )
+    }
+  )
+})
+saveRDS(bench_results_lbfgs,
+        file.path(stage1_dir, "bench_results_lbfgs.rds"))
+
+## ---- Combine with the original 3-setting run ---------------------------
+bench_results_all <- dplyr::bind_rows(
+  readRDS(file.path(stage1_dir, "bench_results.rds")),
+  bench_results_lbfgs
+)
+saveRDS(bench_results_all,
+        file.path(stage1_dir, "bench_results_all.rds"))
+
+## ---- One unified summary across all 5 settings -------------------------
+bench_summary_all <- bench_results_all |>
+  dplyr::group_by(par_name, setting) |>
+  dplyr::summarise(
+    n           = dplyr::n(),
+    mean_s      = mean(elapsed_s),
+    median_s    = stats::median(elapsed_s),
+    sd_s        = stats::sd(elapsed_s),
+    objf_med    = stats::median(objf),
+    n_converged = sum(converged),
+    .groups     = "drop"
+  ) |>
+  dplyr::arrange(par_name, setting)
+saveRDS(bench_summary_all,
+        file.path(stage1_dir, "bench_summary_all.rds"))
+
+## Wide view: parameterisation on cols, setting on rows
+bench_wide <- bench_summary_all |>
   dplyr::select(par_name, setting, median_s, objf_med) |>
   tidyr::pivot_wider(
     id_cols     = setting,
@@ -1227,14 +1288,6 @@ bench_wide <- bench_summary |>
     values_from = c(median_s, objf_med),
     names_glue  = "{par_name}_{.value}"
   )
-
-
-
-
-
-
-
-
 
 
 ## Map fit$theta + fit$omega -> article parameter names
@@ -1285,8 +1338,6 @@ extract_params_long <- function(fit, includeCov = TRUE) {
 est_true_refexp <- extract_params_long(fit_true_refexp)
 est_true_lin    <- extract_params_long(fit_true_lin)
 
-
-
 ## Relative error per parameter (one dataset)
 rel_err_one <- function(est_long, true_long, scenario_id) {
   true_long %>%
@@ -1335,6 +1386,7 @@ saveRDS(err_true_compare,
 saveRDS(err_true_wide,
         file.path(stage1_dir, "rel_err_true_scn09_ds01_wide.rds"))
 
+
 ## ---- Per-model summary tibble (one row per parameterisation) -----------
 .build_part1_row <- function(label, diag_x, t_x) {
   tibble::tibble(
@@ -1355,11 +1407,16 @@ part1_summary <- dplyr::bind_rows(
 )
 saveRDS(part1_summary, file.path(stage1_dir, "part1_summary.rds"))
 
-
 ## ============================================================================
 ## Part 2: runSCM feature tests -- BASE (no-covariate) model as starting point
 ## ============================================================================
-
+scm_focei <- nlmixr2est::foceiControl(
+  sigdig     = 4,
+  outerOpt   = "bobyqa",
+  print      = 0,
+  calcTables = FALSE,     # SCM doesn't need IPRED/CWRES tables
+  covMethod  = ""         # SCM doesn't need cov matrix for LRT
+)
 ## ---- 2.1  Base model (no covariates) ------------------------------------
 base_2cmt_oral <- function() {
   ini({
@@ -1399,9 +1456,9 @@ base_2cmt_oral <- function() {
 
 t_fit_base <- system.time(
   fit_base <- nlmixr2(base_2cmt_oral, ds01,
-                      est = "focei", control = stage1_focei)
+                      est = "focei", control = scm_focei)
 )
-saveRDS(fit_base, file.path(stage1_dir, "fit_base_scn09_ds01.rds"))
+saveRDS(fit_base, file.path(stage1_dir, "fit_base.rds"))
 
 
 ## ---- Helper: package one runSCM result for downstream comparison --------
@@ -1453,6 +1510,7 @@ package_scm_result <- function(label, scm_res, runtime_sec,
 }
 
 
+
 ## ---- Candidate covariate-parameter pairs --------------------------------
 candidate_pairs_full <- list(
   list(var = "cl", covar = "BW",   shapes = "power"),
@@ -1466,71 +1524,127 @@ candidate_pairs_full <- list(
   list(var = "vc", covar = "RACE", shapes = "cat"),
   list(var = "vc", covar = "SEX",  shapes = "cat")
 )
+candidate_pairs_test <- list(
+  list(var = "cl", covar = "BW",   shapes = "power"),
+  list(var = "cl", covar = "CrCL", shapes = "power"),
+ list(var = "vc", covar = "BW",   shapes = "power"),
+  list(var = "vc", covar = "CrCL", shapes = "power")
+)
 
+## ---- Wrapper: runSCM with wall-clock progress tracking -----------------
+##   Adds three things on top of nlmixr2scm::runSCM():
+##     1. Pre-flight banner: HH:MM start, N candidates, N workers, search type.
+##     2. Live progress -- every internal cli message about a step / candidate
+##        is prefixed with [HH:MM:SS | +M.m min] so you can see how long each
+##        candidate fit took even when print = 0 hides FOCEi iteration logs.
+##     3. Post-flight banner: HH:MM end, total elapsed in minutes + seconds.
+##   All other arguments pass through to runSCM() unchanged.
+runSCM_traced <- function(label, ...) {
+  dots      <- list(...)
+  n_pairs   <- if (!is.null(dots$pairsVec))   length(dots$pairsVec) else NA
+  n_workers <- if (!is.null(dots$workers))    dots$workers          else 1L
+  search    <- if (!is.null(dots$searchType)) dots$searchType       else "scm"
+
+  cat(sprintf(
+    "\n=== [%s] %s starting %-8s | %d candidate(s), %d worker(s) ===\n",
+    label, format(Sys.time(), "%H:%M:%S"), search, n_pairs, n_workers
+  ), file = stderr())
+
+  t0  <- Sys.time()
+  res <- withCallingHandlers(
+    do.call(nlmixr2scm::runSCM, dots),
+    message = function(m) {
+      txt <- conditionMessage(m)
+      ## Tag only step/candidate boundary messages; let cli rules pass through.
+      if (grepl("step\\s+\\d+,\\s*candidate|forward search|backward search",
+                txt, ignore.case = TRUE)) {
+        elapsed_min <- as.numeric(difftime(Sys.time(), t0, units = "mins"))
+        cat(sprintf("[%s | +%5.1f min] ",
+                    format(Sys.time(), "%H:%M:%S"), elapsed_min),
+            file = stderr())
+      }
+      ## Don't muffle -- let the original cli message print as usual.
+    }
+  )
+  elapsed_s <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
+
+  cat(sprintf(
+    "=== [%s] %s DONE | elapsed %.1f min (%.0f s) ===\n\n",
+    label, format(Sys.time(), "%H:%M:%S"),
+    elapsed_s / 60, elapsed_s
+  ), file = stderr())
+
+  attr(res, "elapsed_s") <- elapsed_s
+  res
+}
 
 ## ---- 2.2  Forward selection only ----------------------------------------
-t_fwd <- system.time({
-  res_fwd <- nlmixr2scm::runSCM(
-    fit         = fit_base,
-    pairsVec    = candidate_pairs_full,
-    catvarsVec  = c("SEX", "RACE"),
-    searchType  = "forward",
-    saveModels  = FALSE,
-    workers     = 1L,
-    print       = 0
-  )
-})
-test_fwd <- package_scm_result("forward_only", res_fwd,
-                               unname(t_fwd["elapsed"]))
+res_fwd <- runSCM_traced(
+  label       = "forward",
+  fit         = fit_base,
+  pairsVec    = candidate_pairs_test,
+  searchType  = "forward",
+  control     = scm_focei,    # slim control: no tables, no cov, sigdig=4 bobyqa
+  saveModels  = FALSE,
+  workers     = 3L,           # 4 cores: leave 1 free for OS / Positron
+  print       = 100,           # FOCEi iteration progress every 100 iters
+  maxRetries = 0L #no retries for this smoke test
+)
+t_fwd     <- attr(res_fwd, "elapsed_s")
+test_fwd  <- package_scm_result("forward_only", res_fwd, t_fwd)
+
 
 
 ## ---- 2.3  Backward elimination only -------------------------------------
 ##   Start with all 10 candidate relations included, then prune.
-t_bck <- system.time({
-  res_bck <- nlmixr2scm::runSCM(
-    fit                = fit_base,
-    pairsVec           = candidate_pairs_full,
-    catvarsVec         = c("SEX", "RACE"),
-    searchType         = "backward",
-    includedRelations  = candidate_pairs_full,
-    saveModels         = FALSE,
-    workers            = 1L,
-    print              = 0
-  )
-})
-test_bck <- package_scm_result("backward_only", res_bck,
-                               unname(t_bck["elapsed"]))
+res_bck <- runSCM_traced(
+  label              = "backward",
+  fit                = fit_base,
+  pairsVec           = candidate_pairs_test,
+  catvarsVec         = c("SEX", "RACE"),
+  searchType         = "backward",
+  includedRelations  = candidate_pairs_test,
+  control            = scm_focei,
+  saveModels         = FALSE,
+  workers            = 3L,
+  print              = 100,
+  maxRetries = 0L
+)
+t_bck     <- attr(res_bck, "elapsed_s")
+test_bck  <- package_scm_result("backward_only", res_bck, t_bck)
 
 
 ## ---- 2.4  User-specified single covariate relationship (BW on CL) -------
-t_user <- system.time({
-  res_user <- nlmixr2scm::runSCM(
-    fit         = fit_base,
-    pairsVec    = list(list(var = "cl", covar = "BW", shapes = "power")),
-    searchType  = "scm",
-    saveModels  = FALSE,
-    workers     = 1L,
-    print       = 0
-  )
-})
-test_user <- package_scm_result("user_specified_BWonCL", res_user,
-                                unname(t_user["elapsed"]))
+res_user <- runSCM_traced(
+  label       = "user",
+  fit         = fit_base,
+  pairsVec    = list(list(var = "cl", covar = "BW", shapes = "power")),
+  searchType  = "scm",
+  control     = scm_focei,
+  saveModels  = FALSE,
+  workers     = 3L,
+  print       = 100
+  maxRetries = 0L
+)
+t_user     <- attr(res_user, "elapsed_s")
+test_user  <- package_scm_result("user_specified_BWonCL", res_user, t_user)
 
 
 ## ---- 2.5  Full SCM (forward then backward) ------------------------------
-t_full <- system.time({
-  res_full <- nlmixr2scm::runSCM(
-    fit         = fit_base,
-    pairsVec    = candidate_pairs_full,
-    catvarsVec  = c("SEX", "RACE"),
-    searchType  = "scm",
-    saveModels  = FALSE,
-    workers     = 1L,
-    print       = 0
-  )
-})
-test_full <- package_scm_result("full_scm", res_full,
-                                unname(t_full["elapsed"]))
+res_full <- runSCM_traced(
+  label       = "full_scm",
+  fit         = fit_base,
+  pairsVec    = candidate_pairs_full,
+  catvarsVec  = c("SEX", "RACE"),
+  searchType  = "scm",
+  control     = scm_focei,
+  saveModels  = FALSE,
+  workers     = 3L,
+  print       = 100,
+  maxRetries = 0L
+)
+t_full     <- attr(res_full, "elapsed_s")
+test_full  <- package_scm_result("full_scm", res_full, t_full)
 
 
 ## ---- Aggregate Part 2 results -------------------------------------------
@@ -1583,5 +1697,11 @@ cat("\nPart 1 relative error per parameter (long, refexp vs lin):\n")
 print(err_true_compare)
 cat("\nPart 1 estimate side-by-side (wide):\n")
 print(err_true_wide)
+cat("\nPart 1 extended -- all 6 configs (long, baseline + lbfgsb3c):\n")
+print(err_true_compare_all, n = Inf)
+cat("\nPart 1 extended -- per-config OFV / convergence:\n")
+print(err_true_summary_all)
+cat("\nPart 1 extended -- estimate side-by-side (wide, all configs):\n")
+print(err_true_wide_all, n = Inf, width = Inf)
 cat("\nPart 2 (runSCM feature tests):\n"); print(part2_summary)
 cat("\nOverall runtime + projections:\n"); print(overall_runtime)
