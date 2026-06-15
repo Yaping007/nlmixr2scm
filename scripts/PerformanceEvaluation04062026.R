@@ -1678,6 +1678,14 @@ saveRDS(test_full, file.path(stage1_dir, "test_full.rds"))
 out_dir_v2 <- "simulated_virtual_dataset_eta_filtered"
 stage1_dir <- file.path(out_dir_v2, "stage1_smoke_scn09_ds01")
 fit_base <- readRDS(file.path(stage1_dir, "fit_base.rds"))
+scm_focei <- nlmixr2est::foceiControl(
+  sigdig     = 4,
+  outerOpt   = "bobyqa",
+  print      = 0,
+  calcTables = FALSE,     # SCM doesn't need IPRED/CWRES tables
+  covMethod  = ""         # SCM doesn't need cov matrix for LRT
+)
+
 
 candidate_pairs_shape_cattest <- list(
   ## All four continuous shapes for BW on CL.  In scenario 9 the truth is
@@ -1731,7 +1739,7 @@ t_bck_cat    <- attr(res_bck_cat, "elapsed_s")
 saveRDS(res_bck_cat, file.path(stage1_dir, "res_bck_cat.rds"))
 test_bck_cat <- package_scm_result("backward_cat", res_bck_cat, t_bck_cat)
 saveRDS(test_bck_cat, file.path(stage1_dir, "test_bck_cat.rds"))
-
+test_bck_cat <- readRDS(file.path(stage1_dir, "test_bck_cat.rds"))
 
 ## ---- 2.6c  User-specified single relation (SEX on CL only) --------------
 ##   Tests that the categorical pipeline correctly fits and rejects a true
