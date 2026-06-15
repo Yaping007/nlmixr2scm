@@ -17,6 +17,7 @@
 
 library(testthat)
 library(nlmixr2scm)
+devtools::load_all("C:/Users/LIUYA8J/OneDrive - Novartis Pharma AG/Internship/GithubRepo/nlmixr2scm")
 library(nlmixr2utils)
 #testthat::test_file("tests/testthat/test-scm.R") #Pass228, warning from nlmixrest[near-singular cov on toy fixture]
 #testthat::test_file("tests/testthat/test-parsing.R")#pass29, after fixing the function calling issue
@@ -1459,7 +1460,7 @@ t_fit_base <- system.time(
                       est = "focei", control = scm_focei)
 )
 saveRDS(fit_base, file.path(stage1_dir, "fit_base.rds"))
-
+fit_base <- readRDS(file.path(stage1_dir, "fit_base.rds"))
 
 ## ---- Helper: package one runSCM result for downstream comparison --------
 ##   Returns:
@@ -1531,6 +1532,7 @@ candidate_pairs_test <- list(
   list(var = "vc", covar = "CrCL", shapes = "power")
 )
 
+
 ## ---- Wrapper: runSCM with wall-clock progress tracking -----------------
 ##   Adds three things on top of nlmixr2scm::runSCM():
 ##     1. Pre-flight banner: HH:MM start, N candidates, N workers, search type.
@@ -1591,7 +1593,9 @@ res_fwd <- runSCM_traced(
   maxRetries = 0L #no retries for this smoke test
 )
 t_fwd     <- attr(res_fwd, "elapsed_s")
+saveRDS(res_fwd, file.path(stage1_dir, "res_fwd.rds"))    # idempotent recovery
 test_fwd  <- package_scm_result("forward_only", res_fwd, t_fwd)
+saveRDS(test_fwd, file.path(stage1_dir, "test_fwd.rds"))
 
 
 
@@ -1611,7 +1615,9 @@ res_bck <- runSCM_traced(
   maxRetries = 0L
 )
 t_bck     <- attr(res_bck, "elapsed_s")
+saveRDS(res_bck, file.path(stage1_dir, "res_bck.rds"))
 test_bck  <- package_scm_result("backward_only", res_bck, t_bck)
+saveRDS(test_bck, file.path(stage1_dir, "test_bck.rds"))
 
 
 ## ---- 2.4  User-specified single covariate relationship (BW on CL) -------
@@ -1623,18 +1629,20 @@ res_user <- runSCM_traced(
   control     = scm_focei,
   saveModels  = FALSE,
   workers     = 3L,
-  print       = 100
+  print       = 100,
   maxRetries = 0L
 )
 t_user     <- attr(res_user, "elapsed_s")
+saveRDS(res_user, file.path(stage1_dir, "res_user.rds"))
 test_user  <- package_scm_result("user_specified_BWonCL", res_user, t_user)
+saveRDS(test_user, file.path(stage1_dir, "test_user.rds"))
 
 
 ## ---- 2.5  Full SCM (forward then backward) ------------------------------
 res_full <- runSCM_traced(
   label       = "full_scm",
   fit         = fit_base,
-  pairsVec    = candidate_pairs_full,
+  pairsVec    = candidate_pairs_test,
   catvarsVec  = c("SEX", "RACE"),
   searchType  = "scm",
   control     = scm_focei,
@@ -1644,7 +1652,148 @@ res_full <- runSCM_traced(
   maxRetries = 0L
 )
 t_full     <- attr(res_full, "elapsed_s")
+saveRDS(res_full, file.path(stage1_dir, "res_full.rds"))
 test_full  <- package_scm_result("full_scm", res_full, t_full)
+saveRDS(test_full, file.path(stage1_dir, "test_full.rds"))
+
+
+## ============================================================================
+## ---- 2.6  Categorical-covariate smoke test (BW continuous + SEX cat) ----
+## ============================================================================
+##   Sections 2.2-2.5 covered only continuous covariates.  This block re-runs
+##   the four search modes on a 2-candidate set:
+##     - cl ~ BW   (power, TRUE positive  -- TH_BW_CL = 0.75 in scenario 9)
+##     - cl ~ SEX  (cat,   TRUE negative  -- no SEX-on-CL effect in scenario 9)
+##
+##   Expectation:
+##     forward      : keeps BW, rejects SEX
+##     backward     : starting from both, drops SEX, retains BW
+##     user-only    : single-relation fit on SEX, formally tested and rejected
+##     full SCM     : forward picks BW; backward leaves it in -> final = {BW}
+##
+##   `catvarsVec = "SEX"` is REQUIRED -- it triggers .makeSCMData() which
+##   builds the SEX_1 indicator column the package's `cat` shape consumes.
+## ============================================================================
+
+out_dir_v2 <- "simulated_virtual_dataset_eta_filtered"
+stage1_dir <- file.path(out_dir_v2, "stage1_smoke_scn09_ds01")
+fit_base <- readRDS(file.path(stage1_dir, "fit_base.rds"))
+
+candidate_pairs_shape_cattest <- list(
+  ## All four continuous shapes for BW on CL.  In scenario 9 the truth is
+  ## power (TH_BW_CL = 0.75), so SCM should pick BW_power over BW_lin /
+  ## BW_log / BW_identity by lower OFV.  All four shapes will dwarf base
+  ## OFV because BW carries strong info; the interesting comparison is
+  ## *between* the four shapes (which one minimises OFV).
+  list(var = "cl", covar = "BW",  shapes = "power"),
+  list(var = "cl", covar = "BW",  shapes = "lin"),
+  list(var = "cl", covar = "BW",  shapes = "log"),
+  list(var = "cl", covar = "BW",  shapes = "identity"),
+  ## Categorical: SEX is 0/1.  Use "cat" -- "power" would give 0^theta
+  ## for SEX = 0 (undefined / 0).  catvarsVec = "SEX" passed to runSCM
+  ## triggers .makeSCMData() to build the SEX_1 indicator column.
+  list(var = "cl", covar = "SEX", shapes = "cat")
+)
+## ---- 2.6a  Forward selection only ---------------------------------------
+res_fwd_cat <- runSCM_traced(
+  label       = "forward_cat",
+  fit         = fit_base,
+  pairsVec    = candidate_pairs_shape_cattest,
+  catvarsVec  = "SEX",
+  searchType  = "forward",
+  control     = scm_focei,
+  saveModels  = FALSE,
+  workers     = 3L,
+  print       = 100,
+  maxRetries  = 0L
+)
+t_fwd_cat    <- attr(res_fwd_cat, "elapsed_s")
+saveRDS(res_fwd_cat, file.path(stage1_dir, "res_fwd_cat.rds"))
+test_fwd_cat <- package_scm_result("forward_cat", res_fwd_cat, t_fwd_cat)
+saveRDS(test_fwd_cat, file.path(stage1_dir, "test_fwd_cat.rds"))
+
+
+## ---- 2.6b  Backward elimination only ------------------------------------
+res_bck_cat <- runSCM_traced(
+  label              = "backward_cat",
+  fit                = fit_base,
+  pairsVec           = candidate_pairs_shape_cattest,
+  catvarsVec         = "SEX",
+  searchType         = "backward",
+  includedRelations  = candidate_pairs_shape_cattest,
+  control            = scm_focei,
+  saveModels         = FALSE,
+  workers            = 3L,
+  print              = 100,
+  maxRetries         = 0L
+)
+t_bck_cat    <- attr(res_bck_cat, "elapsed_s")
+saveRDS(res_bck_cat, file.path(stage1_dir, "res_bck_cat.rds"))
+test_bck_cat <- package_scm_result("backward_cat", res_bck_cat, t_bck_cat)
+saveRDS(test_bck_cat, file.path(stage1_dir, "test_bck_cat.rds"))
+
+
+## ---- 2.6c  User-specified single relation (SEX on CL only) --------------
+##   Tests that the categorical pipeline correctly fits and rejects a true
+##   no-effect categorical relation, even when it's the *only* candidate.
+res_user_cat <- runSCM_traced(
+  label       = "user_cat",
+  fit         = fit_base,
+  pairsVec    = list(list(var = "cl", covar = "SEX", shapes = "cat")),
+  catvarsVec  = "SEX",
+  searchType  = "scm",
+  control     = scm_focei,
+  saveModels  = FALSE,
+  workers     = 3L,
+  print       = 100,
+  maxRetries  = 0L
+)
+t_user_cat    <- attr(res_user_cat, "elapsed_s")
+saveRDS(res_user_cat, file.path(stage1_dir, "res_user_cat.rds"))
+test_user_cat <- package_scm_result("user_specified_SEXonCL", res_user_cat, t_user_cat)
+saveRDS(test_user_cat, file.path(stage1_dir, "test_user_cat.rds"))
+
+
+## ---- 2.6d  Full SCM (forward then backward) -----------------------------
+res_full_cat <- runSCM_traced(
+  label       = "full_scm_cat",
+  fit         = fit_base,
+  pairsVec    = candidate_pairs_shape_cattest,
+  catvarsVec  = "SEX",
+  searchType  = "scm",
+  control     = scm_focei,
+  saveModels  = FALSE,
+  workers     = 3L,
+  print       = 100,
+  maxRetries  = 0L
+)
+t_full_cat    <- attr(res_full_cat, "elapsed_s")
+saveRDS(res_full_cat, file.path(stage1_dir, "res_full_cat.rds"))
+test_full_cat <- package_scm_result("full_scm_cat", res_full_cat, t_full_cat)
+saveRDS(test_full_cat, file.path(stage1_dir, "test_full_cat.rds"))
+
+
+## ---- Aggregate the categorical smoke-test results -----------------------
+scm_tests_cat <- list(
+  forward_cat            = test_fwd_cat,
+  backward_cat           = test_bck_cat,
+  user_specified_SEXonCL = test_user_cat,
+  full_scm_cat           = test_full_cat
+)
+saveRDS(scm_tests_cat, file.path(stage1_dir, "scm_tests_cat.rds"))
+
+part2_summary_cat <- purrr::map_dfr(scm_tests_cat, function(x) {
+  tibble::tibble(
+    test         = x$label,
+    n_selected   = if (is.null(x$selected)) NA_integer_ else nrow(x$selected),
+    converged    = if (is.null(x$diag)) NA else x$diag$converged,
+    objf         = if (is.null(x$diag)) NA_real_ else x$diag$objf,
+    cov_step_ok  = if (is.null(x$diag)) NA else x$diag$cov_ok,
+    cond_num     = if (is.null(x$diag)) NA_real_ else x$diag$cond_num,
+    runtime_sec  = x$runtime_sec
+  )
+})
+saveRDS(part2_summary_cat, file.path(stage1_dir, "part2_summary_cat.rds"))
 
 
 ## ---- Aggregate Part 2 results -------------------------------------------
