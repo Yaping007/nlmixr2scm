@@ -1,14 +1,14 @@
 ======================================================================
 SCM LOG
 ======================================================================
-Generated : 2026-06-10 14:32:18
+Generated : 2026-06-16 13:46:17
 Search type: forward
 Estimation : focei
 Base OFV   : -4029.367
 Base params: 7
 p-val fwd  : 0.05
 p-val bck  : 0.01
-Output dir : c:/Users/LIUYA8J/OneDrive - Novartis Pharma AG/Internship/GithubRepo/nlmixr2scm/tests/testthat
+Output dir : C:/Users/LIUYA8J/OneDrive - Novartis Pharma AG/Internship/GithubRepo/nlmixr2scm/tests/testthat
 
 Relationships tested (1):
   1. WT_power~cl [power]
@@ -18,7 +18,7 @@ FORWARD SEARCH
 ----------------------------------------------------------------------
 
 Step 1 (1 candidate):
-  WT_power~cl [power]             Ref OFV= -4029.367  OFV=283394.545  dOFV=-287423.912  p=  1.0000
+  WT_power~cl [power]             Ref OFV= -4029.367  OFV= 79105.417  dOFV=-83134.784  p=  1.0000
   → No candidate met threshold (p ≤ 0.05). Forward search complete.
 
 ======================================================================

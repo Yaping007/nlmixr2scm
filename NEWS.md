@@ -4,7 +4,9 @@
 
 * New retry mechanism for unrealistic OFV values in `runSCM()`. Six new arguments control the behaviour: `maxRetries` (default `3L`), `maxDeltaOFV` (default `Inf`), `retryPerturbSD` (default `0.5`), `retrySmallInit` (default `0.01`), `retryOFVTolerance` (default `NULL`, auto-detected), and `retryFailOnExhaustion` (default `FALSE`). When a candidate fit produces an OFV that is implausibly high or low, the fit is retried with perturbed or reduced initial estimates. Stochastic estimators (SAEM) get a 10-unit tolerance margin automatically to avoid spurious retries due to Monte Carlo noise.
 
-*Fixed `.idColumn()` returning the wrong column when `id`/`ID` is not the first column of the dataset. The previous implementation evaluated `which("id" %in% colNamesLower)`, which always returned `1` (or `integer(0)`) regardless of the matching column's position, causing `.enrichPairs()` to compute per-subject covariate medians from the wrong column. Replaced with `match("id", colNamesLower)`. Now, it's fixed. 
+* Fixed `.idColumn()` returning the wrong column when `id`/`ID` is not the first column of the dataset. The previous implementation evaluated `which("id" %in% colNamesLower)`, which always returned `1` (or `integer(0)`) regardless of the matching column's position, causing `.enrichPairs()` to compute per-subject covariate medians from the wrong column. Replaced with `match("id", colNamesLower)`. Now, it's fixed. 
+
+* fixed .fitCandidatePairs() failure reporting by escaping curly braces in failure message, which is passed to `cli::cli_warn()`.  This helps to report the true failure reason instead of a formatting error in the warning message.
 
 
 # nlmixr2scm 0.1

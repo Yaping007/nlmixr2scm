@@ -176,7 +176,7 @@ When the search space is a full Cartesian product of parameters × covariates, u
 `varsVec` and `covarsVec` instead of enumerating every pair.
 
 The example below tests `wt~cl`, `wt~v`, `sex~cl`, and `sex~v`, with both power and
-linear shapes for the continuous covariate — eight candidates in total.
+linear shapes for the continuous covariate — six candidates in total.
 
 ```{r scm, message = FALSE}
 scm <- runSCM(

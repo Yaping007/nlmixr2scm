@@ -613,7 +613,7 @@ runSCM <- function(
     rbind,
     lapply(unique(step_keys), function(k) {
       grp <- summaryTable[step_keys == k, , drop = FALSE]
-      acc <- grp[grp$included == "yes", , drop = FALSE]
+      acc <- grp[grp$included %in% c("yes", "dropped"), , drop = FALSE]
       if (nrow(acc) > 0L) {
         return(acc[1L, , drop = FALSE])
       }
@@ -649,7 +649,7 @@ runSCM <- function(
   )
   step_dir <- ifelse(best_rows$searchType == "forward", "Forward", "Backward")
   step_decision <- ifelse(
-    best_rows$included == "yes",
+    best_rows$included %in% c("yes", "dropped"),
     ifelse(best_rows$searchType == "forward", "Added", "Removed"),
     ifelse(best_rows$searchType == "backward", "Retained", "Not selected")
   )
@@ -675,7 +675,7 @@ runSCM <- function(
   )
   all_dir <- ifelse(all_sorted$searchType == "forward", "Forward", "Backward")
   all_decision <- ifelse(
-    all_sorted$included == "yes",
+    all_sorted$included %in% c("yes", "dropped"),
     ifelse(all_sorted$searchType == "forward", "Added", "Removed"),
     ifelse(all_sorted$searchType == "backward", "Retained", "Not selected")
   )
@@ -687,7 +687,7 @@ runSCM <- function(
     drop = FALSE
   ]
   bck_rem <- summaryTable[
-    summaryTable$searchType == "backward" & summaryTable$included == "yes",
+    summaryTable$searchType == "backward" & summaryTable$included == "dropped",
     ,
     drop = FALSE
   ]
@@ -934,7 +934,7 @@ runSCM <- function(
         grp <- phase_rows[phase_rows$step == s, , drop = FALSE]
         grp <- grp[order(grp$pchisqr), , drop = FALSE]
         grp_ref <- .ref_objf(grp$searchType, grp$objf, grp$deltObjf)
-        accepted <- any(grp$included == "yes")
+        accepted <- any(grp$included %in% c("yes", "dropped"))
         .ln("")
         .ln(
           "Step ",
@@ -946,7 +946,7 @@ runSCM <- function(
           "):"
         )
         for (r in seq_len(nrow(grp))) {
-          tag <- if (grp$included[r] == "yes") {
+          tag <- if (grp$included[r] %in% c("yes", "dropped")) {
             if (phase == "forward") " [ADDED]" else " [REMOVED]"
           } else {
             ""
@@ -1981,9 +1981,14 @@ buildPairs <- function(varsVec = NULL, covarsVec = NULL, pairsVec = NULL) {
       function(f) paste0(f$.pair, ": ", f$.reason),
       character(1)
     )
+
+    # Escape any curly braces in the reason strings before passing to cli,
+    # because error messages from nlmixr2/cli themselves may contain `{`/`}`
+    # which cli would try to parse as glue expressions.
+    fail_msgs_safe <- gsub("\\{", "{{", gsub("\\}", "}}", fail_msgs))
     cli::cli_warn(c(
       "!" = "{length(failures)} candidate fit(s) failed at step {stepIdx}:",
-      setNames(fail_msgs, rep("x", length(fail_msgs)))
+      setNames(fail_msgs_safe, rep("x", length(fail_msgs_safe)))
     ))
   }
 
@@ -2578,8 +2583,10 @@ backwardSearch <- function(
     # Remove the covariate only when its OFV impact is non-significant
     # (p > pVal means the OFV increase from removal does not exceed threshold).
     if (bestRow$pchisqr > pVal) {
-      resTable[bestIdx, "included"] <- "yes"
-      bestRow[, "included"] <- "yes"
+      # Use "dropped" (not "yes") so the raw summaryTable is self-documenting:
+      # forward+"yes" = added; backward+"dropped" = removed.
+      resTable[bestIdx, "included"] <- "dropped"
+      bestRow[, "included"] <- "dropped"
 
       cli::cli_h1("removing covariate at step {stepIdx}:")
       print(bestRow)

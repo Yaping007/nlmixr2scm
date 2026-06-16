@@ -1512,26 +1512,26 @@ package_scm_result <- function(label, scm_res, runtime_sec,
 
 
 
-## ---- Candidate covariate-parameter pairs --------------------------------
-candidate_pairs_full <- list(
-  list(var = "cl", covar = "BW",   shapes = "power"),
-  list(var = "cl", covar = "CrCL", shapes = "power"),
-  list(var = "cl", covar = "BMI",  shapes = "power"),
-  list(var = "cl", covar = "RACE", shapes = "cat"),
-  list(var = "cl", covar = "SEX",  shapes = "cat"),
-  list(var = "vc", covar = "BW",   shapes = "power"),
-  list(var = "vc", covar = "CrCL", shapes = "power"),
-  list(var = "vc", covar = "BMI",  shapes = "power"),
-  list(var = "vc", covar = "RACE", shapes = "cat"),
-  list(var = "vc", covar = "SEX",  shapes = "cat")
+## ---- Candidate contiuous covariate-parameter pairs --------------------------------
+out_dir_v2 <- "simulated_virtual_dataset_eta_filtered"
+stage1_dir <- file.path(out_dir_v2, "stage1_smoke_scn09_ds01")
+fit_base <- readRDS(file.path(stage1_dir, "fit_base.rds"))
+scm_focei <- nlmixr2est::foceiControl(
+  sigdig     = 4,
+  outerOpt   = "bobyqa",
+  print      = 0,
+  calcTables = FALSE,     # SCM doesn't need IPRED/CWRES tables
+  covMethod  = ""         # SCM doesn't need cov matrix for LRT
 )
+ds01 <- readRDS(file.path(stage1_dir, "nm_scn09_ds01.rds"))
+
+
 candidate_pairs_test <- list(
   list(var = "cl", covar = "BW",   shapes = "power"),
   list(var = "cl", covar = "CrCL", shapes = "power"),
  list(var = "vc", covar = "BW",   shapes = "power"),
   list(var = "vc", covar = "CrCL", shapes = "power")
 )
-
 
 ## ---- Wrapper: runSCM with wall-clock progress tracking -----------------
 ##   Adds three things on top of nlmixr2scm::runSCM():
@@ -1580,7 +1580,7 @@ runSCM_traced <- function(label, ...) {
   res
 }
 
-## ---- 2.2  Forward selection only ----------------------------------------
+## ---- 2.2  Forward selection only + explicit pair ----------------------------------------
 res_fwd <- runSCM_traced(
   label       = "forward",
   fit         = fit_base,
@@ -1597,6 +1597,26 @@ saveRDS(res_fwd, file.path(stage1_dir, "res_fwd.rds"))    # idempotent recovery
 test_fwd  <- package_scm_result("forward_only", res_fwd, t_fwd)
 saveRDS(test_fwd, file.path(stage1_dir, "test_fwd.rds"))
 
+## ---- 2.2.1  Forward selection only + auto-generated pair ----------------------------------------
+res_fwd_auto <- runSCM_traced(
+  label       = "forward",
+  data        = ds01,
+  fit         = fit_base,
+  varsVec    = c("cl", "vc"),
+  covarsVec  = "BW",
+  catvarsVec = "SEX",
+  shapes     = c("power", "lin"),
+  searchType  = "forward",
+  control     = scm_focei,    # slim control: no tables, no cov, sigdig=4 bobyqa
+  saveModels  = FALSE,
+  workers     = 3L,           # 4 cores: leave 1 free for OS / Positron
+  print       = 100,           # FOCEi iteration progress every 100 iters
+  maxRetries = 0L #no retries for this smoke test
+)
+t_fwd_auto     <- attr(res_fwd_auto, "elapsed_s")
+saveRDS(res_fwd_auto, file.path(stage1_dir, "res_fwd_auto.rds"))    # idempotent recovery
+test_fwd_auto  <- package_scm_result("forward_only", res_fwd_auto, t_fwd_auto)
+saveRDS(test_fwd_auto, file.path(stage1_dir, "test_fwd_auto.rds"))
 
 
 ## ---- 2.3  Backward elimination only -------------------------------------

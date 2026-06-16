@@ -1358,3 +1358,24 @@ test_that("runSCM: retryOFVTolerance=0 passed through without error", {
     )
   )
 })
+
+# =============================================================================
+# cli brace escaping — failure messages containing {} must not crash cli_warn
+# =============================================================================
+
+test_that("cli_warn tolerates braces in failure messages", {
+  # Reproduce the exact code path from .fitCandidatePairs() failure reporting
+  fail_msgs <- c("wt{x} ~ cl: column 'wt{x}' not found")
+  stepIdx <- 1L
+
+  # Without escaping, cli tries to evaluate `{x}` → crash.
+  # With escaping, we get a clean warning containing the original message.
+  fail_msgs_safe <- gsub("{", "{{", gsub("}", "}}", fail_msgs, fixed = TRUE), fixed = TRUE)
+  expect_warning(
+    cli::cli_warn(c(
+      "!" = "{length(fail_msgs)} candidate fit(s) failed at step {stepIdx}:",
+      setNames(fail_msgs_safe, "x")
+    )),
+    "candidate fit"
+  )
+})
