@@ -1945,7 +1945,10 @@ buildPairs <- function(varsVec = NULL, covarsVec = NULL, pairsVec = NULL) {
         numParams   = length(x$finalUiEnv$ini$est),
         qchisqr     = stats::qchisq(1 - pVal, dof),
         pchisqr     = pchisqr,
-        included    = if (add) "no" else "",
+        # `included` token semantics:
+        #   forward  : "yes"      = added to model      | "no"       = tested, not added
+        #   backward : "dropped"  = removed from model  | "retained" = tested, kept in model
+        included    = if (add) "no" else "retained",
         searchType  = if (add) "forward" else "backward",
         covNames    = covNames,
         covarEffect = covarEffect,

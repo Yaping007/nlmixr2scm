@@ -236,7 +236,7 @@ Key columns:
 | `pchisqr` | p-value from chi-squared test (1 df) |
 | `bsvReduction` | Reduction in BSV for `var` (%) |
 | `covarEffect` | Estimated effect magnitude at the covariate extremes |
-| `included` | `"yes"` (accepted), `"no"` (rejected), `"dropped"` (removed in backward) |
+| `included` | `"yes"` (added in forward), `"no"` (rejected in forward), `"dropped"` (removed in backward), `"retained"` (tested in backward but kept in model) |
 
 #### Forward search detail
 
