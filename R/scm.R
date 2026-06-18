@@ -1911,13 +1911,19 @@ buildPairs <- function(varsVec = NULL, covarsVec = NULL, pairsVec = NULL) {
 
         if (attempt < maxRetries) {
           next_strategy <- if ((attempt + 1L) %% 2L == 1L) "perturbed" else "small"
-          cli::cli_warn(c(
-            "!" = paste0(
-              "{nam_covar} ~ {nam_var}: unrealistic OFV on attempt ",
-              attempt + 1L, "/", maxRetries + 1L, ": ", trigger, "."
-            ),
-            "i" = "Retrying with {next_strategy} init."
+          # Use cli_alert_warning (immediate stderr emission) rather than
+          # cli_warn (queued via base warning()).  Under options(warn = 0)
+          # nlmixr2's own optimizer warnings on a diverged fit can flood
+          # the queue (capped at options(nwarnings) = 50) and push our
+          # retry messages out before they are ever displayed.  Alerts
+          # bypass the queue and are visible identically in sequential
+          # (workers = 1) and parallel (workers > 1, future-captured)
+          # setups -- see regression test in tests/testthat/test-scm.R.
+          cli::cli_alert_warning(paste0(
+            "{nam_covar} ~ {nam_var}: unrealistic OFV on attempt ",
+            attempt + 1L, "/", maxRetries + 1L, ": ", trigger, "."
           ))
+          cli::cli_alert_info("Retrying with {next_strategy} init.")
         } else {
           if (retryFailOnExhaustion) {
             return(list(
@@ -1930,13 +1936,12 @@ buildPairs <- function(varsVec = NULL, covarsVec = NULL, pairsVec = NULL) {
               .pair = paste0(nam_covar, " ~ ", nam_var)
             ))
           } else {
-            cli::cli_warn(c(
-              "!" = paste0(
-                "{nam_covar} ~ {nam_var}: unrealistic OFV after all ",
-                maxRetries + 1L, " attempt",
-                if (maxRetries + 1L == 1L) "" else "s",
-                ": ", trigger, ". Accepting best available result."
-              )
+            # Immediate-emission alert (see comment above).
+            cli::cli_alert_warning(paste0(
+              "{nam_covar} ~ {nam_var}: unrealistic OFV after all ",
+              maxRetries + 1L, " attempt",
+              if (maxRetries + 1L == 1L) "" else "s",
+              ": ", trigger, ". Accepting best available result."
             ))
             loop_result <- list(x = x, dObjf = dObjf, dof = dof, pchisqr = pchisqr)
             break

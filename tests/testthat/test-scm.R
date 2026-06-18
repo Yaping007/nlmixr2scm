@@ -1448,6 +1448,69 @@ test_that("cli_warn tolerates braces in failure messages", {
 })
 
 # =============================================================================
+# Retry-event reporting: cli_alert_warning (immediate) vs cli_warn (queued)
+# =============================================================================
+# Regression: the unrealistic-OFV retry messages in .fitCandidatePairs() used
+# cli::cli_warn(), which is queued via base R's warning() system.  Under
+# options(warn = 0) (the default) and heavy warning traffic from nlmixr2's
+# own optimizer on a diverged fit, those retry messages could be silently
+# dropped from the queue (capped at options(nwarnings) = 50) before being
+# displayed.  We now use cli::cli_alert_warning() which emits to stderr
+# immediately and is unaffected by the warning queue.  This test pins the
+# convention so a future refactor doesn't revert to the queued path.
+
+test_that(".fitCandidatePairs retry events: alert is emitted immediately, not queued", {
+  nam_covar <- "wt_power"
+  nam_var <- "cl"
+  attempt <- 1L
+  maxRetries <- 3L
+  trigger <- "OFV increased vs parent (2512382.935 > 447.766)"
+  next_strategy <- "perturbed"
+
+  # Per-attempt alert: must reach stderr even with warning queue disabled
+  msgs_attempt <- withr::with_options(
+    list(warn = -1, nwarnings = 1L),
+    testthat::capture_messages(
+      cli::cli_alert_warning(paste0(
+        "{nam_covar} ~ {nam_var}: unrealistic OFV on attempt ",
+        attempt + 1L, "/", maxRetries + 1L, ": ", trigger, "."
+      ))
+    )
+  )
+  expect_true(
+    any(grepl("wt_power ~ cl", msgs_attempt, fixed = TRUE)),
+    info = "cli_alert_warning must emit a message visible regardless of options(warn)"
+  )
+  expect_true(any(grepl("attempt 2/4", msgs_attempt, fixed = TRUE)))
+  expect_true(any(grepl("OFV increased", msgs_attempt, fixed = TRUE)))
+
+  # Companion info alert for the retry strategy
+  msgs_info <- testthat::capture_messages(
+    cli::cli_alert_info("Retrying with {next_strategy} init.")
+  )
+  expect_true(any(grepl("Retrying with perturbed init", msgs_info, fixed = TRUE)))
+
+  # Exhausted-retry alert: same immediate-emission guarantee
+  msgs_exhausted <- withr::with_options(
+    list(warn = -1, nwarnings = 1L),
+    testthat::capture_messages(
+      cli::cli_alert_warning(paste0(
+        "{nam_covar} ~ {nam_var}: unrealistic OFV after all ",
+        maxRetries + 1L, " attempts: ", trigger,
+        ". Accepting best available result."
+      ))
+    )
+  )
+  expect_true(any(grepl("after all 4 attempts", msgs_exhausted, fixed = TRUE)))
+  expect_true(any(grepl("Accepting best available result", msgs_exhausted, fixed = TRUE)))
+
+  # Negative check: the previous cli_warn(...) implementation would NOT have
+  # been captured by capture_messages() (warnings go through a different
+  # channel), and would have been dropped under options(warn = -1).  The
+  # capture above succeeded → confirms we are using the alert path.
+})
+
+# =============================================================================
 # summaryTable$included: backward removals labeled "dropped" (not "yes")
 # =============================================================================
 # =============================================================================

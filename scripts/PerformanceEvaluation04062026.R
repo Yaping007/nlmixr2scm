@@ -1648,7 +1648,7 @@ res_user <- runSCM_traced(
   searchType  = "scm",
   control     = scm_focei,
   saveModels  = FALSE,
-  workers     = 3L,
+  workers     = 1L,
   print       = 100,
   maxRetries = 0L
 )
