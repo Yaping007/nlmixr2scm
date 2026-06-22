@@ -2016,7 +2016,11 @@ buildPairs <- function(varsVec = NULL, covarsVec = NULL, pairsVec = NULL) {
       function(f) paste0(f$.pair, ": ", f$.reason),
       character(1)
     )
+<<<<<<< HEAD
 
+=======
+    
+>>>>>>> 975dd26fb330eb9407f1efbe70dd83be3790661c
     # Escape any curly braces in the reason strings before passing to cli,
     # because error messages from nlmixr2/cli themselves may contain `{`/`}`
     # which cli would try to parse as glue expressions.

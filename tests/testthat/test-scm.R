@@ -1426,10 +1426,15 @@ test_that("runSCM: retryOFVTolerance=0 passed through without error", {
   )
 })
 
+<<<<<<< HEAD
+=======
+
+>>>>>>> 975dd26fb330eb9407f1efbe70dd83be3790661c
 # =============================================================================
 # cli brace escaping — failure messages containing {} must not crash cli_warn
 # =============================================================================
 
+<<<<<<< HEAD
 test_that("cli_warn tolerates braces in failure messages", {
   # Reproduce the exact code path from .fitCandidatePairs() failure reporting
   fail_msgs <- c("wt{x} ~ cl: column 'wt{x}' not found")
@@ -1444,10 +1449,26 @@ test_that("cli_warn tolerates braces in failure messages", {
       setNames(fail_msgs_safe, "x")
     )),
     "candidate fit"
+=======
+test_that(".fitCandidatePairs: braces in failure reason do not crash cli", {
+  base_fit <- .fit_base()
+  bad <- data.frame(
+    var = "cl", covar = "wt{x}", covExpr = "WT", shape = "power",
+    init = 0.1, lower = -5, upper = 5, stringsAsFactors = FALSE
+  )
+  # Should fail with the "All … failed" stop(), not a cli parse error
+  expect_error(
+    .cur$.fitCandidatePairs(
+      pairs = bad, base_ui = base_fit$ui, fit = base_fit,
+      data = .theoph, pVal = 0.05, stepIdx = 1L, add = TRUE, print = 0
+    ),
+    "All 1 candidate fit\\(s\\) failed"
+>>>>>>> 975dd26fb330eb9407f1efbe70dd83be3790661c
   )
 })
 
 # =============================================================================
+<<<<<<< HEAD
 # Retry-event reporting: cli_alert_warning (immediate) vs cli_warn (queued)
 # =============================================================================
 # Regression: the unrealistic-OFV retry messages in .fitCandidatePairs() used
@@ -1514,6 +1535,8 @@ test_that(".fitCandidatePairs retry events: alert is emitted immediately, not qu
 # summaryTable$included: backward removals labeled "dropped" (not "yes")
 # =============================================================================
 # =============================================================================
+=======
+>>>>>>> 975dd26fb330eb9407f1efbe70dd83be3790661c
 # summaryTable$included: backward removals labeled "dropped" (not "yes")
 # =============================================================================
 
