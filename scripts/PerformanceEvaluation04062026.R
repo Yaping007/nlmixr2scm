@@ -1,9 +1,9 @@
 ##Install remote & install nlmixr2utils and nlmixr2scm from GitHub
 #options(repos = c(CRAN = "https://cran.rstudio.com"))
-#options(download.file.method = "wininet")
+options(download.file.method = "wininet")
 #install.packages("remotes")
 #remotes::install_github("kestrel99/nlmixr2utils")
-#remotes::install_github("kestrel99/nlmixr2scm")
+remotes::install_github("kestrel99/nlmixr2scm")
 ##updated all R packages. 
 
 
@@ -756,7 +756,7 @@ saveRDS(eta_cor_summary_v2, file.path(out_dir_v2, "eta_cor_summary_v2.rds"))
 
 
 ## ============================================================================
-## True parameter table per scenario (for RMRSE)----------
+# True parameter table per scenario (for RMRSE)----------
 ## ----------------------------------------------------------------------------
 ##   RMRSE = sqrt(mean(((estimate - true) / true)^2)) per parameter, per scenario.
 ##   Long format makes joining estimates (one row per parameter per fit) trivial.
@@ -837,7 +837,7 @@ true_params_wide <- true_params %>%
 
 
 ## ============================================================================
-## Convert to NONMEM-format dataset for nlmixr2 fitting / runSCM-------
+# Convert to NONMEM-format dataset for nlmixr2 fitting / runSCM-------
 ## ----------------------------------------------------------------------------
 ##   For each (SCENARIO, DATASET, SUBJECT) we create:
 ##     - one EVID = 1 dose row at TIME = 0 with AMT = DOSE_MG, CMT = "depot"
@@ -878,47 +878,7 @@ to_nm_dataset <- function(sim_obs) {
 
 
 ## ############################################################################
-## STAGE 1 SMOKE TEST -- one dataset from scenario 9------------
-## ############################################################################
-##
-## Goal of this stage
-## ------------------
-## (1) Confirm the simulation output can be re-fitted with the *true* model.
-## (2) Quantify estimation bias / precision against `true_params` using relative squared error
-## (3) Exercise every feature of `nlmixr2scm::runSCM()`:
-##       a. forward selection only             searchType = "forward"
-##       b. backward elimination only          searchType = "backward"
-##       c. full SCM (forward then backward)   searchType = "scm"
-##       d. user-specified candidate pairs     pairsVec = ...
-##       e. full covariate building            (b) with all candidates pre-included
-## (4) Benchmark wall-clock runtime for every step so the 250-dataset / 16-
-##     scenario sweep can be sized.
-##
-## Why scenario 9
-## --------------
-## Scenario 9 = the simplest non-null scenario:
-##   I_BW_CL = 1, I_CRCL_CL = 0, I_BW_VC = 0, I_SEX_VC = 0
-## Only BW->CL has a true effect (TH_BW_CL = 0.75), so SCM should:
-##   - keep CLBW (true positive)
-##   - reject CLcrCL, VcBW, VcSEX (true negatives at the article p-values)
-##
-## Article parameters to recover (true_params)
-## -------------------------------------------
-##   Structural    : CL, Vc, Q, Vp, KA
-##   Covariate     : CLBW (only nonzero in scenario 9)
-##                   CLcrCL, VcBW, VcSEX (zero -> not estimated by base model)
-##   Random effects: var_CL, var_Vc, cov_VcCL
-##   Residual      : ResErr
-##
-## RMRSE
-## -----
-##   RMRSE_p = sqrt( mean_d ( ((est_p,d - true_p) / true_p)^2 ) )
-## With one dataset this collapses to relative error=|est - true| / |true|; we compute it as
-## a smoke test, then expand to 250 datasets in stage 2.
-## ############################################################################
-
-## ############################################################################
-## STAGE 1 SMOKE TEST -- one dataset from scenario 9
+#STAGE 1 SMOKE TEST -- one dataset from scenario 9--------
 ## ############################################################################
 ##
 ## Analytical plan
@@ -941,6 +901,7 @@ to_nm_dataset <- function(sim_obs) {
 ##       - SCM step history (summaryTable)
 ##       - final-model parameter estimates (with covariate coefficients)
 ##       - runtime
+##       - convergence status (CN, successful minimization)
 ##
 ## Why scenario 9
 ## --------------
@@ -949,22 +910,13 @@ to_nm_dataset <- function(sim_obs) {
 ## Only BW->CL has a true effect (TH_BW_CL = 0.75), so SCM should:
 ##   - keep CLBW (true positive)
 ##   - reject CLcrCL, VcBW, VcSEX, plus BMI/RACE on CL and Vc (true negatives)
-##
-## Article parameters (true_params, scenario 9)
-## --------------------------------------------
-##   Structural    : CL = 0.6, Vc = 20, Q = 1.8, Vp = 80, KA = 0.7
-##   Covariate     : CLBW = 0.75   (only nonzero in scenario 9)
-##                   CLcrCL = VcBW = VcSEX = 0
-##   Random effects: var_CL = 0.1, var_Vc = 0.1, cov_VcCL = 0.02
-##   Residual      : ResErr = 0.1
-##
 ## Relative error per parameter (one dataset)
 ##   rel_err_p = (estimate_p - true_p) / true_p
 ## (The full RMRSE definition collapses to this when N_dataset = 1.)
 ## ############################################################################
 
 ## ============================================================================
-## Part 1: Robustness of model refitting -- TRUE scenario-9 model
+#Part 1: Robustness of model refitting -- TRUE scenario-9 model--------
 ## ============================================================================
 ## ---- 1.1 / 1.2  Build NM-format dataset for SCENARIO = 9, DATASET = 1 ----
 out_dir_v2 <- "simulated_virtual_dataset_eta_filtered"
@@ -985,6 +937,7 @@ hl_mult      <- c(0, 0.05, 0.1, 0.5, 1, 3)
 sample_times <- hl_mult * t_half_typ
 
 sim_obs_scn09 <- readRDS(file.path(out_dir_v2, "sim_obs_scenario_09.rds"))
+
 ds01 <- to_nm_dataset(sim_obs_scn09) %>%
   dplyr::filter(DATASET == 1) %>%
   dplyr::select(-SCENARIO, -DATASET) %>%
@@ -1004,7 +957,7 @@ out_dir_v2 <- "simulated_virtual_dataset_eta_filtered"
 stage1_dir <- file.path(out_dir_v2, "stage1_smoke_scn09_ds01")
 ds01 <- readRDS(file.path(stage1_dir, "nm_scn09_ds01.rds"))
 
-## ---- 1.3  TRUE model: BW on CL covariate baked in -----------------------
+## ---- 1.3 (a)  TRUE model: BW on CL covariate baked in (exponential as in referenced paper) -----------------------
 ##   Same structure as scm_2cmt_oral_rx() with the scenario-9 indicators
 ##   hard-wired. Used to re-estimate parameters and assess bias.
 ##   - BW reference value: 70 kg (matches simulation)
@@ -1016,7 +969,12 @@ true_2cmt_scn09_refexp <- function() {
     lTVQ     <- log(1.8)
     lTVVc    <- log(20)
     lTVVp    <- log(80)
-    lTVKA    <- log(0.7)
+    ## KA is structurally near-unidentifiable with Khandelwal's sampling
+    ## design (first non-zero sample at ~7 h, absorption t1/2 ~ 1 h, so
+    ## the absorption phase is invisible).  Estimating it inflates the
+    ## cov-matrix condition number by ~20x without changing OFV.  Fix at
+    ## its true value to match common warfarin-modelling practice.
+    lTVKA    <- fix(log(0.7))
     TH_BW_CL <- 0.75    # power exponent for BW on CL
 
     eta.cl + eta.vc ~ c(
@@ -1066,7 +1024,8 @@ true_2cmt_scn09_lin <- function() {
     lTVQ     <- log(1.8)
     lTVVc    <- log(20)
     lTVVp    <- log(80)
-    lTVKA    <- log(0.7)
+    ## KA fixed at true value -- see comment in true_2cmt_scn09_refexp().
+    lTVKA    <- fix(log(0.7))
     TH_BW_CL <- 0.75    # log-scale slope of BW on CL (== power exponent)
 
     eta.cl + eta.vc ~ c(
@@ -1131,12 +1090,42 @@ saveRDS(fit_true_lin,
 
 
 ## Convergence diagnostics
+##   converged     : TRUE iff optimizer reported success (fit$convergence == 0)
+##                   AND objf is finite.  fit$convergence is the canonical
+##                   optimizer status flag (0 = success); the earlier
+##                   is.finite(objf)-only test silently treated non-converged
+##                   fits as converged whenever OFV happened to be finite.
+##   cond_num      : raw condition number = lambda_max / lambda_min of the
+##                   parameter cov matrix.  This is what nlmixr2 stores in
+##                   fit$conditionNumber*.  Populated only when covMethod
+##                   != "" was used at fit time.
+##   cond_num_sqrt : sqrt(cond_num) = sqrt(lambda_max / lambda_min).  This
+##                   is the NONMEM / Beal convention reported by $COV with
+##                   PRINT=E.  Most PMX papers (incl. Khandelwal 2019)
+##                   quote thresholds against this form -- e.g. < 1000 for
+##                   a well-conditioned model.  Roughly: sqrt(35492) ~ 188.
+##   cov_ok        : TRUE iff fit$cov is a finite-diagonal matrix.  Will be
+##                   FALSE when covMethod = "" was used (cov not computed).
+##   message       : optimizer exit message, e.g. "Normal exit from bobyqa".
 diagnose_fit <- function(fit) {
+  if (is.null(fit)) {
+    return(list(converged = NA, objf = NA_real_,
+                cond_num = NA_real_, cond_num_sqrt = NA_real_,
+                cov_ok = NA, message = NA_character_))
+  }
+  conv_code <- if (!is.null(fit$convergence)) fit$convergence else NA_integer_
+  cn <- fit$conditionNumber
+  if (is.null(cn)) cn <- fit$conditionNumberCov
+  if (is.null(cn)) cn <- fit$conditionNumberTheta
+  cn_val <- if (is.null(cn)) NA_real_ else as.numeric(cn)
   list(
-    converged = !is.null(fit$objf) && is.finite(fit$objf),
-    objf      = if (!is.null(fit$objf)) fit$objf else NA_real_,
-    cond_num  = if (!is.null(fit$conditionNumber)) fit$conditionNumber else NA_real_,
-    cov_ok    = isTRUE(!is.null(fit$cov) && all(is.finite(diag(fit$cov))))
+    converged     = isTRUE(conv_code == 0L) &&
+                      !is.null(fit$objf) && is.finite(fit$objf),
+    objf          = if (!is.null(fit$objf)) fit$objf else NA_real_,
+    cond_num      = cn_val,
+    cond_num_sqrt = if (is.na(cn_val)) NA_real_ else sqrt(cn_val),
+    cov_ok        = isTRUE(!is.null(fit$cov) && all(is.finite(diag(fit$cov)))),
+    message       = if (!is.null(fit$message)) as.character(fit$message) else NA_character_
   )
 }
 diag_true_refexp <- diagnose_fit(fit_true_refexp) #-16805
@@ -1315,13 +1304,17 @@ extract_params_long <- function(fit, includeCov = TRUE) {
     estimate  = unname(theta["prop.err"])
   )
 
-  ## Covariate effects: read from fit$theta if present, else NA
+  ## Covariate effects: read from fit$theta if present, else NA.
+  ##   The theta names emitted by runSCM() preserve the original case of the
+  ##   data column (e.g. "cov_BW_power_cl" when the data has column "BW"),
+  ##   so the regex must match case-insensitively to catch both "BW" and
+  ##   "wt" / "bw" parameterisations.
   cov_names_in_fit <- names(theta)
   cov_map <- list(
-    CLBW   = c("TH_BW_CL", grep("^cov_(bw|wt)_power_cl$",   cov_names_in_fit, value = TRUE)),
-    CLcrCL = c("TH_CRCL_CL", grep("^cov_crcl_power_cl$",    cov_names_in_fit, value = TRUE)),
-    VcBW   = c("TH_BW_VC", grep("^cov_(bw|wt)_power_vc$",   cov_names_in_fit, value = TRUE)),
-    VcSEX  = c("TH_SEX_VC", grep("^cov_sex(_male)?_cat_vc$", cov_names_in_fit, value = TRUE))
+    CLBW   = c("TH_BW_CL",   grep("^cov_(bw|wt)_power_cl$",   cov_names_in_fit, value = TRUE, ignore.case = TRUE)),
+    CLcrCL = c("TH_CRCL_CL", grep("^cov_crcl_power_cl$",      cov_names_in_fit, value = TRUE, ignore.case = TRUE)),
+    VcBW   = c("TH_BW_VC",   grep("^cov_(bw|wt)_power_vc$",   cov_names_in_fit, value = TRUE, ignore.case = TRUE)),
+    VcSEX  = c("TH_SEX_VC",  grep("^cov_sex(_male)?_cat_vc$", cov_names_in_fit, value = TRUE, ignore.case = TRUE))
   )
   cov_long <- tibble::tibble(
     parameter = names(cov_map),
@@ -1388,7 +1381,7 @@ saveRDS(err_true_wide,
         file.path(stage1_dir, "rel_err_true_scn09_ds01_wide.rds"))
 
 
-## ---- Per-model summary tibble (one row per parameterisation) -----------
+## ---- Per-model summary tibble (diagnostic parameters) -----------
 .build_part1_row <- function(label, diag_x, t_x) {
   tibble::tibble(
     step             = "true_model_fit",
@@ -1399,6 +1392,7 @@ saveRDS(err_true_wide,
     objf             = diag_x$objf,
     cov_step_ok      = diag_x$cov_ok,
     cond_num         = diag_x$cond_num,
+    cond_num_sqrt    = diag_x$cond_num_sqrt,  # NONMEM convention (< 1000 healthy)
     runtime_sec      = unname(t_x["elapsed"])
   )
 }
@@ -1409,7 +1403,7 @@ part1_summary <- dplyr::bind_rows(
 saveRDS(part1_summary, file.path(stage1_dir, "part1_summary.rds"))
 
 ## ============================================================================
-## Part 2: runSCM feature tests -- BASE (no-covariate) model as starting point
+#Part 2: runSCM feature tests -- BASE (no-covariate) model as starting point---------
 ## ============================================================================
 scm_focei <- nlmixr2est::foceiControl(
   sigdig     = 4,
@@ -1418,6 +1412,43 @@ scm_focei <- nlmixr2est::foceiControl(
   calcTables = FALSE,     # SCM doesn't need IPRED/CWRES tables
   covMethod  = ""         # SCM doesn't need cov matrix for LRT
 )
+
+## ---- Control for the post-SCM diagnostic refit ---------------------------
+##   The SCM search above uses scm_focei (covMethod = "", calcTables = FALSE)
+##   for speed -- LRT only needs OFV.  Once SCM picks a final model we refit
+##   it ONCE with full diagnostics enabled:
+##     covMethod  = "r,s"  -> sandwich (R^-1 S R^-1); the field default for
+##                            standard errors, %RSE, 95 % CIs, condition
+##                            number.  Matches NONMEM MATRIX=RSR.
+##     calcTables = TRUE   -> IPRED / CWRES / NPDE tables for GOF / VPC.
+##     sigdig     = 4      -> tighter convergence than the SCM-iteration
+##                            setting (we only do this once so cost is OK).
+final_focei <- nlmixr2est::foceiControl(
+  sigdig     = 4,
+  outerOpt   = "bobyqa",
+  print      = 0,
+  calcTables = TRUE,
+  covMethod  = "r,s"
+)
+
+## ---- Helper: refit a final SCM-selected model with full diagnostics ------
+##   Reuses the model UI baked into the SCM-final fit (which already includes
+##   all retained covariate relations) and the same training data, but with
+##   a richer foceiControl.  Output is a fully-instrumented nlmixr2 fit with
+##     fit$cov, fit$conditionNumber, fit$parFixedDf (SE/%RSE/CI), etc.
+##   Errors are caught and returned as NULL with a warning so a bad refit
+##   doesn't blow up downstream packaging.
+refit_final_model <- function(final_fit, control = final_focei) {
+  if (is.null(final_fit)) return(NULL)
+  tryCatch({
+    nlmixr2(final_fit$ui, nlme::getData(final_fit),
+            est = final_fit$est, control = control)
+  }, error = function(e) {
+    warning("refit_final_model() failed: ", conditionMessage(e),
+            call. = FALSE)
+    NULL
+  })
+}
 ## ---- 2.1  Base model (no covariates) ------------------------------------
 base_2cmt_oral <- function() {
   ini({
@@ -1425,7 +1456,13 @@ base_2cmt_oral <- function() {
     lTVQ  <- log(1.8)
     lTVVc <- log(20)
     lTVVp <- log(80)
-    lTVKA <- log(0.7)
+    ## KA fixed: the design's first non-zero sample (~7 h) is well past
+    ## absorption (KA = 0.7 /h, absorption t1/2 ~ 1 h), so KA cannot be
+    ## informatively estimated from the data.  Estimating it inflates
+    ## the cov-matrix condition number by ~20x (raw CN ~35000 -> ~1800)
+    ## without changing OFV or the SCM decisions.  Fixing matches the
+    ## warfarin / Khandelwal convention.
+    lTVKA <- fix(log(0.7))
 
     eta.cl + eta.vc ~ c(
       0.1,
@@ -1462,32 +1499,69 @@ t_fit_base <- system.time(
 saveRDS(fit_base, file.path(stage1_dir, "fit_base.rds"))
 fit_base <- readRDS(file.path(stage1_dir, "fit_base.rds"))
 
+t_fit_base_cov <- system.time(
+  fit_base_cov <- nlmixr2(base_2cmt_oral, ds01,
+                      est = "focei", control = final_focei)
+)
+saveRDS(fit_base_cov, file.path(stage1_dir, "fit_base_cov.rds"))
+fit_base_cov <- readRDS(file.path(stage1_dir, "fit_base_cov.rds"))
+
+
 ## ---- Helper: package one runSCM result for downstream comparison --------
 ##   Returns:
-##     - selected:    accepted (var, covar, shape) pairs
-##     - step_hist:   full SCM step history (forward + backward summary)
-##     - final_est:   extract_params_long() of the final model
-##     - rel_err:     relative error vs true scenario-9 parameters
-##     - runtime_sec: wall-clock seconds for the runSCM call
-##     - diag:        convergence diagnostics for the final fit
+##     - selected:        accepted (var, covar, shape) pairs
+##     - step_hist:       full SCM step history (forward + backward summary)
+##     - final_est:       extract_params_long() of the final model
+##     - rel_err:         relative error vs true scenario parameters
+##     - runtime_sec:     wall-clock seconds for the runSCM call
+##     - diag:            convergence diagnostics for the final fit
+##     - parFixed:        nlmixr2 parFixedDf (Estimate, SE, %RSE, CI) when a
+##                         refit was performed; NULL otherwise
+##     - final_fit_refit: the refitted nlmixr2 fit object when refit_control
+##                         was supplied; NULL otherwise
+##
+##   refit_control:
+##     When NULL (default) the SCM-final fit (covMethod = "", no tables) is
+##     used as-is -- fast, but SE / condition number are unavailable.
+##     When non-NULL (typically `final_focei`) the SCM-final model is refit
+##     ONCE with the supplied control, producing full diagnostics.  The
+##     refitted fit replaces final_fit in all downstream extraction.
 package_scm_result <- function(label, scm_res, runtime_sec,
-                               true_long = true_params, scenario_id = 9) {
-  ## Pick the final fit (backward if available, else forward, else base)
-  final_fit <-
-    if (!is.null(scm_res$resBck) && !is.null(scm_res$resBck$finalFit)) {
-      scm_res$resBck$finalFit
-    } else if (!is.null(scm_res$resFwd) && !is.null(scm_res$resFwd$finalFit)) {
-      scm_res$resFwd$finalFit
-    } else {
-      NULL
-    }
+                               true_long = true_params, scenario_id = 9,
+                               refit_control = NULL) {
+  ## Pick the final fit.  runSCM() returns scm_res$resFwd / scm_res$resBck as
+  ## UNNAMED 3-element lists: [[1]] = nlmixr2FitCore fit, [[2]] = step table,
+  ## [[3]] = final-selection data.frame.  The previous code looked for
+  ## `$finalFit` which never exists, so final_fit was always NULL.  Backward
+  ## takes precedence because it represents the post-pruning model.
+  .pickFit <- function(x) {
+    if (is.null(x)) return(NULL)
+    cand <- if (is.list(x) && length(x) >= 1L) x[[1L]] else x
+    if (inherits(cand, "nlmixr2FitCore")) cand else NULL
+  }
+  final_fit <- .pickFit(scm_res$resBck)
+  if (is.null(final_fit)) final_fit <- .pickFit(scm_res$resFwd)
 
-  ## Selected pairs from summaryTable (rows where the relation is in final model)
+  ## Optional: refit final model with full diagnostics (cov, IPRED tables).
+  ## When the refit succeeds it REPLACES final_fit so every downstream
+  ## extraction (estimates, rel_err, diag) reflects the diagnostic fit.
+  final_fit_refit <- NULL
+  if (!is.null(final_fit) && !is.null(refit_control)) {
+    final_fit_refit <- refit_final_model(final_fit, control = refit_control)
+    if (!is.null(final_fit_refit)) final_fit <- final_fit_refit
+  }
+
+  ## Selected pairs from summaryTable.  The decision column is `included`
+  ## with values "yes"/"no" (forward) and "retained"/"dropped" (backward);
+  ## the old code filtered on inFinal/accepted/kept which never exist, so
+  ## `selected` collapsed back to the full step_hist.
   selected <- if (!is.null(scm_res$summaryTable)) {
     st <- as.data.frame(scm_res$summaryTable)
-    keep_col <- intersect(c("inFinal", "accepted", "kept"), colnames(st))
-    if (length(keep_col) >= 1L) st[as.logical(st[[keep_col[1]]]), , drop = FALSE]
-    else st
+    if ("included" %in% colnames(st)) {
+      st[st$included %in% c("yes", "retained"), , drop = FALSE]
+    } else {
+      st
+    }
   } else {
     NULL
   }
@@ -1497,25 +1571,30 @@ package_scm_result <- function(label, scm_res, runtime_sec,
     rel_err_one(final_est, true_long, scenario_id)
   } else NULL
   diag      <- if (!is.null(final_fit)) diagnose_fit(final_fit) else NULL
+  parFixed  <- if (!is.null(final_fit_refit)) final_fit_refit$parFixedDf else NULL
 
   list(
-    label        = label,
-    selected     = selected,
-    step_hist    = scm_res$summaryTable,
-    final_est    = final_est,
-    rel_err      = rel_err,
-    diag         = diag,
-    runtime_sec  = runtime_sec,
-    raw          = scm_res
+    label           = label,
+    selected        = selected,
+    step_hist       = scm_res$summaryTable,
+    final_est       = final_est,
+    rel_err         = rel_err,
+    diag            = diag,
+    parFixed        = parFixed,
+    final_fit_refit = final_fit_refit,
+    runtime_sec     = runtime_sec,
+    raw             = scm_res
   )
 }
 
 
-
 ## ---- Candidate contiuous covariate-parameter pairs --------------------------------
+out_dir <- "simulated_virtual_dataset" #with covariate & PK sampling date ready for model fitting.
+true_params <- readRDS(file.path(out_dir, "true_params_long.rds"))
 out_dir_v2 <- "simulated_virtual_dataset_eta_filtered"
 stage1_dir <- file.path(out_dir_v2, "stage1_smoke_scn09_ds01")
 fit_base <- readRDS(file.path(stage1_dir, "fit_base.rds"))
+fit_base_cov <- readRDS(file.path(stage1_dir, "fit_base_cov.rds"))
 scm_focei <- nlmixr2est::foceiControl(
   sigdig     = 4,
   outerOpt   = "bobyqa",
@@ -1523,6 +1602,24 @@ scm_focei <- nlmixr2est::foceiControl(
   calcTables = FALSE,     # SCM doesn't need IPRED/CWRES tables
   covMethod  = ""         # SCM doesn't need cov matrix for LRT
 )
+scm_focei_maxiteration <- nlmixr2est::foceiControl(
+  sigdig     = 4,
+  outerOpt   = "bobyqa",
+  print      = 0,
+  calcTables = FALSE,     # SCM doesn't need IPRED/CWRES tables
+  maxOuterIterations = 2000,
+  maxInnerIterations = 2000,
+  covMethod  = ""         # SCM doesn't need cov matrix for LRT
+)
+
+final_focei <- nlmixr2est::foceiControl(
+  sigdig     = 4,
+  outerOpt   = "bobyqa",
+  print      = 0,
+  calcTables = TRUE,
+  covMethod  = "r,s"
+)
+
 ds01 <- readRDS(file.path(stage1_dir, "nm_scn09_ds01.rds"))
 
 
@@ -1596,6 +1693,7 @@ t_fwd     <- attr(res_fwd, "elapsed_s")
 saveRDS(res_fwd, file.path(stage1_dir, "res_fwd.rds"))    # idempotent recovery
 test_fwd  <- package_scm_result("forward_only", res_fwd, t_fwd)
 saveRDS(test_fwd, file.path(stage1_dir, "test_fwd.rds"))
+test_fwd <- readRDS(file.path(stage1_dir, "test_fwd.rds"))
 
 ## ---- 2.2.1  Forward selection only + auto-generated pair ----------------------------------------
 res_fwd_auto <- runSCM_traced(
@@ -1617,6 +1715,51 @@ t_fwd_auto     <- attr(res_fwd_auto, "elapsed_s")
 saveRDS(res_fwd_auto, file.path(stage1_dir, "res_fwd_auto.rds"))    # idempotent recovery
 test_fwd_auto  <- package_scm_result("forward_only", res_fwd_auto, t_fwd_auto)
 saveRDS(test_fwd_auto, file.path(stage1_dir, "test_fwd_auto.rds"))
+test_fwd_auto <- readRDS(file.path(stage1_dir, "test_fwd_auto.rds"))
+
+
+res_fwd_auto_cov <- runSCM_traced(
+  label       = "forward",
+  data        = ds01,
+  fit         =  fit_base_cov,
+  varsVec    = c("cl", "vc"),
+  covarsVec  = "BW",
+  catvarsVec = "SEX",
+  shapes     = c("power", "lin"),
+  searchType  = "forward",
+  control     = final_focei,    # slim control: no tables, no cov, sigdig=4 bobyqa
+  saveModels  = FALSE,
+  workers     = 3L,           # 4 cores: leave 1 free for OS / Positron
+  print       = 100,           # FOCEi iteration progress every 100 iters
+  maxRetries = 0L #no retries for this smoke test
+)
+
+t_fwd_auto_cov     <- attr(res_fwd_auto_cov, "elapsed_s")
+test_fwd_auto_cov  <- package_scm_result("forward_only_cov", res_fwd_auto_cov, t_fwd_auto_cov)
+saveRDS(test_fwd_auto_cov, file.path(stage1_dir, "test_fwd_auto_cov.rds"))
+test_fwd_auto_cov <- readRDS(file.path(stage1_dir, "test_fwd_auto_cov.rds"))
+
+res_fwd_auto_maxiteration <- runSCM_traced(
+  label       = "forward",
+  data        = ds01,
+  fit         = fit_base,
+  varsVec    = c("cl", "vc"),
+  covarsVec  = "BW",
+  catvarsVec = "SEX",
+  shapes     = c("power", "lin"),
+  searchType  = "forward",
+  control     = scm_focei_maxiteration,    # slim control: no tables, no cov, sigdig=4 bobyqa
+  saveModels  = FALSE,
+  workers     = 3L,           # 4 cores: leave 1 free for OS / Positron
+  print       = 100,           # FOCEi iteration progress every 100 iters
+  maxRetries = 1L #no retries for this smoke test
+)
+t_fwd_auto_maxiteration     <- attr(res_fwd_auto_maxiteration, "elapsed_s")
+saveRDS(res_fwd_auto_maxiteration, file.path(stage1_dir, "res_fwd_auto_maxiteration.rds"))    # idempotent recovery
+test_fwd_auto_maxiteration  <- package_scm_result("forward_only", res_fwd_auto_maxiteration, t_fwd_auto_maxiteration)
+saveRDS(test_fwd_auto_maxiteration, file.path(stage1_dir, "test_fwd_auto_maxiteration.rds"))
+test_fwd_auto_maxiteration <- readRDS(file.path(stage1_dir, "test_fwd_auto_maxiteration.rds"))
+
 
 
 ## ---- 2.3  Backward elimination only -------------------------------------
@@ -1676,6 +1819,24 @@ saveRDS(res_full, file.path(stage1_dir, "res_full.rds"))
 test_full  <- package_scm_result("full_scm", res_full, t_full)
 saveRDS(test_full, file.path(stage1_dir, "test_full.rds"))
 
+res_full_cov <- runSCM_traced(
+  label       = "full_scm",
+  fit         = fit_base_cov,
+  pairsVec    = candidate_pairs_test,
+  catvarsVec  = c("SEX", "RACE"),
+  searchType  = "scm",
+  control     = final_focei,
+  saveModels  = FALSE,
+  workers     = 3L,
+  print       = 100,
+  maxRetries = 0L
+)
+
+t_full_cov     <- attr(res_full_cov , "elapsed_s") #runtime 17min
+saveRDS(res_full_cov , file.path(stage1_dir, "res_full_cov.rds"))
+test_full_cov  <- package_scm_result("full_scm_cov", res_full_cov, t_full_cov)
+saveRDS(test_full_cov, file.path(stage1_dir, "test_full_cov.rds"))
+
 
 ## ============================================================================
 ## ---- 2.6  Categorical-covariate smoke test (BW continuous + SEX cat) ----
@@ -1714,9 +1875,7 @@ candidate_pairs_shape_cattest <- list(
   ## OFV because BW carries strong info; the interesting comparison is
   ## *between* the four shapes (which one minimises OFV).
   list(var = "cl", covar = "BW",  shapes = "power"),
-  list(var = "cl", covar = "BW",  shapes = "lin"),
   list(var = "cl", covar = "BW",  shapes = "log"),
-  list(var = "cl", covar = "BW",  shapes = "identity"),
   ## Categorical: SEX is 0/1.  Use "cat" -- "power" would give 0^theta
   ## for SEX = 0 (undefined / 0).  catvarsVec = "SEX" passed to runSCM
   ## triggers .makeSCMData() to build the SEX_1 indicator column.
@@ -1801,6 +1960,18 @@ test_full_cat <- package_scm_result("full_scm_cat", res_full_cat, t_full_cat)
 saveRDS(test_full_cat, file.path(stage1_dir, "test_full_cat.rds"))
 
 
+
+
+#Scenario 16- wr_power_cl=0.75 Crcl_powerCL=0.5, wt_power_vc=1, sex_vc=0.5-------
+#Part1: True-model robustness (refexp vs lin)
+
+#Part2: runSCM feature tests (forward, backward, user-specified, full SCM)
+
+
+
+
+
+
 ## ---- Aggregate the categorical smoke-test results -----------------------
 scm_tests_cat <- list(
   forward_cat            = test_fwd_cat,
@@ -1812,13 +1983,14 @@ saveRDS(scm_tests_cat, file.path(stage1_dir, "scm_tests_cat.rds"))
 
 part2_summary_cat <- purrr::map_dfr(scm_tests_cat, function(x) {
   tibble::tibble(
-    test         = x$label,
-    n_selected   = if (is.null(x$selected)) NA_integer_ else nrow(x$selected),
-    converged    = if (is.null(x$diag)) NA else x$diag$converged,
-    objf         = if (is.null(x$diag)) NA_real_ else x$diag$objf,
-    cov_step_ok  = if (is.null(x$diag)) NA else x$diag$cov_ok,
-    cond_num     = if (is.null(x$diag)) NA_real_ else x$diag$cond_num,
-    runtime_sec  = x$runtime_sec
+    test          = x$label,
+    n_selected    = if (is.null(x$selected)) NA_integer_ else nrow(x$selected),
+    converged     = if (is.null(x$diag)) NA else x$diag$converged,
+    objf          = if (is.null(x$diag)) NA_real_ else x$diag$objf,
+    cov_step_ok   = if (is.null(x$diag)) NA else x$diag$cov_ok,
+    cond_num      = if (is.null(x$diag)) NA_real_ else x$diag$cond_num,
+    cond_num_sqrt = if (is.null(x$diag)) NA_real_ else x$diag$cond_num_sqrt,
+    runtime_sec   = x$runtime_sec
   )
 })
 saveRDS(part2_summary_cat, file.path(stage1_dir, "part2_summary_cat.rds"))
@@ -1836,13 +2008,14 @@ saveRDS(scm_tests, file.path(stage1_dir, "scm_tests.rds"))
 ## Per-test summary tibble
 part2_summary <- purrr::map_dfr(scm_tests, function(x) {
   tibble::tibble(
-    test           = x$label,
-    n_selected     = if (is.null(x$selected)) NA_integer_ else nrow(x$selected),
-    converged      = if (is.null(x$diag)) NA else x$diag$converged,
-    objf           = if (is.null(x$diag)) NA_real_ else x$diag$objf,
-    cov_step_ok    = if (is.null(x$diag)) NA else x$diag$cov_ok,
-    cond_num       = if (is.null(x$diag)) NA_real_ else x$diag$cond_num,
-    runtime_sec    = x$runtime_sec
+    test          = x$label,
+    n_selected    = if (is.null(x$selected)) NA_integer_ else nrow(x$selected),
+    converged     = if (is.null(x$diag)) NA else x$diag$converged,
+    objf          = if (is.null(x$diag)) NA_real_ else x$diag$objf,
+    cov_step_ok   = if (is.null(x$diag)) NA else x$diag$cov_ok,
+    cond_num      = if (is.null(x$diag)) NA_real_ else x$diag$cond_num,
+    cond_num_sqrt = if (is.null(x$diag)) NA_real_ else x$diag$cond_num_sqrt,
+    runtime_sec   = x$runtime_sec
   )
 })
 saveRDS(part2_summary, file.path(stage1_dir, "part2_summary.rds"))
