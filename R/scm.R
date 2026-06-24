@@ -1802,6 +1802,9 @@ buildPairs <- function(varsVec = NULL, covarsVec = NULL, pairsVec = NULL) {
       if (isTRUE(ui_cand$.failed)) return(ui_cand)
 
       loop_result <- NULL
+      # Best attempt seen across retries (forward path only).  
+      # "Best" = the candidate with the largest dObjf. 
+      best_attempt <- NULL
 
       for (attempt in 0:maxRetries) {
         cov_init_attempt <- if (attempt == 0L) {
@@ -1889,6 +1892,21 @@ buildPairs <- function(varsVec = NULL, covarsVec = NULL, pairsVec = NULL) {
           break
         }
 
+        # Selection rule: candidate wins on the first attempt (best is NULL)
+        # or when its dObjf strictly exceeds the incumbent; ties keep the
+        # incumbent.  Without this tracker, the exhaustion branch silently
+        # kept whichever attempt happened to be last -- under perturbed-init
+        # retries that was the best only by coincidence.  The corresponding
+        # regression tests live in tests/testthat/test-scm.R.
+        .cand_attempt <- list(
+          x = x, dObjf = dObjf, dof = dof, pchisqr = pchisqr,
+          attempt_num = attempt + 1L
+        )
+        if (is.null(best_attempt) ||
+            .cand_attempt$dObjf > best_attempt$dObjf) {
+          best_attempt <- .cand_attempt
+        }
+
         if (!.isUnrealisticOFV(
           x$objf, fit$objf, dObjf, pchisqr, maxDeltaOFV, effective_tolerance
         )) {
@@ -1911,19 +1929,14 @@ buildPairs <- function(varsVec = NULL, covarsVec = NULL, pairsVec = NULL) {
 
         if (attempt < maxRetries) {
           next_strategy <- if ((attempt + 1L) %% 2L == 1L) "perturbed" else "small"
-          # Use cli_alert_warning (immediate stderr emission) rather than
-          # cli_warn (queued via base warning()).  Under options(warn = 0)
-          # nlmixr2's own optimizer warnings on a diverged fit can flood
-          # the queue (capped at options(nwarnings) = 50) and push our
-          # retry messages out before they are ever displayed.  Alerts
-          # bypass the queue and are visible identically in sequential
-          # (workers = 1) and parallel (workers > 1, future-captured)
-          # setups -- see regression test in tests/testthat/test-scm.R.
-          cli::cli_alert_warning(paste0(
-            "{nam_covar} ~ {nam_var}: unrealistic OFV on attempt ",
-            attempt + 1L, "/", maxRetries + 1L, ": ", trigger, "."
+ 
+          cli::cli_warn(c(
+            "!" = paste0(
+              "{nam_covar} ~ {nam_var}: unrealistic OFV on attempt ",
+              attempt + 1L, "/", maxRetries + 1L, ": ", trigger, "."
+            ),
+            "i" = "Retrying with {next_strategy} init."
           ))
-          cli::cli_alert_info("Retrying with {next_strategy} init.")
         } else {
           if (retryFailOnExhaustion) {
             return(list(
@@ -1936,14 +1949,19 @@ buildPairs <- function(varsVec = NULL, covarsVec = NULL, pairsVec = NULL) {
               .pair = paste0(nam_covar, " ~ ", nam_var)
             ))
           } else {
-            # Immediate-emission alert (see comment above).
-            cli::cli_alert_warning(paste0(
+ 
+            cli::cli_warn(c("!" = paste0(
               "{nam_covar} ~ {nam_var}: unrealistic OFV after all ",
               maxRetries + 1L, " attempt",
               if (maxRetries + 1L == 1L) "" else "s",
-              ": ", trigger, ". Accepting best available result."
-            ))
-            loop_result <- list(x = x, dObjf = dObjf, dof = dof, pchisqr = pchisqr)
+              ": ", trigger, ". Accepting best available result (attempt ",
+              best_attempt$attempt_num, "/", maxRetries + 1L,
+              ", dOFV = ", round(best_attempt$dObjf, 3), ")."
+            )))
+            loop_result <- list(
+              x = best_attempt$x, dObjf = best_attempt$dObjf,
+              dof = best_attempt$dof, pchisqr = best_attempt$pchisqr
+            )
             break
           }
         }
@@ -2016,11 +2034,7 @@ buildPairs <- function(varsVec = NULL, covarsVec = NULL, pairsVec = NULL) {
       function(f) paste0(f$.pair, ": ", f$.reason),
       character(1)
     )
-<<<<<<< HEAD
-
-=======
     
->>>>>>> 975dd26fb330eb9407f1efbe70dd83be3790661c
     # Escape any curly braces in the reason strings before passing to cli,
     # because error messages from nlmixr2/cli themselves may contain `{`/`}`
     # which cli would try to parse as glue expressions.
