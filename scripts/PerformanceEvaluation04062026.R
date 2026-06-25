@@ -1497,6 +1497,7 @@ t_fit_base <- system.time(
                       est = "focei", control = scm_focei)
 )
 saveRDS(fit_base, file.path(stage1_dir, "fit_base.rds"))
+
 fit_base <- readRDS(file.path(stage1_dir, "fit_base.rds"))
 
 t_fit_base_cov <- system.time(
@@ -1611,7 +1612,6 @@ scm_focei_maxiteration <- nlmixr2est::foceiControl(
   maxInnerIterations = 2000,
   covMethod  = ""         # SCM doesn't need cov matrix for LRT
 )
-
 final_focei <- nlmixr2est::foceiControl(
   sigdig     = 4,
   outerOpt   = "bobyqa",
@@ -1717,7 +1717,6 @@ test_fwd_auto  <- package_scm_result("forward_only", res_fwd_auto, t_fwd_auto)
 saveRDS(test_fwd_auto, file.path(stage1_dir, "test_fwd_auto.rds"))
 test_fwd_auto <- readRDS(file.path(stage1_dir, "test_fwd_auto.rds"))
 
-
 res_fwd_auto_cov <- runSCM_traced(
   label       = "forward",
   data        = ds01,
@@ -1752,7 +1751,7 @@ res_fwd_auto_maxiteration <- runSCM_traced(
   saveModels  = FALSE,
   workers     = 3L,           # 4 cores: leave 1 free for OS / Positron
   print       = 100,           # FOCEi iteration progress every 100 iters
-  maxRetries = 1L #no retries for this smoke test
+  maxRetries = 2L #no retries for this smoke test
 )
 t_fwd_auto_maxiteration     <- attr(res_fwd_auto_maxiteration, "elapsed_s")
 saveRDS(res_fwd_auto_maxiteration, file.path(stage1_dir, "res_fwd_auto_maxiteration.rds"))    # idempotent recovery
@@ -1859,12 +1858,14 @@ saveRDS(test_full_cov, file.path(stage1_dir, "test_full_cov.rds"))
 out_dir_v2 <- "simulated_virtual_dataset_eta_filtered"
 stage1_dir <- file.path(out_dir_v2, "stage1_smoke_scn09_ds01")
 fit_base <- readRDS(file.path(stage1_dir, "fit_base.rds"))
-scm_focei <- nlmixr2est::foceiControl(
+scm_focei_n <- nlmixr2est::foceiControl(
   sigdig     = 4,
   outerOpt   = "bobyqa",
   print      = 0,
   calcTables = FALSE,     # SCM doesn't need IPRED/CWRES tables
-  covMethod  = ""         # SCM doesn't need cov matrix for LRT
+  covMethod  = "",         # SCM doesn't need cov matrix for LRT
+  maxOuterIterations = 2000,
+  maxInnerIterations = 2000,
 )
 
 
@@ -1962,10 +1963,538 @@ saveRDS(test_full_cat, file.path(stage1_dir, "test_full_cat.rds"))
 
 
 
-#Scenario 16- wr_power_cl=0.75 Crcl_powerCL=0.5, wt_power_vc=1, sex_vc=0.5-------
-#Part1: True-model robustness (refexp vs lin)
+## ############################################################################
+# STAGE 1 -- Scenario 16: all four covariate effects active -------------------
+## ############################################################################
+##   Truth (Khandelwal 2019, scenario 16):
+##     BW   on CL  (power)  TH_BW_CL   = 0.75
+##     CrCL on CL  (power)  TH_CRCL_CL = 0.50
+##     BW   on Vc  (power)  TH_BW_VC   = 1.00
+##     SEX  on Vc  (linear) TH_SEX_VC  = 0.50
+##   All four are TRUE positives.  The SCM smoke test must keep these and
+##   reject the false-positive distractors (CrCL on Vc, SEX on CL).
+##
+##   Parallel structure to the scenario-9 block above:
+##     Part 1 -- true-model robustness (refexp vs lin)
+##     Part 2 -- runSCM feature tests (forward / backward / user / full)
+##   All fits use scm_focei_n: bobyqa, sigdig 4, maxOuter/Inner = 2000,
+##   covMethod = "" (LRT only needs OFV).  Re-fit with final_focei outside
+##   this block if SE / %RSE / parFixedDf are needed for any final model.
+## ############################################################################
 
-#Part2: runSCM feature tests (forward, backward, user-specified, full SCM)
+## ---- Prep ---------------------------------------------------------------
+out_dir_v2   <- "simulated_virtual_dataset_eta_filtered"
+stage1_dir16 <- file.path(out_dir_v2, "stage1_smoke_scn16_ds01")
+if (!dir.exists(stage1_dir16)) dir.create(stage1_dir16, recursive = TRUE)
+
+## Single control re-used for every fit in this block.  Trailing-comma bug
+## in the earlier draft of scm_focei_n is fixed here.
+scm_focei_n <- nlmixr2est::foceiControl(
+  sigdig             = 4,
+  outerOpt           = "bobyqa",
+  print              = 0,
+  calcTables         = FALSE,    # SCM doesn't need IPRED / CWRES tables
+  covMethod          = "r,s",       # SCM doesn't need cov matrix for LRT
+  maxOuterIterations = 2000,
+  maxInnerIterations = 2000
+)
+
+## NM-format dataset for SCENARIO = 16, DATASET = 1
+sim_obs_scn16 <- readRDS(file.path(out_dir_v2, "sim_obs_scenario_16.rds"))
+ds16_01 <- to_nm_dataset(sim_obs_scn16) %>%
+  dplyr::filter(DATASET == 1) %>%
+  dplyr::select(-SCENARIO, -DATASET) %>%
+  dplyr::mutate(
+    ID   = as.integer(ID),
+    SEX  = as.integer(SEX),
+    RACE = as.integer(RACE)
+  )
+saveRDS(ds16_01, file.path(stage1_dir16, "nm_scn16_ds01.rds"))
+ds16_01 <- readRDS(file.path(stage1_dir16, "nm_scn16_ds01.rds"))
+
+ds16_01_60 <-  ds16_01 %>% filter(ID <=60)
+saveRDS(ds16_01_60, file.path(stage1_dir16, "nm_scn16_ds01_60.rds"))
+ds16_01_60 <- readRDS(file.path(stage1_dir16, "nm_scn16_ds01_60.rds"))
+
+## ============================================================================
+# Part 1: True-model robustness (refexp vs lin) ------------------------------
+## ============================================================================
+##   refexp: parameterised on natural scale, exp() at fit boundaries
+##   lin   : parameterised log-additively (canonical nlmixr2 form)
+##   Both encode the same simulation algebra.  Disagreement between fits flags
+##   a FOCEI-stability issue in one of the parameterisations.
+
+true_2cmt_scn16_refexp <- function() {
+  ini({
+    lTVCL      <- log(0.6)
+    lTVQ       <- log(1.8)
+    lTVVc      <- log(20)
+    lTVVp      <- log(80)
+    lTVKA      <- fix(log(0.7))    # KA unidentifiable
+    TH_BW_CL   <- 0.75
+    TH_CRCL_CL <- 0.5
+    TH_BW_VC   <- 1.0
+    TH_SEX_VC  <- 0.5
+
+    eta.cl + eta.vc ~ c(0.1, 0.02, 0.1)
+    prop.err <- 0.1
+  })
+  model({
+    cl_typ <- exp(lTVCL) * (BW / 70)^TH_BW_CL * (CrCL / 95)^TH_CRCL_CL
+    vc_typ <- exp(lTVVc) * (BW / 70)^TH_BW_VC * (1 + TH_SEX_VC * SEX)
+    cl     <- cl_typ * exp(eta.cl)
+    vc     <- vc_typ * exp(eta.vc)
+    q      <- exp(lTVQ)
+    vp     <- exp(lTVVp)
+    ka     <- exp(lTVKA)
+
+    k10 <- cl / vc
+    k12 <- q  / vc
+    k21 <- q  / vp
+
+    d/dt(depot)      = -ka * depot
+    d/dt(central)    =  ka * depot - k10 * central - k12 * central + k21 * peripheral
+    d/dt(peripheral) =  k12 * central - k21 * peripheral
+
+    cp = central / vc
+    cp ~ prop(prop.err)
+  })
+}
+
+true_2cmt_scn16_lin <- function() {
+  ini({
+    lTVCL      <- log(0.6)
+    lTVQ       <- log(1.8)
+    lTVVc      <- log(20)
+    lTVVp      <- log(80)
+    lTVKA      <- fix(log(0.7))
+    TH_BW_CL   <- 0.75
+    TH_CRCL_CL <- 0.5
+    TH_BW_VC   <- 1.0
+    TH_SEX_VC  <- 0.5
+
+    eta.cl + eta.vc ~ c(0.1, 0.02, 0.1)
+    prop.err <- 0.1
+  })
+  model({
+    ## BW and CrCL via log() => power on natural scale (matches refexp).
+    ## SEX preserves the linear-on-natural-scale parameterisation
+    ## (1 + theta*SEX) used in the simulation; log() lifts it to log scale.
+    lTVCL_typ <- lTVCL + TH_BW_CL * log(BW / 70) + TH_CRCL_CL * log(CrCL / 95)
+    lTVVc_typ <- lTVVc + TH_BW_VC * log(BW / 70) + log(1 + TH_SEX_VC * SEX) #not align with nlmixr2csm
+    cl        <- exp(lTVCL_typ + eta.cl)
+    vc        <- exp(lTVVc_typ + eta.vc)
+    q         <- exp(lTVQ)
+    vp        <- exp(lTVVp)
+    ka        <- exp(lTVKA)
+
+    k10 <- cl / vc
+    k12 <- q  / vc
+    k21 <- q  / vp
+
+    d/dt(depot)      = -ka * depot
+    d/dt(central)    =  ka * depot - k10 * central - k12 * central + k21 * peripheral
+    d/dt(peripheral) =  k12 * central - k21 * peripheral
+
+    cp = central / vc
+    cp ~ prop(prop.err)
+  })
+}
+
+## ---- Fit both parameterisations ----------------------------------------
+t_fit_true16_refexp <- system.time(
+  fit_true16_refexp <- nlmixr2(true_2cmt_scn16_refexp, ds16_01_60,
+                               est = "focei", control = scm_focei_n)
+)
+saveRDS(fit_true16_refexp,
+        file.path(stage1_dir16, "fit_true_scn16_ds01_refexp.rds"))
+
+t_fit_true16_lin <- system.time(
+  fit_true16_lin <- nlmixr2(true_2cmt_scn16_lin, ds16_01_60,
+                            est = "focei", control = scm_focei_n)
+)
+saveRDS(fit_true16_lin,
+        file.path(stage1_dir16, "fit_true_scn16_ds01_lin.rds"))
+
+diag_true16_refexp <- diagnose_fit(fit_true16_refexp)
+diag_true16_lin    <- diagnose_fit(fit_true16_lin)
+diag_summary16 <- dplyr::bind_rows(
+  .build_part1_row("refexp", diag_true16_refexp, t_fit_true16_refexp),
+  .build_part1_row("lin",    diag_true16_lin,    t_fit_true16_lin)
+) %>%
+  dplyr::mutate(scenario = 16)
+saveRDS(diag_summary16, file.path(stage1_dir16, "part1_summary.rds"))
+
+
+## ---- Estimates -> long; rel-err vs scenario-16 truth -------------------
+est_true16_refexp <- extract_params_long(fit_true16_refexp)
+est_true16_lin    <- extract_params_long(fit_true16_lin)
+
+err_true16_refexp <- rel_err_one(est_true16_refexp, true_params, scenario_id = 16)
+err_true16_lin    <- rel_err_one(est_true16_lin,    true_params, scenario_id = 16)
+
+err_true16_compare <- dplyr::bind_rows(
+  err_true16_refexp %>% dplyr::mutate(parameterisation = "refexp"),
+  err_true16_lin    %>% dplyr::mutate(parameterisation = "lin")
+) %>%
+  dplyr::select(parameterisation, parameter, true_value,
+                estimate, abs_err, rel_err, rel_err_pct)
+
+err_true16_wide <- err_true16_compare %>%
+  tidyr::pivot_wider(
+    id_cols     = c(parameter, true_value),
+    names_from  = parameterisation,
+    values_from = c(estimate, rel_err_pct),
+    names_glue  = "{.value}_{parameterisation}"
+  ) %>%
+  dplyr::mutate(
+    abs_diff_estimate    = abs(estimate_refexp - estimate_lin),
+    abs_diff_rel_err_pct = abs(rel_err_pct_refexp - rel_err_pct_lin)
+  )
+
+
+## ============================================================================
+# Part 1b: foceiControl tuning grid (scenario 16, ds01) ----------------------
+## ============================================================================
+##   Goal: find the fastest foceiControl setting that ALSO converges deeply.
+##   In Part 1, refexp walked 244 OFV units away from its own best minimum
+##   (bad_solves triggered -> ODE tolerances auto-relaxed -> optimizer
+##   wandered in noise).  Lin converged cleanly (gap = 0.007).  The grid
+##   probes the four knobs that govern this trade-off:
+##
+##     sigdig         -- outer-loop convergence threshold (lower => slower
+##                       but deeper)
+##     atol / rtol    -- ODE solver tolerances (tighter => slower but more
+##                       stable gradients)
+##     stickyRecalcN  -- # of bad solves before nlmixr2 auto-loosens
+##                       tolerances (low => quick relax; high => protect
+##                       precision at cost of robustness on hard subjects)
+##
+##   We treat convergence as a HARD CONSTRAINT and minimise time under it:
+##
+##       converged_well := |final_ofv - best_ofv_in_trace| < 0.5
+##
+##   Reported alongside: bad_solves (whether sticky-relax fired), not_at_min
+##   (cosmetic final-pass discrepancy), and n_iter (outer-loop budget used).
+
+focei_grid <- tibble::tribble(
+  ~setting,           ~sigdig, ~atol,  ~rtol,  ~stickyRecalcN,
+  "baseline",         4,       1e-8,   1e-6,   4,        # matches scm_focei_n
+  "fast",             3,       1e-6,   1e-4,   4,        # speed-only
+  "no_sticky",        4,       1e-8,   1e-6,   20,       # block auto-relax
+  "tight_ode",        4,       1e-10,  1e-8,   4,        # depth via ODE
+  "tight_no_sticky",  4,       1e-10,  1e-8,   20,       # belt + braces
+  "fast_no_sticky",   3,       1e-6,   1e-4,   20        # fast but protected
+)
+
+## ---- Per-fit diagnostic helper --------------------------------------------
+##   Captures the wall-clock cost AND the four convergence signals needed to
+##   judge whether a setting is acceptable.  All counted in seconds; convert
+##   to minutes at display time.
+.bench_one_focei <- function(model_fn, data, ctrl, model_name, setting_name) {
+  t0 <- Sys.time()
+  fit <- tryCatch(
+    nlmixr2(model_fn, data, est = "focei", control = ctrl),
+    error = function(e) list(.failed = TRUE, .err = conditionMessage(e))
+  )
+  elapsed <- as.numeric(Sys.time() - t0, units = "secs")
+
+  if (isTRUE(fit$.failed)) {
+    return(tibble::tibble(
+      model = model_name, setting = setting_name,
+      elapsed_min = elapsed / 60,
+      final_ofv = NA_real_, best_ofv = NA_real_, ofv_gap = NA_real_,
+      n_iter = NA_integer_, bad_solves = NA, hessian_reset = NA,
+      not_at_min = NA, converged_well = FALSE, error = fit$.err
+    ))
+  }
+
+  trace_objf <- if (!is.null(fit$parHistData) && nrow(fit$parHistData) > 0)
+    fit$parHistData$objf else NA_real_
+  best_ofv <- if (any(!is.na(trace_objf))) min(trace_objf, na.rm = TRUE) else NA_real_
+  ri <- fit$runInfo %||% character(0)
+
+  tibble::tibble(
+    model = model_name, setting = setting_name,
+    elapsed_min   = elapsed / 60,
+    final_ofv     = fit$objf,
+    best_ofv      = best_ofv,
+    ofv_gap       = fit$objf - best_ofv,
+    n_iter        = if (!is.null(fit$parHistData)) nrow(fit$parHistData) else NA_integer_,
+    bad_solves    = any(grepl("bad solves",     ri, fixed = TRUE)),
+    hessian_reset = any(grepl("Hessian reset",  ri, fixed = TRUE)),
+    not_at_min    = any(grepl("not at minimum", ri, fixed = TRUE)),
+    converged_well = !is.na(fit$objf) && !is.na(best_ofv) &&
+                     abs(fit$objf - best_ofv) < 0.5,
+    error = NA_character_
+  )
+}
+
+## ---- Run the grid: 6 settings x 2 parameterisations = 12 fits -------------
+##   Wall-clock ~ 30-40 min on a modern laptop.  Each cell saved
+##   incrementally so a crash mid-grid doesn't lose prior results.
+##
+##   NB: atol / rtol are ODE-solver knobs and must be routed through
+##   rxode2::rxControl(); foceiControl() does NOT accept them directly in
+##   the installed nlmixr2est version.  stickyRecalcN stays on foceiControl
+##   because it governs the FOCEi-level "bad solves" auto-relax behaviour.
+bench_results <- purrr::pmap_dfr(focei_grid, function(setting, sigdig, atol, rtol, stickyRecalcN) {
+  cat(sprintf("\n>>> %-18s sigdig=%d atol=%.0e rtol=%.0e sticky=%d\n",
+              setting, sigdig, atol, rtol, stickyRecalcN))
+  ctrl <- nlmixr2est::foceiControl(
+    sigdig             = sigdig,
+    outerOpt           = "bobyqa",
+    print              = 0,
+    calcTables         = FALSE,
+    covMethod          = "",
+    stickyRecalcN      = stickyRecalcN,
+    maxOuterIterations = 2000,
+    maxInnerIterations = 2000,
+    rxControl          = rxode2::rxControl(atol = atol, rtol = rtol)
+  )
+
+  res <- dplyr::bind_rows(
+    .bench_one_focei(true_2cmt_scn16_lin,    ds16_01_60, ctrl, "lin",    setting),
+    .bench_one_focei(true_2cmt_scn16_refexp, ds16_01_60, ctrl, "refexp", setting)
+  )
+  # Incremental save -- overwritten each cell, so the file always reflects
+  # the most recent completed state.
+  saveRDS(res, file.path(stage1_dir16, paste0("focei_tune_", setting, ".rds")))
+  res
+})
+
+saveRDS(bench_results, file.path(stage1_dir16, "focei_tuning_results.rds"))
+
+bench_results_300 <- purrr::pmap_dfr(focei_grid, function(setting, sigdig, atol, rtol, stickyRecalcN) {
+  cat(sprintf("\n>>> %-18s sigdig=%d atol=%.0e rtol=%.0e sticky=%d\n",
+              setting, sigdig, atol, rtol, stickyRecalcN))
+  ctrl <- nlmixr2est::foceiControl(
+    sigdig             = sigdig,
+    outerOpt           = "bobyqa",
+    print              = 0,
+    calcTables         = FALSE,
+    covMethod          = "",
+    stickyRecalcN      = stickyRecalcN,
+    maxOuterIterations = 2000,
+    maxInnerIterations = 2000,
+    rxControl          = rxode2::rxControl(atol = atol, rtol = rtol)
+  )
+
+  res300 <- dplyr::bind_rows(
+    .bench_one_focei(true_2cmt_scn16_lin,    ds16_01, ctrl, "lin",    setting),
+    .bench_one_focei(true_2cmt_scn16_refexp, ds16_01, ctrl, "refexp", setting)
+  )
+  # Incremental save -- overwritten each cell, so the file always reflects
+  # the most recent completed state.
+  saveRDS(res300, file.path(stage1_dir16, paste0("focei_tune_", setting, ".rds")))
+  res300
+})
+saveRDS(bench_results_300, file.path(stage1_dir16, "focei_tuning_results_300.rds"))
+
+# Part 2: runSCM feature tests -- BASE (no-covariate) model -------------------
+## ============================================================================
+##   The base model `base_2cmt_oral` is reused unchanged (covariate-free);
+##   only the data differs from the scenario-9 fit so we refit on ds16_01.
+t_fit_base16 <- system.time(
+  fit_base16 <- nlmixr2(base_2cmt_oral, ds16_01,
+                        est = "focei", control = scm_focei_n)
+)
+saveRDS(fit_base16, file.path(stage1_dir16, "fit_base.rds"))
+fit_base16 <- readRDS(file.path(stage1_dir16, "fit_base.rds"))
+
+## ---- Candidate sets ----------------------------------------------------
+##   Continuous-only (sections 2.2 - 2.5):
+##     BW   ~ cl  (TRUE +, power 0.75)
+##     CrCL ~ cl  (TRUE +, power 0.50)
+##     BW   ~ vc  (TRUE +, power 1.00)
+##     CrCL ~ vc  (TRUE -- false-positive distractor)
+candidate_pairs_scn16_cont <- list(
+  list(var = "cl", covar = "BW",   shapes = "power"),
+  list(var = "cl", covar = "CrCL", shapes = "power"),
+  list(var = "vc", covar = "BW",   shapes = "power"),
+  list(var = "vc", covar = "CrCL", shapes = "power")
+)
+
+##   Continuous + categorical (section 2.6, full SCM):
+##     adds SEX ~ vc (TRUE + at 0.50) and SEX ~ cl (TRUE -- distractor).
+candidate_pairs_scn16_cat <- c(
+  candidate_pairs_scn16_cont,
+  list(
+    list(var = "cl", covar = "SEX", shapes = "cat"),
+    list(var = "vc", covar = "SEX", shapes = "cat")
+  )
+)
+
+## ---- 2.2  Forward selection (explicit continuous pairs) ----------------
+res16_fwd <- runSCM_traced(
+  label       = "scn16_forward",
+  fit         = fit_base16,
+  pairsVec    = candidate_pairs_scn16_cont,
+  searchType  = "forward",
+  control     = scm_focei_n,
+  saveModels  = FALSE,
+  workers     = 3L,
+  print       = 100,
+  maxRetries  = 2L
+)
+t16_fwd    <- attr(res16_fwd, "elapsed_s")
+saveRDS(res16_fwd, file.path(stage1_dir16, "res_fwd.rds"))
+test16_fwd <- package_scm_result("scn16_forward_only", res16_fwd, t16_fwd,
+                                 scenario_id = 16)
+saveRDS(test16_fwd, file.path(stage1_dir16, "test_fwd.rds"))
+
+## ---- 2.2.1  Forward selection (auto-generated continuous + SEX cat) ----
+res16_fwd_auto <- runSCM_traced(
+  label       = "scn16_forward_auto",
+  data        = ds16_01,
+  fit         = fit_base16,
+  varsVec     = c("cl", "vc"),
+  covarsVec   = c("BW", "CrCL"),
+  catvarsVec  = "SEX",
+  shapes      = c("power", "lin"),
+  searchType  = "forward",
+  control     = scm_focei_n,
+  saveModels  = FALSE,
+  workers     = 3L,
+  print       = 100,
+  maxRetries  = 2L
+)
+t16_fwd_auto    <- attr(res16_fwd_auto, "elapsed_s")
+saveRDS(res16_fwd_auto, file.path(stage1_dir16, "res_fwd_auto.rds"))
+test16_fwd_auto <- package_scm_result("scn16_forward_auto", res16_fwd_auto,
+                                       t16_fwd_auto, scenario_id = 16)
+saveRDS(test16_fwd_auto, file.path(stage1_dir16, "test_fwd_auto.rds"))
+
+## ---- 2.3  Backward elimination only ------------------------------------
+##   Start with all 6 candidate relations included, then prune.  Truth says
+##   keep 4 (BW~cl, CrCL~cl, BW~vc, SEX~vc) and drop 2 (CrCL~vc, SEX~cl).
+res16_bck <- runSCM_traced(
+  label             = "scn16_backward",
+  fit               = fit_base16,
+  pairsVec          = candidate_pairs_scn16_cat,
+  catvarsVec        = "SEX",
+  searchType        = "backward",
+  includedRelations = candidate_pairs_scn16_cat,
+  control           = scm_focei_n,
+  saveModels        = FALSE,
+  workers           = 3L,
+  print             = 100,
+  maxRetries        = 2L
+)
+t16_bck    <- attr(res16_bck, "elapsed_s")
+saveRDS(res16_bck, file.path(stage1_dir16, "res_bck.rds"))
+test16_bck <- package_scm_result("scn16_backward_only", res16_bck, t16_bck,
+                                  scenario_id = 16)
+saveRDS(test16_bck, file.path(stage1_dir16, "test_bck.rds"))
+
+## ---- 2.4  User-specified single relation (BW power on Vc) --------------
+##   Picks the largest-magnitude true positive (TH_BW_VC = 1.0) as the
+##   smoke test for the user-specified search path.
+res16_user <- runSCM_traced(
+  label       = "scn16_user",
+  fit         = fit_base16,
+  pairsVec    = list(list(var = "vc", covar = "BW", shapes = "power")),
+  searchType  = "scm",
+  control     = scm_focei_n,
+  saveModels  = FALSE,
+  workers     = 1L,
+  print       = 100,
+  maxRetries  = 2L
+)
+t16_user    <- attr(res16_user, "elapsed_s")
+saveRDS(res16_user, file.path(stage1_dir16, "res_user.rds"))
+test16_user <- package_scm_result("scn16_user_BWonVc", res16_user, t16_user,
+                                   scenario_id = 16)
+saveRDS(test16_user, file.path(stage1_dir16, "test_user.rds"))
+
+## ---- 2.5  Full SCM (forward then backward, continuous + SEX cat) -------
+##   End state should mirror the true scenario-16 model: 4 retained
+##   relations, OFV well below base.
+res16_full <- runSCM_traced(
+  label       = "scn16_full",
+  fit         = fit_base16,
+  pairsVec    = candidate_pairs_scn16_cat,
+  catvarsVec  = "SEX",
+  searchType  = "scm",
+  control     = scm_focei_n,
+  saveModels  = FALSE,
+  workers     = 3L,
+  print       = 100,
+  maxRetries  = 2L
+)
+t16_full    <- attr(res16_full, "elapsed_s")
+saveRDS(res16_full, file.path(stage1_dir16, "res_full.rds"))
+test16_full <- package_scm_result("scn16_full_scm", res16_full, t16_full,
+                                   scenario_id = 16)
+saveRDS(test16_full, file.path(stage1_dir16, "test_full.rds"))
+
+
+## ---- Aggregate Part 2 --------------------------------------------------
+scm_tests16 <- list(
+  forward_only  = test16_fwd,
+  forward_auto  = test16_fwd_auto,
+  backward_only = test16_bck,
+  user_BWonVc   = test16_user,
+  full_scm      = test16_full
+)
+saveRDS(scm_tests16, file.path(stage1_dir16, "scm_tests.rds"))
+
+part2_summary16 <- purrr::map_dfr(scm_tests16, function(x) {
+  tibble::tibble(
+    test          = x$label,
+    n_selected    = if (is.null(x$selected)) NA_integer_ else nrow(x$selected),
+    converged     = if (is.null(x$diag)) NA else x$diag$converged,
+    objf          = if (is.null(x$diag)) NA_real_ else x$diag$objf,
+    cov_step_ok   = if (is.null(x$diag)) NA else x$diag$cov_ok,
+    cond_num      = if (is.null(x$diag)) NA_real_ else x$diag$cond_num,
+    cond_num_sqrt = if (is.null(x$diag)) NA_real_ else x$diag$cond_num_sqrt,
+    runtime_sec   = x$runtime_sec
+  )
+})
+saveRDS(part2_summary16, file.path(stage1_dir16, "part2_summary.rds"))
+
+## ---- Reporting ---------------------------------------------------------
+overall_runtime16 <- dplyr::bind_rows(
+  tibble::tibble(step = "fit_true_model_refexp",
+                 runtime_sec = unname(t_fit_true16_refexp["elapsed"])),
+  tibble::tibble(step = "fit_true_model_lin",
+                 runtime_sec = unname(t_fit_true16_lin["elapsed"])),
+  tibble::tibble(step = "fit_base_model",
+                 runtime_sec = unname(t_fit_base16["elapsed"])),
+  part2_summary16 %>% dplyr::transmute(step = paste0("scm_", test), runtime_sec)
+) %>%
+  dplyr::mutate(
+    minutes      = runtime_sec / 60,
+    proj_250_min = minutes * 250,             # one scenario, all datasets
+    proj_4000_hr = minutes * 250 * 16 / 60    # all 16 scenarios x 250 datasets
+  )
+saveRDS(overall_runtime16, file.path(stage1_dir16, "overall_runtime.rds"))
+
+cat("\n========== SCENARIO 16 SMOKE TEST -- summary ==========\n\n")
+cat("Part 1 (true-model robustness, refexp + lin):\n")
+print(part1_summary16)
+cat("\nPart 1 rel-err per parameter (long, refexp vs lin):\n")
+print(err_true16_compare)
+cat("\nPart 1 estimate side-by-side (wide):\n")
+print(err_true16_wide)
+cat("\nPart 2 (runSCM feature tests):\n")
+print(part2_summary16)
+cat("\nOverall runtime + projections (scenario 16):\n")
+print(overall_runtime16)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
