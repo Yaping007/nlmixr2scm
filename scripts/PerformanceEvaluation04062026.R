@@ -35,88 +35,8 @@ library(tidyverse)
 library(devtools)
 library(haven)
 
-#BenchMark Article Journal of Pharmacokinetics and Pharmacodynamics (2019) 46:273–285
-## rxode popPK model scenarios-------
-scm_2cmt_oral_rx <- function() {
-  ini({
-    ## Structural fixed effects from the article
-    TVCL <- 0.6      # L/h
-    TVQ  <- 1.8      # L/h
-    TVVc <- 20       # L
-    TVVp <- 80       # L
-    TVKA <- 0.7      # 1/h
 
-    ## Reference covariate values
-    ## Replace with the article specific values if using their exact NHANES covariate dataset
-    BW_REF   <- 70
-    CRCL_REF <- 95
-
-    ## Covariate-effect parameters
-    ## Set to article true values when reproducing their scenarios exactly
-    TH_BW_CL   <- 0.75
-    TH_CRCL_CL <- 0.5
-    TH_BW_VC   <- 1.0
-    TH_SEX_VC  <- 0.5
-
-    ## Scenario switches
-    ## 0 means covariate relationship absent
-    ## 1 means covariate relationship present
-    I_BW_CL   <- 0
-    I_CRCL_CL <- 0
-    I_BW_VC   <- 0
-    I_SEX_VC  <- 0
-
-    ## Between subject variability
-    eta_vc + eta_cl ~ c(
-      0.1,   # variance eta_vc sqrt(0.1)= 31.6% between-subject variability(CV)
-      0.02,   # cov eta_vc eta_cl #0.20 pearson's correlation
-      0.1    # variance eta_cl
-    )
-
-    ## Proportional residual standard deviation  ~10% proportion error (CV)
-    prop_err <- 0.1
-  })
-
-  model({
-    ## Covariate models
-    CL_cov <- TVCL *
-      (BW / BW_REF)^(TH_BW_CL * I_BW_CL) *
-      (CrCL / CRCL_REF)^(TH_CRCL_CL * I_CRCL_CL)
-
-    Vc_cov <- TVVc *
-      (BW / BW_REF)^(TH_BW_VC * I_BW_VC) *
-      (1 + TH_SEX_VC * SEX * I_SEX_VC) ## Try linearized way & this way; FOCEI should be similar for continous but interesting for categorical
-
-    ## Individual parameters
-    CL <- CL_cov * exp(eta_cl)
-    Vc <- Vc_cov * exp(eta_vc)
-    Q  <- TVQ
-    Vp <- TVVp
-    KA <- TVKA
-
-    ## Micro-rate constants
-    k10 <- CL / Vc
-    k12 <- Q / Vc
-    k21 <- Q / Vp
-
-    ## Two-compartment oral absorption model
-    d/dt(depot)   = -KA * depot
-    d/dt(central) =  KA * depot - k10 * central - k12 * central + k21 * peripheral
-    d/dt(peripheral) = k12 * central - k21 * peripheral
-
-    ## Plasma concentration
-
-    cp = central / Vc
-
-    ## Observation model
-
-    cp ~ prop(prop_err)
-  })
-}
-
-
-
-##2021-2023 cycle covariate population for SCM simulation--------
+##1.Virtual Patients_2021-2023 cycle NHANES covariate population for SCM simulation--------
 #Covariates:
 ##   BW   = body weight, kg
 ##   BMI  = body mass index, kg/m2
@@ -192,8 +112,6 @@ for (i in seq_along(datasets)) {
 virtual_pop <- bind_rows(datasets)
 saveRDS(virtual_pop, "virtual_population_250x300.rds")
 write.csv(virtual_pop, "virtual_population_250x300.csv", row.names = FALSE)
-virtual_pop <- read_csv("virtual_population_250x300.csv")
-
 #Sanity Check:
 #1.correlation structure preseved
 print(round(ref_cor, 3))
@@ -208,15 +126,26 @@ cor_by_ds <- virtual_pop %>%
     r_BMI_RACE = cor(BMI, RACE)
   )
 summary(cor_by_ds)
-
 #2 Descriptive Summary 
 summary(virtual_pop)
 
 virtual_pop <- read_csv("virtual_population_250x300.csv")
 
 
-## Creat 16 scenarios with different combinations of covariate effects----------
-## BW on CL, CrCL on CL, BW on V, sex on V
+#1.2Virtual patients (Strategy2) use the pre-sampled etas (with guaranteed correlation) and add residual error manually after solving the ODE with fixed etas (no random sampling)----------
+# This is more complex but guarantees all datasets meet the eta correlation constraint.
+## ============================================================================
+## Rejection-sampled etas: guarantee 250 valid datasets per scenario
+## ----------------------------------------------------------------------------
+##   The internal `rxode2` eta sampling above leaves ~58-67% of datasets in
+##   [0.15, 0.25]. Article requires *all 250* per scenario in that band.
+##   Strategy:
+##     1. Pre-sample (eta_cl, eta_vc) per (SCENARIO, DATASET) of 300 subjects
+##        with rejection sampling on cor(eta_cl, eta_vc).
+##     2. Run rxode2 with a model that takes etas as inputs (no random draws).
+##     3. Add proportional residual error manually (replaces `cp ~ prop()`).
+##   Result: 16 x 250 datasets, each with rho in [0.15, 0.25] by construction.
+## ============================================================================
 PsN_scenarios <- data.frame(
   scenario = 1:16,
   I_BW_CL = c(0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1),
@@ -225,164 +154,11 @@ PsN_scenarios <- data.frame(
   I_SEX_VC = c(0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1)
 )
 
-# simulating individual PK parameters with η_CL, η_Vc ~ MVN with correlation 0.2 and concentration 
-## ============================================================================
-## Simulate using `scm_2cmt_oral_rx()` directly  with rxSolve
-##   - rxode2 samples eta_cl, eta_vc internally from the model's omega
-##     (var = 0.1 each, cov = 0.02  =>  correlation = 0.2 as requested
-##   - Scenario indicators are switched on/off via `ini()` updater
-##   - Per-subject covariates (BW, CrCL, SEX) supplied via `iCov`
-##   - Sampling at 0, 0.05, 0.1, 0.5, 1, 3 x typical terminal half-life
-## ============================================================================
-
-## Example: scenario 1: No covariate effects--------------
-theta_s1 <-  PsN_scenarios %>% filter(scenario == 1) %>% select(-scenario)
-params_s1 <- c(
-  I_BW_CL   = theta_s1$I_BW_CL,
-  I_CRCL_CL = theta_s1$I_CRCL_CL,
-  I_BW_VC   = theta_s1$I_BW_VC,
-  I_SEX_VC  = theta_s1$I_SEX_VC)
-
-## ---- (a) Build the scenario-specific model from the UI function ----------
-mod    <- scm_2cmt_oral_rx()
-mod_s1 <- mod %>% rxode2::ini(
-  I_BW_CL   = theta_s1$I_BW_CL,
-  I_CRCL_CL = theta_s1$I_CRCL_CL,
-  I_BW_VC   = theta_s1$I_BW_VC,
-  I_SEX_VC  = theta_s1$I_SEX_VC
-)
-
-## ---- (b) Typical terminal half-life (beta phase of 2-cmt model) ----------
-TVCL <- 0.6;  TVQ <- 1.8;  TVVc <- 20;  TVVp <- 80
-k10_typ <- TVCL / TVVc
-k12_typ <- TVQ  / TVVc
-k21_typ <- TVQ  / TVVp
-sum_k    <- k10_typ + k12_typ + k21_typ
-beta_typ <- 0.5 * (sum_k - sqrt(sum_k^2 - 4 * k10_typ * k21_typ))
-t_half_typ <- log(2) / beta_typ
-cat(sprintf("Typical terminal half-life: %.2f h\n", t_half_typ)) #Typical terminal half-life: 141.29 h
-
-hl_mult      <- c(0, 0.05, 0.1, 0.5, 1, 3)
-sample_times <- hl_mult * t_half_typ
-
-## ---- (c) Per-subject covariate table (iCov) ------------------------------
-n_total <- nrow(virtual_pop)
-iCov <- virtual_pop %>%
-  dplyr::mutate(id = dplyr::row_number()) %>%
-  dplyr::select(id, DATASET, SUBJECT = ID, BW, CrCL, SEX)
-
-## ---- (d) Event table: 100 mg single oral dose + sampling times -----------
-##   Build a one-subject template (1 dose + 6 observation times), then
-##   replicate it for every subject so each `id` appears with the full
-##   dose + sampling schedule. This matches the `id` column in iCov.
-DOSE_MG <- 100
-ev_one <- rxode2::et(amt = DOSE_MG, cmt = "depot", time = 0) %>%
-  rxode2::et(time = sample_times) %>%
-  as.data.frame()
-
-ev <- ev_one %>%
-  dplyr::slice(rep(dplyr::row_number(), n_total)) %>%
-  dplyr::mutate(id = rep(seq_len(n_total), each = nrow(ev_one))) %>%
-  dplyr::arrange(id, time)
-
-## ---- (e) Solve ODE -----------------------------------------------------------
-##   rxode2 samples eta_cl, eta_vc per subject from the model's omega
-##   (variance = 0.1 each, covariance = 0.02  =>  rho [correlation]= 0.2 = covariance/(square root(varianceX*varianceY))).
-set.seed(2026)
-sim_raw <- rxode2::rxSolve(
-  mod_s1,
-  events     = ev,
-  iCov       = iCov %>% dplyr::select(id, BW, CrCL, SEX),
-  returnType = "tibble"
-)
-
-## ---- (f) Tidy output ------------------------------------------------------
-##   `cp`  = IPRED (no residual error), determistically produced by `cp = central/Vc`
-##   `sim` = observation with proportional residual error already applied by
-##           rxode2 because the model has `cp ~ prop(prop_err)`.
-##   Etas are not returned as columns; recover them from CL/CL_cov and Vc/Vc_cov.
-sim_obs1 <- sim_raw %>%
-  dplyr::filter(time %in% sample_times) %>%
-  dplyr::mutate(
-    eta_cl   = log(CL / CL_cov),
-    eta_vc   = log(Vc / Vc_cov),
-    cp_ipred = cp,
-    cp_obs   = sim,
-    HL_MULT  = round(time / t_half_typ, 4)
-  ) %>%
-  dplyr::left_join(
-    iCov %>% dplyr::select(id, DATASET, SUBJECT),
-    by = "id"
-  ) %>%
-  dplyr::select(DATASET, SUBJECT, HL_MULT, time,
-                BW, CrCL, SEX,
-                cp_ipred, cp_obs)
-
-
-sim_obs_sum1 <- sim_obs1 %>% 
-  dplyr::group_by(HL_MULT) %>%
-  dplyr::summarise(
-    n         = dplyr::n(),
-    median_cp = stats::median(cp_ipred),
-    p05       = stats::quantile(cp_ipred, 0.05),
-    p95       = stats::quantile(cp_ipred, 0.95),
-    .groups   = "drop"
-  )
-
-
-#Use this order:
-#Simulate scenario 1 only.
-#Fit base model to dataset 1.
-#Fit base model to all 250 scenario-1 datasets.
-#Run runscm() on scenario 1, dataset 1.
-#Run runscm() on 10 scenario-1 datasets.
-#Run runscm() on all 250 scenario-1 datasets.
-#Then expand to scenarios 2 to 16.
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-#### Generalized simulation for all 16 scenarios (function + loop)###----------------------
-## ============================================================================
-##   - Reuses the per-subject covariate table and event grid built above
-##   - Per-scenario seed = 2026 + scenario  (independent eta draws)
-##   - Output: one tibble per scenario, plus a combined `sim_obs_all`
-##   - Saves each scenario to disk as RDS so the 16-scenario set can be
-##     reloaded without re-simulating
-## ============================================================================
-
-#Strategy1:  use omega metrix to sample etas and residual error automically by the popPKmodel------
-             #only half of datasets meet the eta correlation constraint, but it's straightforward and preserves the full variability in the model.
-## 16 scenarios: BW on CL, CrCL on CL, BW on V, sex on V
-PsN_scenarios <- data.frame(
-  scenario = 1:16,
-  I_BW_CL = c(0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1),
-  I_CRCL_CL = c(0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1),
-  I_BW_VC = c(0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1),
-  I_SEX_VC = c(0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1)
-)
-##(i) Preperation of covariate & ev for simulation-----------
+#(i) Preperation of covariate & ev for simulation-----------
 ## ---- (a) Expanded iCov: include BMI and RACE for downstream SCM ---------
 ##   The model itself only references BW / CrCL / SEX, but BMI and RACE must
 ##   be carried in the analysis dataset so SCM can test them as covariates.
+n_total <- nrow(virtual_pop)
 iCov_full <- virtual_pop %>%
   dplyr::mutate(id = dplyr::row_number()) %>%
   dplyr::select(id, DATASET, SUBJECT = ID,
@@ -415,83 +191,7 @@ ev <- ev_one %>%
   dplyr::arrange(id, time)
 
 
-## ---- (ii) Scenario-simulation helper ------------------------------------
-simulate_scenario <- function(scn,
-                              base_mod      = mod,
-                              scenarios     = PsN_scenarios,
-                              icov          = iCov_full,
-                              event_table   = ev,
-                              sampling_grid = sample_times,
-                              t_half        = t_half_typ,
-                              seed          = 2026L + scn) {
-  ## (a) switch covariate-effect indicators for this scenario
-  scn_row <- scenarios %>% dplyr::filter(scenario == scn)
-  if (nrow(scn_row) != 1L)
-    stop("scenario ", scn, " not found in `scenarios`.")
-
-  mod_scn <- base_mod %>% rxode2::ini(
-    I_BW_CL   = scn_row$I_BW_CL,
-    I_CRCL_CL = scn_row$I_CRCL_CL,
-    I_BW_VC   = scn_row$I_BW_VC,
-    I_SEX_VC  = scn_row$I_SEX_VC
-  )
-
-  ## (b) solve (rxode2 samples eta_cl, eta_vc from omega each call)
-  set.seed(seed)
-  sim_raw_scn <- rxode2::rxSolve(
-    mod_scn,
-    events     = event_table,
-    iCov       = icov %>% dplyr::select(id, BW, CrCL, SEX),
-    returnType = "tibble"
-  )
-
-  ## (c) tidy: keep IPRED (`cp`), residual-error obs (`sim`), recover etas
-  sim_raw_scn %>%
-    dplyr::filter(time %in% sampling_grid) %>%
-    dplyr::mutate(
-      SCENARIO = scn,
-      eta_cl   = log(CL / CL_cov),
-      eta_vc   = log(Vc / Vc_cov),
-      cp_ipred = cp,
-      cp_obs   = sim,
-      HL_MULT  = round(time / t_half, 4)
-    ) %>%
-    dplyr::left_join(
-      icov %>% dplyr::select(id, DATASET, SUBJECT, BMI, RACE),
-      by = "id"
-    ) %>%
-    dplyr::select(SCENARIO, DATASET, SUBJECT, HL_MULT, time,
-                  BW, BMI, CrCL, SEX, RACE,
-                  eta_cl, eta_vc, CL, Vc,
-                  cp_ipred, cp_obs)
-}
-
-## ---- (iii) Run all 16 scenarios -----------------------------------------
-##   Each scenario produces ~450k rows (75000 subjects x 6 obs).
-##   Save per scenario to keep memory footprint manageable.
-out_dir <- "simulated_virtual_dataset" #with covariate & PK sampling date ready for model fitting.
-if (!dir.exists(out_dir)) dir.create(out_dir)
-
-sim_obs_list <- purrr::map(
-  .x        = PsN_scenarios$scenario,
-  .f        = function(scn) {
-    message(sprintf("Simulating scenario %02d ...", scn))
-    out <- simulate_scenario(scn)
-    saveRDS(out, file.path(out_dir, sprintf("sim_obs_scenario_%02d.rds", scn)))
-    out
-  },
-  .progress = TRUE
-)
-names(sim_obs_list) <- sprintf("scenario_%02d", PsN_scenarios$scenario)
-
-## ---- (iv) Combine and persist the full 7.2M-record dataset --------------
-sim_obs_all <- dplyr::bind_rows(sim_obs_list)
-saveRDS(sim_obs_all, file.path(out_dir, "sim_obs_all_scenarios.rds"))
-#R’s native single-object storage format.
-sim_obs_all <- readRDS("sim_obs_all_scenarios.rds")
-
-#write.csv(sim_obs_all, "sim_obs_all_scenarios.csv", row.names = FALSE) too large, didn't excute.
-
+## ---- (i) Helper: rejection-sample one dataset of (eta_cl, eta_vc) --------
 ## ============================================================================
 ## Eta-correlation QC per (SCENARIO, DATASET)
 ## ----------------------------------------------------------------------------
@@ -502,54 +202,6 @@ sim_obs_all <- readRDS("sim_obs_all_scenarios.rds")
 ## ============================================================================
 ETA_RHO_LOW  <- 0.15
 ETA_RHO_HIGH <- 0.25
-
-eta_cor_per_dataset <- sim_obs_all %>%
-  dplyr::distinct(SCENARIO, DATASET, SUBJECT, eta_cl, eta_vc) %>%
-  dplyr::group_by(SCENARIO, DATASET) %>%
-  dplyr::summarise(
-    n_subj   = dplyr::n(),
-    rho_eta  = stats::cor(eta_cl, eta_vc),
-    .groups  = "drop"
-  ) %>%
-  dplyr::mutate(
-    pass_eta_cor = rho_eta >= ETA_RHO_LOW & rho_eta <= ETA_RHO_HIGH
-  )
-
-## How many datasets per scenario meet the constraint?
-eta_cor_summary <- eta_cor_per_dataset %>%
-  dplyr::group_by(SCENARIO) %>%
-  dplyr::summarise(
-    n_datasets   = dplyr::n(),
-    n_pass       = sum(pass_eta_cor),
-    pct_pass     = mean(pass_eta_cor) * 100,
-    rho_mean     = mean(rho_eta),
-    rho_sd       = stats::sd(rho_eta),
-    .groups      = "drop"
-  )
-
-saveRDS(eta_cor_per_dataset, file.path(out_dir, "eta_cor_per_dataset.rds"))
-saveRDS(eta_cor_summary,     file.path(out_dir, "eta_cor_summary.rds"))
-## Take-home message: ~58%-68% meet the condition of covCL_Vc0.15-0.25
-
-
-
-
-#Strategy2:  use the pre-sampled etas (with guaranteed correlation) and add residual error manually after solving the ODE with fixed etas (no random sampling)----------
-# This is more complex but guarantees all datasets meet the eta correlation constraint.
-## ============================================================================
-## Rejection-sampled etas: guarantee 250 valid datasets per scenario
-## ----------------------------------------------------------------------------
-##   The internal `rxode2` eta sampling above leaves ~58-67% of datasets in
-##   [0.15, 0.25]. Article requires *all 250* per scenario in that band.
-##   Strategy:
-##     1. Pre-sample (eta_cl, eta_vc) per (SCENARIO, DATASET) of 300 subjects
-##        with rejection sampling on cor(eta_cl, eta_vc).
-##     2. Run rxode2 with a model that takes etas as inputs (no random draws).
-##     3. Add proportional residual error manually (replaces `cp ~ prop()`).
-##   Result: 16 x 250 datasets, each with rho in [0.15, 0.25] by construction.
-## ============================================================================
-
-## ---- (i) Helper: rejection-sample one dataset of (eta_cl, eta_vc) --------
 
 sample_dataset_etas <- function(n_subj    = 300,
                                 omega_var = 0.1,
@@ -619,11 +271,19 @@ eta_table_qc <- eta_table %>%
 ## ---- (iii) Simulation model with etas as INPUTS (no internal draws) ------
 ##   Mirrors `scm_2cmt_oral_rx()` exactly, but eta_cl / eta_vc enter through
 ##   `iCov` instead of being sampled from omega.
+##
+##   SEX convention: nlmixr2scm log-additive form `exp(theta * SEX)`, which
+##   matches what `runSCM(shapes = "cat")` recovers.  PsN-style
+##   `(1 + theta * SEX)` was used in an earlier draft and produces a
+##   systematic ~19% bias in VcSEX recovery because nlmixr2scm fits the
+##   log-additive form.  With `TH_SEX_VC = log(1.5)` the biological effect
+##   is unchanged from the original design (female Vc / male Vc = 1.5x when
+##   I_SEX_VC = 1).
 sim_mod_fixed <- rxode2::rxode2({
   CL_cov = TVCL * (BW   / BW_REF  )^(TH_BW_CL   * I_BW_CL  ) *
                   (CrCL / CRCL_REF)^(TH_CRCL_CL * I_CRCL_CL)
   Vc_cov = TVVc * (BW   / BW_REF  )^(TH_BW_VC   * I_BW_VC  ) *
-                  (1 + TH_SEX_VC * SEX * I_SEX_VC)
+                  exp(TH_SEX_VC * SEX * I_SEX_VC)
   CL = CL_cov * exp(eta_cl)
   Vc = Vc_cov * exp(eta_vc)
   Q  = TVQ
@@ -670,7 +330,7 @@ simulate_scenario_v2 <- function(scn,
     TVKA       = 0.7,
     BW_REF     = 70,   CRCL_REF  = 95,
     TH_BW_CL   = 0.75, TH_CRCL_CL = 0.5,
-    TH_BW_VC   = 1.0,  TH_SEX_VC  = 0.5,
+    TH_BW_VC   = 1.0,  TH_SEX_VC  = log(1.5),   # nlmixr2scm convention: exp(theta*SEX); log(1.5) ~ 0.4055 keeps the 1.5x biology of the original design
     I_BW_CL    = scn_row$I_BW_CL,
     I_CRCL_CL  = scn_row$I_CRCL_CL,
     I_BW_VC    = scn_row$I_BW_VC,
@@ -717,7 +377,7 @@ simulate_scenario_v2 <- function(scn,
 out_dir_v2 <- "simulated_virtual_dataset_eta_filtered"
 if (!dir.exists(out_dir_v2)) dir.create(out_dir_v2)
 
-sim_obs_list_v2 <- purrr::map(
+sim_pkobs_nlmixr2para <- purrr::map(
   .x = PsN_scenarios$scenario,
   .f = function(scn) {
     message(sprintf("Simulating scenario %02d (rejection-sampled etas) ...", scn))
@@ -728,20 +388,22 @@ sim_obs_list_v2 <- purrr::map(
   },
   .progress = TRUE
 )
-names(sim_obs_list_v2) <- sprintf("scenario_%02d", PsN_scenarios$scenario)
+names(sim_pkobs_nlmixr2para) <- sprintf("scenario_%02d", PsN_scenarios$scenario)
 
-sim_obs_all_v2 <- dplyr::bind_rows(sim_obs_list_v2)
+sim_pkobs_nlmixr2para <- dplyr::bind_rows(sim_pkobs_nlmixr2para)
+saveRDS(sim_pkobs_nlmixr2para, file.path(out_dir_v2, "sim_pkobs_nlmixr2para_16scenarios.rds"))
+
+##This is the previous simulated datasets with 16 scenerios and (1+beta*sex) convention, which didnot align with nlmixr2 parameterization.
 saveRDS(sim_obs_all_v2, file.path(out_dir_v2, "sim_obs_all_scenarios.rds"))
-saveRDS(eta_table,      file.path(out_dir_v2, "eta_table_valid.rds"))
 
 ## ---- (vi) QC: confirm 100% pass rate -----------------------------------
-eta_cor_v2 <- sim_obs_all_v2 %>%
+eta_cor_nlmixr2para <- sim_pkobs_nlmixr2para  %>%
   dplyr::distinct(SCENARIO, DATASET, SUBJECT, eta_cl, eta_vc) %>%
   dplyr::group_by(SCENARIO, DATASET) %>%
   dplyr::summarise(rho_eta = stats::cor(eta_cl, eta_vc), .groups = "drop") %>%
   dplyr::mutate(pass = rho_eta >= ETA_RHO_LOW & rho_eta <= ETA_RHO_HIGH)
 
-eta_cor_summary_v2 <- eta_cor_v2 %>%
+eta_cor_summary_nlmixr2para <- eta_cor_nlmixr2para %>%
   dplyr::group_by(SCENARIO) %>%
   dplyr::summarise(
     n_datasets = dplyr::n(),
@@ -750,8 +412,174 @@ eta_cor_summary_v2 <- eta_cor_v2 %>%
     rho_mean   = mean(rho_eta),
     rho_sd     = stats::sd(rho_eta),
     .groups    = "drop"
+  ) ##100% pass rate
+
+
+## ============================================================================
+# Sister cohorts: N=40 and N=80, same pipeline as N=300 ----------------------
+## ----------------------------------------------------------------------------
+##   Re-runs the exact bootstrap + eta-table + scenario-simulator pipeline at
+##   smaller N.  Calls the same helpers as N=300 (sample_dataset_etas,
+##   build_eta_table, sim_mod_fixed, simulate_scenario_v2), only the sample
+##   size differs.  Output schema (columns + row layout) is identical to
+##   sim_obs_all_scenarios.rds at N=300.
+##   Covariate correlation (BW, BMI, CrCL, SEX, RACE): preserved by the same
+##                                                     rejection bootstrap
+##                                                     against ref_cor at
+##                                                     tol = 0.05.
+##   eta_cl / eta_vc covariance: preserved by sample_dataset_etas() (rho in
+##                              [ETA_RHO_LOW, ETA_RHO_HIGH] by construction).
+
+build_sister_cohort <- function(n_subj,
+                                n_datasets   = 250L,
+                                tol_base     = 0.05,
+                                tol_scale    = 1.0,
+                                max_attempts = 1e5L,
+                                pop_seed     = 4242L + n_subj) {
+
+  out_dir_n <- sprintf("simulated_virtual_dataset_eta_filtered_N%d", n_subj)
+  if (!dir.exists(out_dir_n)) dir.create(out_dir_n, recursive = TRUE)
+
+  ## ---- (a) Stratified bootstrap by SEX x RACE -----------------------------
+  ##   Fixing the per-cell counts (instead of only SEX totals) removes the
+  ##   zero-variance-in-RACE failure mode that crashes pure bootstrap at
+  ##   small N, and leaves only within-cell continuous-covariate noise to be
+  ##   controlled by the correlation gate below.
+  set.seed(pop_seed)
+
+  cell_props <- pop %>%
+    dplyr::count(SEX, RACE, name = "n_cell") %>%
+    dplyr::mutate(p        = n_cell / sum(n_cell),
+                  n_target = round(p * n_subj))
+
+  # Repair rounding drift so cells sum exactly to n_subj
+  drift <- n_subj - sum(cell_props$n_target)
+  if (drift != 0L) {
+    bump <- which.max(cell_props$p)
+    cell_props$n_target[bump] <- cell_props$n_target[bump] + drift
+  }
+
+  pop_split <- split(pop, interaction(pop$SEX, pop$RACE, drop = TRUE))
+  cell_key  <- paste(cell_props$SEX, cell_props$RACE, sep = ".")
+
+  draw_one <- function() {
+    purrr::map2_dfr(
+      pop_split[cell_key], cell_props$n_target,
+      function(d, k) dplyr::slice_sample(d, n = k, replace = TRUE)
+    )
+  }
+
+  # SD of a sample correlation ~ 1/sqrt(N); scale the gate to match.
+  tol <- tol_base * tol_scale * sqrt(300 / n_subj)
+
+  datasets_n <- vector("list", n_datasets)
+  n_kept     <- 0L
+  attempt_n  <- 0L
+  n_skip     <- 0L
+
+  while (n_kept < n_datasets) {
+    attempt_n <- attempt_n + 1L
+    samp <- draw_one()
+
+    col_sd <- vapply(samp, stats::sd, numeric(1))
+    if (any(is.na(col_sd)) || any(col_sd == 0)) {
+      n_skip <- n_skip + 1L
+    } else {
+      u <- abs(stats::cor(samp) - ref_cor)[upper.tri(ref_cor)]
+      if (!anyNA(u) && all(u <= tol)) {
+        n_kept <- n_kept + 1L
+        datasets_n[[n_kept]] <- samp
+      }
+    }
+    if (attempt_n > max_attempts) {
+      stop(sprintf(
+        "Tolerance too strict at N = %d (kept %d / tried %d, %d skipped)",
+        n_subj, n_kept, attempt_n, n_skip
+      ))
+    }
+  }
+  message(sprintf(
+    "[N=%d] tol=%.3f  kept %d / tried %d (%d degenerate skipped)",
+    n_subj, tol, n_kept, attempt_n, n_skip
+  ))
+
+  # Tag ID + DATASET and stack into one long tibble
+  vp_n <- datasets_n %>%
+    purrr::map(function(d) dplyr::mutate(d, ID = seq_len(n_subj))) %>%
+    dplyr::bind_rows(.id = "DATASET") %>%
+    dplyr::mutate(DATASET = as.integer(DATASET))
+
+  saveRDS(
+    vp_n,
+    file.path(out_dir_n,
+              sprintf("virtual_population_%dx%d.rds", n_datasets, n_subj))
   )
-saveRDS(eta_cor_summary_v2, file.path(out_dir_v2, "eta_cor_summary_v2.rds"))
+
+  ## ---- (b) eta table: re-use build_eta_table() at requested n_subj -------
+  ##   Preserves CL/Vc covariance (rho in [ETA_RHO_LOW, ETA_RHO_HIGH]).
+  eta_table_n <- build_eta_table(n_datasets = n_datasets, n_subj = n_subj)
+  saveRDS(eta_table_n, file.path(out_dir_n, "eta_table_valid.rds"))
+
+  ## ---- (c) iCov_n: schema simulate_scenario_v2() expects -----------------
+  iCov_n <- vp_n %>%
+    dplyr::mutate(SUBJECT = ID,
+                  id      = (DATASET - 1L) * n_subj + ID) %>%
+    dplyr::select(id, DATASET, SUBJECT, BW, BMI, CrCL, SEX, RACE)
+
+  ## ---- (c2) Cohort-sized event table -------------------------------------
+  ##   The default `ev` is ev_one replicated 75000x for N=300; it does not
+  ##   match cohort-sized iCov, hence the rxSolve "1 unique match" error.
+  ##   Rebuild it from the same ev_one template at the cohort's row count.
+  n_total_n <- n_datasets * n_subj
+  ev_n <- ev_one %>%
+    dplyr::slice(rep(dplyr::row_number(), n_total_n)) %>%
+    dplyr::mutate(id = rep(seq_len(n_total_n), each = nrow(ev_one))) %>%
+    dplyr::arrange(id, time)
+
+  stopifnot(
+    nrow(iCov_n) == n_total_n,
+    setequal(iCov_n$id, unique(ev_n$id))
+  )
+
+  ## ---- (d) Run all 16 scenarios via the existing simulator ---------------
+  sim_list_n <- purrr::map(
+    .x = PsN_scenarios$scenario,
+    .f = function(scn) {
+      message(sprintf("[N=%d] Simulating scenario %02d ...", n_subj, scn))
+      out <- simulate_scenario_v2(
+        scn,
+        icov        = iCov_n,
+        etas        = eta_table_n,
+        event_table = ev_n
+      )
+      saveRDS(
+        out,
+        file.path(out_dir_n,
+                  sprintf("sim_obs_scenario_%02d.rds", scn))
+      )
+      out
+    },
+    .progress = TRUE
+  ) %>%
+    purrr::set_names(sprintf("scenario_%02d", PsN_scenarios$scenario))
+
+  sim_all_n <- dplyr::bind_rows(sim_list_n)
+  saveRDS(sim_all_n, file.path(out_dir_n, "sim_obs_all_scenarios.rds"))
+
+  invisible(list(
+    virtual_pop = vp_n,
+    eta_table   = eta_table_n,
+    sim_obs_all = sim_all_n,
+    out_dir     = out_dir_n
+  ))
+}
+
+## --- Build the two sister cohorts -----------------------------------------
+##   Wall-clock: ~3-5 min for N=40, ~6-10 min for N=80.
+##   Tolerance is auto-scaled by sqrt(300 / n_subj) internally; bump
+##   `tol_scale` if a cohort can't reach n_datasets within `max_attempts`.
+cohort_40 <- build_sister_cohort(n_subj = 40L)
+cohort_80 <- build_sister_cohort(n_subj = 80L)
 
 
 
@@ -786,7 +614,13 @@ true_params_long <- function(scenarios = PsN_scenarios,
                              theta = c(TVCL = 0.6, TVQ = 1.8, TVVc = 20,
                                        TVVp = 80, TVKA = 0.7,
                                        TH_BW_CL = 0.75, TH_CRCL_CL = 0.5,
-                                       TH_BW_VC = 1.0, TH_SEX_VC = 0.5),
+                                       TH_BW_VC = 1.0,
+                                       ## nlmixr2scm log-additive convention:
+                                       ## Vc = TVVc * exp(TH_SEX_VC * SEX).
+                                       ## log(1.5) ~ 0.4055 preserves the 1.5x
+                                       ## female/male Vc effect of the original
+                                       ## PsN-convention design (theta = 0.5).
+                                       TH_SEX_VC = log(1.5)),
                              omega = c(var_cl = 0.1, var_vc = 0.1,
                                        cov_cl_vc = 0.02),
                              prop_err = 0.1) {
@@ -821,15 +655,7 @@ true_params_long <- function(scenarios = PsN_scenarios,
 true_params <- true_params_long()
 saveRDS(true_params, file.path(out_dir, "true_params_long.rds"))
 
-
 true_params <- readRDS(file.path(out_dir, "true_params_long.rds"))
-## Convenience wide table (one row per scenario, one column per parameter)
-true_params_wide <- true_params %>%
-  tidyr::pivot_wider(id_cols = scenario,
-                     names_from = parameter,
-                     values_from = true_value)
-
-
 
 ## Use Scenario 9 [beta_WtCl=0.75]to test for nlmixr2 model refitting/runSCM
 ## Test every feature of runscm(): forward selection, backwald elimination, user-specified covariate; full covariate building
@@ -845,7 +671,6 @@ true_params_wide <- true_params %>%
 ##   ID is unique within a (SCENARIO, DATASET) fit; for a global ID use
 ##   paste(SCENARIO, DATASET, SUBJECT, sep = "_").
 ## ============================================================================
-
 to_nm_dataset <- function(sim_obs) {
   obs_rows <- sim_obs %>%
     dplyr::transmute(
@@ -935,6 +760,13 @@ cat(sprintf("Typical terminal half-life: %.2f h\n", t_half_typ)) #Typical termin
 
 hl_mult      <- c(0, 0.05, 0.1, 0.5, 1, 3)
 sample_times <- hl_mult * t_half_typ
+
+## --- Build sister cohorts (N=40, N=80) ------------------------------------
+##   Defined further up alongside the N=300 simulator; called here because
+##   to_nm_dataset() and DOSE_MG must be in scope first.
+##   Wall-clock: ~3-5 min for N=40, ~6-10 min for N=80.
+cohort_40 <- build_sister_cohort(n_subj = 40L)
+cohort_80 <- build_sister_cohort(n_subj = 80L)
 
 sim_obs_scn09 <- readRDS(file.path(out_dir_v2, "sim_obs_scenario_09.rds"))
 
@@ -1285,8 +1117,11 @@ extract_params_long <- function(fit, includeCov = TRUE) {
   theta <- fit$theta
   om    <- fit$omega
 
+  ## Fixed-effects: keep the "TV" prefix so names line up with true_params_long()
+  ## (TVCL, TVVc, TVQ, TVVp, TVKA).  fit$theta still stores them on the LOG
+  ## scale (lTVCL etc.), so we exp() back to natural-scale typical values.
   fe_long <- tibble::tibble(
-    parameter = c("CL", "Vc", "Q", "Vp", "KA"),
+    parameter = c("TVCL", "TVVc", "TVQ", "TVVp", "TVKA"),
     src_name  = c("lTVCL", "lTVVc", "lTVQ", "lTVVp", "lTVKA")
   ) %>%
     dplyr::mutate(estimate = exp(unname(theta[src_name]))) %>%
@@ -1306,15 +1141,31 @@ extract_params_long <- function(fit, includeCov = TRUE) {
 
   ## Covariate effects: read from fit$theta if present, else NA.
   ##   The theta names emitted by runSCM() preserve the original case of the
-  ##   data column (e.g. "cov_BW_power_cl" when the data has column "BW"),
-  ##   so the regex must match case-insensitively to catch both "BW" and
-  ##   "wt" / "bw" parameterisations.
+  ##   data column AND insert the SHAPE (power/lin) for continuous covariates
+  ##   or the LEVEL VALUE (e.g. "_1" for SEX==1, "_2" for RACE==2) for
+  ##   categorical covariates -- there is NO literal "_cat_" token.  The
+  ##   regexes below mirror these two naming conventions exactly.
+  ##
+  ##   Naming conventions (verified against runSCM output):
+  ##     continuous : cov_<COVAR>_<SHAPE>_<VAR>     e.g. cov_BW_power_cl
+  ##     categorical: cov_<COVAR>_<LEVEL>_<VAR>     e.g. cov_SEX_1_vc
+  ##
+  ##   Extra keys (CLBMI, VcBMI, VcCrCL, VcRACE) are included so that
+  ##   collinearity-driven false positives at small N (e.g. BMI->CL stealing
+  ##   the slot of BW->CL) are surfaced in the wide compare table instead of
+  ##   being silently dropped.
   cov_names_in_fit <- names(theta)
   cov_map <- list(
-    CLBW   = c("TH_BW_CL",   grep("^cov_(bw|wt)_power_cl$",   cov_names_in_fit, value = TRUE, ignore.case = TRUE)),
-    CLcrCL = c("TH_CRCL_CL", grep("^cov_crcl_power_cl$",      cov_names_in_fit, value = TRUE, ignore.case = TRUE)),
-    VcBW   = c("TH_BW_VC",   grep("^cov_(bw|wt)_power_vc$",   cov_names_in_fit, value = TRUE, ignore.case = TRUE)),
-    VcSEX  = c("TH_SEX_VC",  grep("^cov_sex(_male)?_cat_vc$", cov_names_in_fit, value = TRUE, ignore.case = TRUE))
+    # --- True relations in the scenario-16 simulator ---------------------
+    CLBW   = c("TH_BW_CL",    grep("^cov_(bw|wt)_power_cl$",   cov_names_in_fit, value = TRUE, ignore.case = TRUE)),
+    CLcrCL = c("TH_CRCL_CL",  grep("^cov_crcl_power_cl$",      cov_names_in_fit, value = TRUE, ignore.case = TRUE)),
+    VcBW   = c("TH_BW_VC",    grep("^cov_(bw|wt)_power_vc$",   cov_names_in_fit, value = TRUE, ignore.case = TRUE)),
+    VcSEX  = c("TH_SEX_VC",   grep("^cov_sex_[^_]+_vc$",       cov_names_in_fit, value = TRUE, ignore.case = TRUE)),
+    # --- Distractors / collinear false positives -------------------------
+    CLBMI  = c("TH_BMI_CL",   grep("^cov_bmi_power_cl$",       cov_names_in_fit, value = TRUE, ignore.case = TRUE)),
+    VcBMI  = c("TH_BMI_VC",   grep("^cov_bmi_power_vc$",       cov_names_in_fit, value = TRUE, ignore.case = TRUE)),
+    VcCrCL = c("TH_CRCL_VC",  grep("^cov_crcl_power_vc$",      cov_names_in_fit, value = TRUE, ignore.case = TRUE)),
+    VcRACE = c("TH_RACE_VC",  grep("^cov_race_[^_]+_vc$",      cov_names_in_fit, value = TRUE, ignore.case = TRUE))
   )
   cov_long <- tibble::tibble(
     parameter = names(cov_map),
@@ -1414,22 +1265,6 @@ scm_focei <- nlmixr2est::foceiControl(
 )
 
 ## ---- Control for the post-SCM diagnostic refit ---------------------------
-##   The SCM search above uses scm_focei (covMethod = "", calcTables = FALSE)
-##   for speed -- LRT only needs OFV.  Once SCM picks a final model we refit
-##   it ONCE with full diagnostics enabled:
-##     covMethod  = "r,s"  -> sandwich (R^-1 S R^-1); the field default for
-##                            standard errors, %RSE, 95 % CIs, condition
-##                            number.  Matches NONMEM MATRIX=RSR.
-##     calcTables = TRUE   -> IPRED / CWRES / NPDE tables for GOF / VPC.
-##     sigdig     = 4      -> tighter convergence than the SCM-iteration
-##                            setting (we only do this once so cost is OK).
-final_focei <- nlmixr2est::foceiControl(
-  sigdig     = 4,
-  outerOpt   = "bobyqa",
-  print      = 0,
-  calcTables = TRUE,
-  covMethod  = "r,s"
-)
 
 ## ---- Helper: refit a final SCM-selected model with full diagnostics ------
 ##   Reuses the model UI baked into the SCM-final fit (which already includes
@@ -1518,15 +1353,16 @@ fit_base_cov <- readRDS(file.path(stage1_dir, "fit_base_cov.rds"))
 ##     - diag:            convergence diagnostics for the final fit
 ##     - parFixed:        nlmixr2 parFixedDf (Estimate, SE, %RSE, CI) when a
 ##                         refit was performed; NULL otherwise
-##     - final_fit_refit: the refitted nlmixr2 fit object when refit_control
-##                         was supplied; NULL otherwise
+##     - refit_done:      TRUE iff refit_control was supplied AND the refit
+##                         succeeded; final_fit is then the refit object
 ##
 ##   refit_control:
 ##     When NULL (default) the SCM-final fit (covMethod = "", no tables) is
 ##     used as-is -- fast, but SE / condition number are unavailable.
 ##     When non-NULL (typically `final_focei`) the SCM-final model is refit
 ##     ONCE with the supplied control, producing full diagnostics.  The
-##     refitted fit replaces final_fit in all downstream extraction.
+##     refitted fit REPLACES final_fit (we don't keep the pre-refit copy --
+##     it would just be ~800 KB of duplicate object per .rds).
 package_scm_result <- function(label, scm_res, runtime_sec,
                                true_long = true_params, scenario_id = 9,
                                refit_control = NULL) {
@@ -1546,23 +1382,50 @@ package_scm_result <- function(label, scm_res, runtime_sec,
   ## Optional: refit final model with full diagnostics (cov, IPRED tables).
   ## When the refit succeeds it REPLACES final_fit so every downstream
   ## extraction (estimates, rel_err, diag) reflects the diagnostic fit.
-  final_fit_refit <- NULL
+  ## We previously kept the refit under a separate `final_fit_refit` slot,
+  ## but it was always identical to `final_fit` post-swap -- pure duplication.
+  ## Now we just keep a boolean flag indicating whether the swap happened.
+  refit_done <- FALSE
   if (!is.null(final_fit) && !is.null(refit_control)) {
-    final_fit_refit <- refit_final_model(final_fit, control = refit_control)
-    if (!is.null(final_fit_refit)) final_fit <- final_fit_refit
+    refit <- refit_final_model(final_fit, control = refit_control)
+    if (!is.null(refit)) {
+      final_fit  <- refit
+      refit_done <- TRUE
+    }
   }
 
-  ## Selected pairs from summaryTable.  The decision column is `included`
-  ## with values "yes"/"no" (forward) and "retained"/"dropped" (backward);
-  ## the old code filtered on inFinal/accepted/kept which never exist, so
-  ## `selected` collapsed back to the full step_hist.
-  selected <- if (!is.null(scm_res$summaryTable)) {
-    st <- as.data.frame(scm_res$summaryTable)
-    if ("included" %in% colnames(st)) {
-      st[st$included %in% c("yes", "retained"), , drop = FALSE]
-    } else {
-      st
+  ## --- Final-model covariate relations -------------------------------------
+  ## The previous `selected` filter looked at `summaryTable$included` (any
+  ## "yes"/"retained" row in the trace) which double-counts: backward listed
+  ## each retained relation once per backward step, and full-scm listed every
+  ## forward-accepted PLUS every backward-retained relation.  The only
+  ## reliable source-of-truth for "what's in the final model" is final_fit's
+  ## own theta vector, since runSCM names covariate coefficients
+  ##     cov_<COVAR>_<SHAPE-or-LEVEL>_<VAR>
+  ## (e.g. cov_BW_power_cl, cov_SEX_1_vc).
+  .parse_cov_theta <- function(nms) {
+    hits <- grep("^cov_", nms, value = TRUE)
+    if (length(hits) == 0L) {
+      return(tibble::tibble(theta_name = character(),
+                            covar      = character(),
+                            shape      = character(),
+                            var        = character()))
     }
+    parts <- strsplit(sub("^cov_", "", hits), "_", fixed = TRUE)
+    tibble::tibble(
+      theta_name = hits,
+      covar      = vapply(parts, `[`, character(1), 1L),
+      shape      = vapply(parts, function(p) paste(p[-c(1L, length(p))],
+                                                   collapse = "_"),
+                          character(1)),
+      var        = vapply(parts, function(p) p[length(p)], character(1))
+    )
+  }
+
+  selected <- if (!is.null(final_fit)) {
+    .parse_cov_theta(names(final_fit$theta)) %>%
+      dplyr::mutate(estimate = unname(final_fit$theta[theta_name])) %>%
+      dplyr::select(var, covar, shape, theta_name, estimate)
   } else {
     NULL
   }
@@ -1572,19 +1435,28 @@ package_scm_result <- function(label, scm_res, runtime_sec,
     rel_err_one(final_est, true_long, scenario_id)
   } else NULL
   diag      <- if (!is.null(final_fit)) diagnose_fit(final_fit) else NULL
-  parFixed  <- if (!is.null(final_fit_refit)) final_fit_refit$parFixedDf else NULL
+  ## parFixedDf is only populated when covMethod was non-empty; that's exactly
+  ## the refit_done case, since the screening control sets covMethod = "".
+  parFixed  <- if (refit_done) final_fit$parFixedDf else NULL
 
+  ## --- Packaged result -----------------------------------------------------
+  ## `step_hist` is the ONLY view of the search trace we keep.  Previously we
+  ## also stored `raw = scm_res`, which contained `$summaryTable` (== step_hist)
+  ## and `$resFwd[[2]]` / `$resBck[[2]]` (also == step_hist), so the same data
+  ## was being persisted three times per saved .rds.  Drop `raw` entirely and
+  ## promote `final_fit` to a top-level slot so downstream code can call e.g.
+  ## `extract_params_long(test$final_fit)` without spelunking into `$raw`.
   list(
-    label           = label,
-    selected        = selected,
-    step_hist       = scm_res$summaryTable,
-    final_est       = final_est,
-    rel_err         = rel_err,
-    diag            = diag,
-    parFixed        = parFixed,
-    final_fit_refit = final_fit_refit,
-    runtime_sec     = runtime_sec,
-    raw             = scm_res
+    label       = label,
+    selected    = selected,
+    step_hist   = scm_res$summaryTable,
+    final_fit   = final_fit,
+    final_est   = final_est,
+    rel_err     = rel_err,
+    diag        = diag,
+    parFixed    = parFixed,
+    refit_done  = refit_done,
+    runtime_sec = runtime_sec
   )
 }
 
@@ -1596,6 +1468,7 @@ out_dir_v2 <- "simulated_virtual_dataset_eta_filtered"
 stage1_dir <- file.path(out_dir_v2, "stage1_smoke_scn09_ds01")
 fit_base <- readRDS(file.path(stage1_dir, "fit_base.rds"))
 fit_base_cov <- readRDS(file.path(stage1_dir, "fit_base_cov.rds"))
+
 scm_focei <- nlmixr2est::foceiControl(
   sigdig     = 4,
   outerOpt   = "bobyqa",
@@ -1603,15 +1476,9 @@ scm_focei <- nlmixr2est::foceiControl(
   calcTables = FALSE,     # SCM doesn't need IPRED/CWRES tables
   covMethod  = ""         # SCM doesn't need cov matrix for LRT
 )
-scm_focei_maxiteration <- nlmixr2est::foceiControl(
-  sigdig     = 4,
-  outerOpt   = "bobyqa",
-  print      = 0,
-  calcTables = FALSE,     # SCM doesn't need IPRED/CWRES tables
-  maxOuterIterations = 2000,
-  maxInnerIterations = 2000,
-  covMethod  = ""         # SCM doesn't need cov matrix for LRT
-)
+
+
+
 final_focei <- nlmixr2est::foceiControl(
   sigdig     = 4,
   outerOpt   = "bobyqa",
@@ -1713,6 +1580,8 @@ res_fwd_auto <- runSCM_traced(
 )
 t_fwd_auto     <- attr(res_fwd_auto, "elapsed_s")
 saveRDS(res_fwd_auto, file.path(stage1_dir, "res_fwd_auto.rds"))    # idempotent recovery
+res_fwd_auto <- readRDS(file.path(stage1_dir, "res_fwd_auto.rds"))
+
 test_fwd_auto  <- package_scm_result("forward_only", res_fwd_auto, t_fwd_auto)
 saveRDS(test_fwd_auto, file.path(stage1_dir, "test_fwd_auto.rds"))
 test_fwd_auto <- readRDS(file.path(stage1_dir, "test_fwd_auto.rds"))
@@ -1738,6 +1607,18 @@ test_fwd_auto_cov  <- package_scm_result("forward_only_cov", res_fwd_auto_cov, t
 saveRDS(test_fwd_auto_cov, file.path(stage1_dir, "test_fwd_auto_cov.rds"))
 test_fwd_auto_cov <- readRDS(file.path(stage1_dir, "test_fwd_auto_cov.rds"))
 
+
+scm_focei_maxiteration <- nlmixr2est::foceiControl(
+  sigdig     = 4,
+  outerOpt   = "bobyqa",
+  print      = 0,
+  calcTables = FALSE,     # SCM doesn't need IPRED/CWRES tables
+  maxOuterIterations = 2000,
+  maxInnerIterations = 2000,
+  rxControl      = rxode2::rxControl(atol = 1e-8, rtol = 1e-6),
+  covMethod  = ""         # SCM doesn't need cov matrix for LRT
+)
+
 res_fwd_auto_maxiteration <- runSCM_traced(
   label       = "forward",
   data        = ds01,
@@ -1751,13 +1632,45 @@ res_fwd_auto_maxiteration <- runSCM_traced(
   saveModels  = FALSE,
   workers     = 3L,           # 4 cores: leave 1 free for OS / Positron
   print       = 100,           # FOCEi iteration progress every 100 iters
-  maxRetries = 2L #no retries for this smoke test
+  maxRetries = 1L #no retries for this smoke test
 )
 t_fwd_auto_maxiteration     <- attr(res_fwd_auto_maxiteration, "elapsed_s")
 saveRDS(res_fwd_auto_maxiteration, file.path(stage1_dir, "res_fwd_auto_maxiteration.rds"))    # idempotent recovery
 test_fwd_auto_maxiteration  <- package_scm_result("forward_only", res_fwd_auto_maxiteration, t_fwd_auto_maxiteration)
 saveRDS(test_fwd_auto_maxiteration, file.path(stage1_dir, "test_fwd_auto_maxiteration.rds"))
 test_fwd_auto_maxiteration <- readRDS(file.path(stage1_dir, "test_fwd_auto_maxiteration.rds"))
+
+scm_focei_maxiteration0 <- nlmixr2est::foceiControl(
+  sigdig     = 4,
+  outerOpt   = "bobyqa",
+  print      = 0,
+  calcTables = FALSE,     # SCM doesn't need IPRED/CWRES tables
+  maxOuterIterations = 2000,
+  maxInnerIterations = 2000,
+  covMethod  = ""         # SCM doesn't need cov matrix for LRT
+)
+res_fwd_auto_maxiteration0 <- runSCM_traced(
+  label       = "forward",
+  data        = ds01,
+  fit         = fit_base,
+  varsVec    = c("cl", "vc"),
+  covarsVec  = "BW",
+  catvarsVec = "SEX",
+  shapes     = c("power", "lin"),
+  searchType  = "forward",
+  control     = scm_focei_maxiteration0,    # slim control: no tables, no cov, sigdig=4 bobyqa
+  saveModels  = FALSE,
+  workers     = 3L,           # 4 cores: leave 1 free for OS / Positron
+  print       = 100,           # FOCEi iteration progress every 100 iters
+  maxRetries = 0L #no retries for this smoke test
+)
+t_fwd_auto_maxiteration     <- attr(res_fwd_auto_maxiteration, "elapsed_s")
+saveRDS(res_fwd_auto_maxiteration, file.path(stage1_dir, "res_fwd_auto_maxiteration.rds"))    # idempotent recovery
+test_fwd_auto_maxiteration  <- package_scm_result("forward_only", res_fwd_auto_maxiteration, t_fwd_auto_maxiteration)
+saveRDS(test_fwd_auto_maxiteration, file.path(stage1_dir, "test_fwd_auto_maxiteration.rds"))
+test_fwd_auto_maxiteration <- readRDS(file.path(stage1_dir, "test_fwd_auto_maxiteration.rds"))
+
+
 
 
 
@@ -1961,8 +1874,6 @@ test_full_cat <- package_scm_result("full_scm_cat", res_full_cat, t_full_cat)
 saveRDS(test_full_cat, file.path(stage1_dir, "test_full_cat.rds"))
 
 
-
-
 ## ############################################################################
 # STAGE 1 -- Scenario 16: all four covariate effects active -------------------
 ## ############################################################################
@@ -1970,7 +1881,7 @@ saveRDS(test_full_cat, file.path(stage1_dir, "test_full_cat.rds"))
 ##     BW   on CL  (power)  TH_BW_CL   = 0.75
 ##     CrCL on CL  (power)  TH_CRCL_CL = 0.50
 ##     BW   on Vc  (power)  TH_BW_VC   = 1.00
-##     SEX  on Vc  (linear) TH_SEX_VC  = 0.50
+##     SEX  on Vc  (cat) TH_SEX_VC  = 0.50
 ##   All four are TRUE positives.  The SCM smoke test must keep these and
 ##   reject the false-positive distractors (CrCL on Vc, SEX on CL).
 ##
@@ -1981,180 +1892,8 @@ saveRDS(test_full_cat, file.path(stage1_dir, "test_full_cat.rds"))
 ##   covMethod = "" (LRT only needs OFV).  Re-fit with final_focei outside
 ##   this block if SE / %RSE / parFixedDf are needed for any final model.
 ## ############################################################################
-
-## ---- Prep ---------------------------------------------------------------
-out_dir_v2   <- "simulated_virtual_dataset_eta_filtered"
-stage1_dir16 <- file.path(out_dir_v2, "stage1_smoke_scn16_ds01")
-if (!dir.exists(stage1_dir16)) dir.create(stage1_dir16, recursive = TRUE)
-
-## Single control re-used for every fit in this block.  Trailing-comma bug
-## in the earlier draft of scm_focei_n is fixed here.
-scm_focei_n <- nlmixr2est::foceiControl(
-  sigdig             = 4,
-  outerOpt           = "bobyqa",
-  print              = 0,
-  calcTables         = FALSE,    # SCM doesn't need IPRED / CWRES tables
-  covMethod          = "r,s",       # SCM doesn't need cov matrix for LRT
-  maxOuterIterations = 2000,
-  maxInnerIterations = 2000
-)
-
-## NM-format dataset for SCENARIO = 16, DATASET = 1
-sim_obs_scn16 <- readRDS(file.path(out_dir_v2, "sim_obs_scenario_16.rds"))
-ds16_01 <- to_nm_dataset(sim_obs_scn16) %>%
-  dplyr::filter(DATASET == 1) %>%
-  dplyr::select(-SCENARIO, -DATASET) %>%
-  dplyr::mutate(
-    ID   = as.integer(ID),
-    SEX  = as.integer(SEX),
-    RACE = as.integer(RACE)
-  )
-saveRDS(ds16_01, file.path(stage1_dir16, "nm_scn16_ds01.rds"))
-ds16_01 <- readRDS(file.path(stage1_dir16, "nm_scn16_ds01.rds"))
-
-ds16_01_60 <-  ds16_01 %>% filter(ID <=60)
-saveRDS(ds16_01_60, file.path(stage1_dir16, "nm_scn16_ds01_60.rds"))
-ds16_01_60 <- readRDS(file.path(stage1_dir16, "nm_scn16_ds01_60.rds"))
-
 ## ============================================================================
-# Part 1: True-model robustness (refexp vs lin) ------------------------------
-## ============================================================================
-##   refexp: parameterised on natural scale, exp() at fit boundaries
-##   lin   : parameterised log-additively (canonical nlmixr2 form)
-##   Both encode the same simulation algebra.  Disagreement between fits flags
-##   a FOCEI-stability issue in one of the parameterisations.
-
-true_2cmt_scn16_refexp <- function() {
-  ini({
-    lTVCL      <- log(0.6)
-    lTVQ       <- log(1.8)
-    lTVVc      <- log(20)
-    lTVVp      <- log(80)
-    lTVKA      <- fix(log(0.7))    # KA unidentifiable
-    TH_BW_CL   <- 0.75
-    TH_CRCL_CL <- 0.5
-    TH_BW_VC   <- 1.0
-    TH_SEX_VC  <- 0.5
-
-    eta.cl + eta.vc ~ c(0.1, 0.02, 0.1)
-    prop.err <- 0.1
-  })
-  model({
-    cl_typ <- exp(lTVCL) * (BW / 70)^TH_BW_CL * (CrCL / 95)^TH_CRCL_CL
-    vc_typ <- exp(lTVVc) * (BW / 70)^TH_BW_VC * (1 + TH_SEX_VC * SEX)
-    cl     <- cl_typ * exp(eta.cl)
-    vc     <- vc_typ * exp(eta.vc)
-    q      <- exp(lTVQ)
-    vp     <- exp(lTVVp)
-    ka     <- exp(lTVKA)
-
-    k10 <- cl / vc
-    k12 <- q  / vc
-    k21 <- q  / vp
-
-    d/dt(depot)      = -ka * depot
-    d/dt(central)    =  ka * depot - k10 * central - k12 * central + k21 * peripheral
-    d/dt(peripheral) =  k12 * central - k21 * peripheral
-
-    cp = central / vc
-    cp ~ prop(prop.err)
-  })
-}
-
-true_2cmt_scn16_lin <- function() {
-  ini({
-    lTVCL      <- log(0.6)
-    lTVQ       <- log(1.8)
-    lTVVc      <- log(20)
-    lTVVp      <- log(80)
-    lTVKA      <- fix(log(0.7))
-    TH_BW_CL   <- 0.75
-    TH_CRCL_CL <- 0.5
-    TH_BW_VC   <- 1.0
-    TH_SEX_VC  <- 0.5
-
-    eta.cl + eta.vc ~ c(0.1, 0.02, 0.1)
-    prop.err <- 0.1
-  })
-  model({
-    ## BW and CrCL via log() => power on natural scale (matches refexp).
-    ## SEX preserves the linear-on-natural-scale parameterisation
-    ## (1 + theta*SEX) used in the simulation; log() lifts it to log scale.
-    lTVCL_typ <- lTVCL + TH_BW_CL * log(BW / 70) + TH_CRCL_CL * log(CrCL / 95)
-    lTVVc_typ <- lTVVc + TH_BW_VC * log(BW / 70) + log(1 + TH_SEX_VC * SEX) #not align with nlmixr2csm
-    cl        <- exp(lTVCL_typ + eta.cl)
-    vc        <- exp(lTVVc_typ + eta.vc)
-    q         <- exp(lTVQ)
-    vp        <- exp(lTVVp)
-    ka        <- exp(lTVKA)
-
-    k10 <- cl / vc
-    k12 <- q  / vc
-    k21 <- q  / vp
-
-    d/dt(depot)      = -ka * depot
-    d/dt(central)    =  ka * depot - k10 * central - k12 * central + k21 * peripheral
-    d/dt(peripheral) =  k12 * central - k21 * peripheral
-
-    cp = central / vc
-    cp ~ prop(prop.err)
-  })
-}
-
-## ---- Fit both parameterisations ----------------------------------------
-t_fit_true16_refexp <- system.time(
-  fit_true16_refexp <- nlmixr2(true_2cmt_scn16_refexp, ds16_01_60,
-                               est = "focei", control = scm_focei_n)
-)
-saveRDS(fit_true16_refexp,
-        file.path(stage1_dir16, "fit_true_scn16_ds01_refexp.rds"))
-
-t_fit_true16_lin <- system.time(
-  fit_true16_lin <- nlmixr2(true_2cmt_scn16_lin, ds16_01_60,
-                            est = "focei", control = scm_focei_n)
-)
-saveRDS(fit_true16_lin,
-        file.path(stage1_dir16, "fit_true_scn16_ds01_lin.rds"))
-
-diag_true16_refexp <- diagnose_fit(fit_true16_refexp)
-diag_true16_lin    <- diagnose_fit(fit_true16_lin)
-diag_summary16 <- dplyr::bind_rows(
-  .build_part1_row("refexp", diag_true16_refexp, t_fit_true16_refexp),
-  .build_part1_row("lin",    diag_true16_lin,    t_fit_true16_lin)
-) %>%
-  dplyr::mutate(scenario = 16)
-saveRDS(diag_summary16, file.path(stage1_dir16, "part1_summary.rds"))
-
-
-## ---- Estimates -> long; rel-err vs scenario-16 truth -------------------
-est_true16_refexp <- extract_params_long(fit_true16_refexp)
-est_true16_lin    <- extract_params_long(fit_true16_lin)
-
-err_true16_refexp <- rel_err_one(est_true16_refexp, true_params, scenario_id = 16)
-err_true16_lin    <- rel_err_one(est_true16_lin,    true_params, scenario_id = 16)
-
-err_true16_compare <- dplyr::bind_rows(
-  err_true16_refexp %>% dplyr::mutate(parameterisation = "refexp"),
-  err_true16_lin    %>% dplyr::mutate(parameterisation = "lin")
-) %>%
-  dplyr::select(parameterisation, parameter, true_value,
-                estimate, abs_err, rel_err, rel_err_pct)
-
-err_true16_wide <- err_true16_compare %>%
-  tidyr::pivot_wider(
-    id_cols     = c(parameter, true_value),
-    names_from  = parameterisation,
-    values_from = c(estimate, rel_err_pct),
-    names_glue  = "{.value}_{parameterisation}"
-  ) %>%
-  dplyr::mutate(
-    abs_diff_estimate    = abs(estimate_refexp - estimate_lin),
-    abs_diff_rel_err_pct = abs(rel_err_pct_refexp - rel_err_pct_lin)
-  )
-
-
-## ============================================================================
-# Part 1b: foceiControl tuning grid (scenario 16, ds01) ----------------------
+# Part0: foceiControl tuning grid (scenario 16, ds01) ----------------------
 ## ============================================================================
 ##   Goal: find the fastest foceiControl setting that ALSO converges deeply.
 ##   In Part 1, refexp walked 244 OFV units away from its own best minimum
@@ -2291,155 +2030,670 @@ bench_results_300 <- purrr::pmap_dfr(focei_grid, function(setting, sigdig, atol,
 })
 saveRDS(bench_results_300, file.path(stage1_dir16, "focei_tuning_results_300.rds"))
 
+
+## ---- Prep ---------------------------------------------------------------
+
+## NM-format dataset for SCENARIO = 16, DATASET = 1 (n=300)----
+out_dir_v2   <- "simulated_virtual_dataset_eta_filtered"
+stage1_dir16 <- file.path(out_dir_v2, "stage1_smoke_scn16_ds01")
+if (!dir.exists(stage1_dir16)) dir.create(stage1_dir16, recursive = TRUE)
+
+sim_obs_scn16 <- readRDS(file.path(out_dir_v2, "sim_obs_scenario_16.rds"))
+ds16_01 <- to_nm_dataset(sim_obs_scn16) %>%
+  dplyr::filter(DATASET == 1) %>%
+  dplyr::select(-SCENARIO, -DATASET) %>%
+  dplyr::mutate(
+    ID   = as.integer(ID),
+    SEX  = as.integer(SEX),
+    RACE = as.integer(RACE)
+  )
+saveRDS(ds16_01, file.path(stage1_dir16, "nm_scn16_ds01.rds"))
+ds16_01 <- readRDS(file.path(stage1_dir16, "nm_scn16_ds01.rds"))
+
+## NM-format dataset for SCENARIO = 16, DATASET = 1 (n=80)-------
+out_dir_v2_N80   <- "simulated_virtual_dataset_eta_filtered_N80"
+stage1_dir16_N80 <- file.path(out_dir_v2_N80 , "stage1_smoke_scn16_ds01_N80")
+if (!dir.exists(stage1_dir16_N80)) dir.create(stage1_dir16_N80, recursive = TRUE)
+
+sim_obs_scn16_N80 <- readRDS(file.path(out_dir_v2_N80, "sim_obs_scenario_16.rds"))
+ds16_01_N80 <- to_nm_dataset(sim_obs_scn16_N80) %>%
+  dplyr::filter(DATASET == 1) %>%
+  dplyr::select(-SCENARIO, -DATASET) %>%
+  dplyr::mutate(
+    ID   = as.integer(ID),
+    SEX  = as.integer(SEX),
+    RACE = as.integer(RACE)
+  )
+saveRDS(ds16_01_N80, file.path(stage1_dir16_N80, "nm_scn16_ds01_N80.rds"))
+ds16_01_N80 <- readRDS(file.path(stage1_dir16_N80, "nm_scn16_ds01_N80.rds"))
+
+
+## NM-format dataset for SCENARIO = 16, DATASET = 1 (n=40)---------
+out_dir_v2_N40   <- "simulated_virtual_dataset_eta_filtered_N40"
+stage1_dir16_N40 <- file.path(out_dir_v2_N40 , "stage1_smoke_scn16_ds01_N40")
+if (!dir.exists(stage1_dir16_N40)) dir.create(stage1_dir16_N40, recursive = TRUE)
+
+sim_obs_scn16_N40 <- readRDS(file.path(out_dir_v2_N40, "sim_obs_scenario_16.rds"))
+ds16_01_N40 <- to_nm_dataset(sim_obs_scn16_N40) %>%
+  dplyr::filter(DATASET == 1) %>%
+  dplyr::select(-SCENARIO, -DATASET) %>%
+  dplyr::mutate(
+    ID   = as.integer(ID),
+    SEX  = as.integer(SEX),
+    RACE = as.integer(RACE)
+  )
+saveRDS(ds16_01_N40, file.path(stage1_dir16_N40, "nm_scn16_ds01_N40.rds"))
+ds16_01_N40 <- readRDS(file.path(stage1_dir16_N40, "nm_scn16_ds01_N40.rds"))
+
+
+## ============================================================================
+# Part 1: True-model robustness (refexp vs lin) ------------------------------
+## ============================================================================
+##   refexp: parameterised on natural scale, exp() at fit boundaries
+##   lin   : parameterised log-additively (canonical nlmixr2 form)
+##   Both encode the same simulation algebra.  Disagreement between fits flags
+##   a FOCEI-stability issue in one of the parameterisations.
+
+
+scm_focei_n <- nlmixr2est::foceiControl(
+  sigdig     = 4,
+  outerOpt   = "bobyqa",
+  print      = 0,
+  calcTables = FALSE,     # SCM doesn't need IPRED/CWRES tables
+  covMethod  = "r,s",         # SCM doesn't need cov matrix for LRT
+  maxOuterIterations = 2000,
+  maxInnerIterations = 2000
+)
+
+
+true_2cmt_scn16_refexp <- function() {
+  ini({
+    lTVCL      <- log(0.6)
+    lTVQ       <- log(1.8)
+    lTVVc      <- log(20)
+    lTVVp      <- log(80)
+    lTVKA      <- fix(log(0.7))    # KA unidentifiable
+    TH_BW_CL   <- 0.75
+    TH_CRCL_CL <- 0.5
+    TH_BW_VC   <- 1.0
+    TH_SEX_VC  <- log(1.5)         # nlmixr2scm convention: exp(theta*SEX)
+
+    eta.cl + eta.vc ~ c(0.1, 0.02, 0.1)
+    prop.err <- 0.1
+  })
+  model({
+    cl_typ <- exp(lTVCL) * (BW / 70)^TH_BW_CL * (CrCL / 95)^TH_CRCL_CL
+    vc_typ <- exp(lTVVc) * (BW / 70)^TH_BW_VC * exp(TH_SEX_VC * SEX)
+    cl     <- cl_typ * exp(eta.cl)
+    vc     <- vc_typ * exp(eta.vc)
+    q      <- exp(lTVQ)
+    vp     <- exp(lTVVp)
+    ka     <- exp(lTVKA)
+
+    k10 <- cl / vc
+    k12 <- q  / vc
+    k21 <- q  / vp
+
+    d/dt(depot)      = -ka * depot
+    d/dt(central)    =  ka * depot - k10 * central - k12 * central + k21 * peripheral
+    d/dt(peripheral) =  k12 * central - k21 * peripheral
+
+    cp = central / vc
+    cp ~ prop(prop.err)
+  })
+}
+
+true_2cmt_scn16_lin <- function() {
+  ini({
+    lTVCL      <- log(0.6)
+    lTVQ       <- log(1.8)
+    lTVVc      <- log(20)
+    lTVVp      <- log(80)
+    lTVKA      <- fix(log(0.7))
+    TH_BW_CL   <- 0.75
+    TH_CRCL_CL <- 0.5
+    TH_BW_VC   <- 1.0
+    TH_SEX_VC  <- log(1.5) #0.405        # nlmixr2scm convention
+
+    eta.cl + eta.vc ~ c(0.1, 0.02, 0.1)
+    prop.err <- 0.1
+  })
+  model({
+    ## Pure log-additive form: matches `runSCM(shapes = c("power", "cat"))`
+    ## verbatim.  BW and CrCL via log() => power on natural scale.  SEX is
+    ## the indicator-coded categorical; coefficient enters linearly on the
+    ## log scale (= exp(theta*SEX) on natural scale, matching the simulator).
+    lTVCL_typ <- lTVCL + TH_BW_CL * log(BW / 70) + TH_CRCL_CL * log(CrCL / 95)
+    lTVVc_typ <- lTVVc + TH_BW_VC * log(BW / 70) + TH_SEX_VC * SEX
+    cl        <- exp(lTVCL_typ + eta.cl)
+    vc        <- exp(lTVVc_typ + eta.vc)
+    q         <- exp(lTVQ)
+    vp        <- exp(lTVVp)
+    ka        <- exp(lTVKA)
+
+    k10 <- cl / vc
+    k12 <- q  / vc
+    k21 <- q  / vp
+
+    d/dt(depot)      = -ka * depot
+    d/dt(central)    =  ka * depot - k10 * central - k12 * central + k21 * peripheral
+    d/dt(peripheral) =  k12 * central - k21 * peripheral
+
+    cp = central / vc
+    cp ~ prop(prop.err)
+  })
+}
+
+
+## ---- Fit both parameterisations at three cohort sizes -----------------
+##   Each fit gets its own variable name (no clobbering across N).  All six
+##   results then flow through one registry tibble for diagnostics + estimates.
+
+t_fit_true16_refexp300_n <- system.time(
+  fit_true16_refexp300_n <- nlmixr2(true_2cmt_scn16_refexp, ds16_01,
+                                  est = "focei", control = scm_focei_n)
+)
+t_fit_true16_lin300_n <- system.time(
+  fit_true16_lin300_n <- nlmixr2(true_2cmt_scn16_lin, ds16_01,
+                               est = "focei", control = scm_focei_n)
+)
+diag_true_refexp300_n <- diagnose_fit(fit_true16_refexp300_n) #-16805
+diag_true_lin300_n   <- diagnose_fit(fit_true16_lin300_n) #-16345- not global mininum-become the same again. 
+
+t_fit_true16_refexp300 <- system.time(
+  fit_true16_refexp300 <- nlmixr2(true_2cmt_scn16_refexp, ds16_01,
+                                  est = "focei", control = scm_focei_production)
+)
+t_fit_true16_lin300 <- system.time(
+  fit_true16_lin300 <- nlmixr2(true_2cmt_scn16_lin, ds16_01,
+                               est = "focei", control = scm_focei_production)
+)
+
+t_fit_true16_refexp80 <- system.time(
+  fit_true16_refexp80 <- nlmixr2(true_2cmt_scn16_refexp, ds16_01_N80,
+                                 est = "focei", control = scm_focei_production)
+)
+t_fit_true16_lin80 <- system.time(
+  fit_true16_lin80 <- nlmixr2(true_2cmt_scn16_lin, ds16_01_N80,
+                              est = "focei", control = scm_focei_production)
+)
+
+t_fit_true16_refexp40 <- system.time(
+  fit_true16_refexp40 <- nlmixr2(true_2cmt_scn16_refexp, ds16_01_N40,
+                                 est = "focei", control = scm_focei_production)
+)
+t_fit_true16_lin40 <- system.time(
+  fit_true16_lin40 <- nlmixr2(true_2cmt_scn16_lin, ds16_01_N40,
+                              est = "focei", control = scm_focei_production)
+)
+
+## Aliases for the downstream runtime-projection block (uses N=300 as ref).
+t_fit_true16_refexp <- t_fit_true16_refexp300
+t_fit_true16_lin    <- t_fit_true16_lin300
+
+## ---- Single registry drives diagnostics + estimates -------------------
+fit_registry16 <- tibble::tibble(
+  parameterisation = c("refexp", "lin", "refexp", "lin", "refexp", "lin"),
+  n_subj           = c(300L, 300L, 80L, 80L, 40L, 40L),
+  fit              = list(fit_true16_refexp300, fit_true16_lin300,
+                          fit_true16_refexp80,  fit_true16_lin80,
+                          fit_true16_refexp40,  fit_true16_lin40),
+  runtime          = list(t_fit_true16_refexp300, t_fit_true16_lin300,
+                          t_fit_true16_refexp80,  t_fit_true16_lin80,
+                          t_fit_true16_refexp40,  t_fit_true16_lin40)
+)
+
+## ---- Per-fit diagnostics (one row per (N, parameterisation)) ----------
+diag_summary16 <- fit_registry16 %>%
+  dplyr::mutate(
+    diag = purrr::map(fit, diagnose_fit),
+    row  = purrr::pmap(
+      list(parameterisation, diag, runtime),
+      function(p, d, r) .build_part1_row(p, d, r)
+    )
+  ) %>%
+  dplyr::select(n_subj, row) %>%
+  tidyr::unnest(row) %>%
+  dplyr::mutate(scenario = 16) %>%
+  dplyr::relocate(scenario, n_subj, parameterisation) %>%
+  dplyr::arrange(dplyr::desc(n_subj), parameterisation)
+saveRDS(diag_summary16, file.path(stage1_dir16, "part1_summary.rds"))
+
+# Alias for the reporting block at the bottom of the script.
+part1_summary16 <- diag_summary16
+
+
+## ---- Estimates -> long; rel-err vs scenario-16 truth ------------------
+err_true16_compare <- fit_registry16 %>%
+  dplyr::mutate(
+    est     = purrr::map(fit, extract_params_long),
+    rel_err = purrr::map(
+      est, rel_err_one,
+      true_long   = true_params,
+      scenario_id = 16
+    )
+  ) %>%
+  dplyr::select(parameterisation, n_subj, rel_err) %>%
+  tidyr::unnest(rel_err) %>%
+  dplyr::select(n_subj, parameterisation, parameter, true_value,
+                estimate, abs_err, rel_err, rel_err_pct) %>%
+  dplyr::arrange(dplyr::desc(n_subj), parameter, parameterisation)
+saveRDS(err_true16_compare, file.path(stage1_dir16, "part1_err_long.rds"))
+
+
+## ---- Wide compare: refexp vs lin at each N (parameter x N grid) -------
+err_true16_wide <- err_true16_compare %>%
+  tidyr::pivot_wider(
+    id_cols     = c(n_subj, parameter, true_value),
+    names_from  = parameterisation,
+    values_from = c(estimate, rel_err_pct),
+    names_glue  = "{.value}_{parameterisation}"
+  ) %>%
+  dplyr::mutate(
+    abs_diff_estimate    = abs(estimate_refexp - estimate_lin),
+    abs_diff_rel_err_pct = abs(rel_err_pct_refexp - rel_err_pct_lin)
+  ) %>%
+  dplyr::arrange(dplyr::desc(n_subj), parameter)
+saveRDS(err_true16_wide, file.path(stage1_dir16, "part1_err_wide.rds"))
+##
+
+
+## ---- Visualisation: |rel-err| vs cohort size, lin parameterisation -----
+##   Two messages in one panel:
+##     1) Every parameter's |rel-err| grows as N shrinks (left -> right).
+##     2) cov_VcCL sits well above the rest at every N.
+##   Design: one faint grey line per parameter (background reference) +
+##   one bold red line for cov_VcCL (the headline finding).  Parameter
+##   labels at the right edge (N = 40) identify the gray spaghetti without
+##   a legend.
+err_true16_lin_plot <- err_true16_compare %>%
+  dplyr::filter(parameterisation == "lin") %>%
+  dplyr::mutate(
+    abs_rel_err_pct = abs(rel_err_pct),
+    n_label  = factor(n_subj,
+                      levels = c(300L, 80L, 40L),
+                      labels = c("N = 300", "N = 80", "N = 40")),
+    is_worst = parameter == "cov_VcCL"
+  )
+
+p_err_true16_lin <- ggplot2::ggplot(
+  err_true16_lin_plot,
+  ggplot2::aes(x = n_label, y = abs_rel_err_pct,
+               group = parameter, colour = is_worst)
+) +
+  ggplot2::geom_line(ggplot2::aes(linewidth = is_worst), alpha = 0.9) +
+  ggplot2::geom_point(ggplot2::aes(size = is_worst)) +
+  ggplot2::geom_text(
+    data = dplyr::filter(err_true16_lin_plot, n_label == "N = 40"),
+    ggplot2::aes(label = parameter),
+    hjust       = 0,
+    nudge_x     = 0.10,
+    size        = 4,
+    show.legend = FALSE
+  ) +
+  ggplot2::scale_colour_manual(
+    values = c(`FALSE` = "grey70", `TRUE` = "#C0392B"),
+    guide  = "none"
+  ) +
+  ggplot2::scale_linewidth_manual(
+    values = c(`FALSE` = 0.4, `TRUE` = 1.4),
+    guide  = "none"
+  ) +
+  ggplot2::scale_size_manual(
+    values = c(`FALSE` = 1.4, `TRUE` = 3),
+    guide  = "none"
+  ) +
+  ggplot2::scale_y_continuous(
+    labels = function(x) paste0(x, "%"),
+    expand = ggplot2::expansion(mult = c(0.02, 0.10))
+  ) +
+  ggplot2::coord_cartesian(clip = "off") +
+  ggplot2::labs(
+    title    = "Estimation error grows as cohort shrinks; cov_VcCL is the worst-recovered parameter",
+    subtitle = "Lin parameterisation, scenario 16, dataset 01",
+    x        = NULL,
+    y        = "|Relative error|",
+    caption  = "Each line = one model parameter; cov_VcCL highlighted in red."
+  ) +
+  ggplot2::theme_minimal(base_size = 12) +
+  ggplot2::theme(
+    plot.title.position = "plot",
+    plot.margin         = ggplot2::margin(5.5, 60, 5.5, 5.5),
+    panel.grid.minor    = ggplot2::element_blank()
+  )
+
+print(p_err_true16_lin)
+ggplot2::ggsave(
+  file.path(stage1_dir16, "part1_err_lin_by_N.png"),
+  p_err_true16_lin,
+  width = 10, height = 5, dpi = 150
+)
+
+
+## ---- Side-by-side bars: |rel-err| per parameter, grouped by N ----------
+##   The line chart above answers "which parameter degrades fastest?"; this
+##   bar version answers "for parameter X, how big is the error at each N?".
+##   Parameters are ordered from worst to best at N=40 so the eye lands on
+##   cov_VcCL at the left; bars within a parameter are coloured by cohort
+##   size with the largest cohort lightest (intuitive "more data = less
+##   error" reading).
+err_true16_lin_order <- err_true16_lin_plot %>%
+  dplyr::filter(n_label == "N = 40") %>%
+  dplyr::arrange(dplyr::desc(abs_rel_err_pct)) %>%
+  dplyr::pull(parameter)
+
+err_true16_lin_bars <- err_true16_lin_plot %>%
+  dplyr::mutate(parameter = factor(parameter, levels = err_true16_lin_order))
+
+p_err_true16_lin_bar <- ggplot2::ggplot(
+  err_true16_lin_bars,
+  ggplot2::aes(x = parameter, y = abs_rel_err_pct, fill = n_label)
+) +
+  ggplot2::geom_col(position = ggplot2::position_dodge(width = 0.8),
+                    width    = 0.75) +
+  ggplot2::geom_text(
+    ggplot2::aes(label = sprintf("%.1f%%", abs_rel_err_pct)),
+    position = ggplot2::position_dodge(width = 0.8),
+    vjust    = -0.4,
+    size     = 3
+  ) +
+  ggplot2::scale_fill_manual(
+    name   = "Cohort size",
+    values = c("N = 300" = "#9ECAE1",
+               "N = 80"  = "#4292C6",
+               "N = 40"  = "#08519C")
+  ) +
+  ggplot2::scale_y_continuous(
+    labels = function(x) paste0(x, "%"),
+    expand = ggplot2::expansion(mult = c(0, 0.12))
+  ) +
+  ggplot2::labs(
+    title    = "Per-parameter |relative error| grows as cohort shrinks",
+    subtitle = "Lin parameterisation, scenario 16, dataset 01 (parameters sorted by worst-N error)",
+    x        = NULL,
+    y        = "|Relative error|"
+  ) +
+  ggplot2::theme_minimal(base_size = 12) +
+  ggplot2::theme(
+    plot.title.position = "plot",
+    axis.text.x         = ggplot2::element_text(angle = 35, hjust = 1),
+    panel.grid.major.x  = ggplot2::element_blank(),
+    panel.grid.minor    = ggplot2::element_blank(),
+    legend.position     = "top"
+  )
+
+print(p_err_true16_lin_bar)
+ggplot2::ggsave(
+  file.path(stage1_dir16, "part1_err_lin_by_N_bar.png"),
+  p_err_true16_lin_bar,
+  width = 14, height = 5, dpi = 150
+)
+
+
 # Part 2: runSCM feature tests -- BASE (no-covariate) model -------------------
 ## ============================================================================
 ##   The base model `base_2cmt_oral` is reused unchanged (covariate-free);
 ##   only the data differs from the scenario-9 fit so we refit on ds16_01.
-t_fit_base16 <- system.time(
-  fit_base16 <- nlmixr2(base_2cmt_oral, ds16_01,
-                        est = "focei", control = scm_focei_n)
-)
-saveRDS(fit_base16, file.path(stage1_dir16, "fit_base.rds"))
-fit_base16 <- readRDS(file.path(stage1_dir16, "fit_base.rds"))
 
-## ---- Candidate sets ----------------------------------------------------
-##   Continuous-only (sections 2.2 - 2.5):
-##     BW   ~ cl  (TRUE +, power 0.75)
-##     CrCL ~ cl  (TRUE +, power 0.50)
-##     BW   ~ vc  (TRUE +, power 1.00)
-##     CrCL ~ vc  (TRUE -- false-positive distractor)
-candidate_pairs_scn16_cont <- list(
+base_2cmt_oral <- function() {
+  ini({
+    lTVCL <- log(0.6)
+    lTVQ  <- log(1.8)
+    lTVVc <- log(20)
+    lTVVp <- log(80)
+    ## KA fixed: the design's first non-zero sample (~7 h) is well past
+    ## absorption (KA = 0.7 /h, absorption t1/2 ~ 1 h), so KA cannot be
+    ## informatively estimated from the data. 
+    lTVKA <- fix(log(0.7))
+
+    eta.cl + eta.vc ~ c(
+      0.1,
+      0.02,
+      0.1
+    )
+
+    prop.err <- 0.1
+  })
+  model({
+    cl <- exp(lTVCL + eta.cl)
+    vc <- exp(lTVVc + eta.vc)
+    q  <- exp(lTVQ)
+    vp <- exp(lTVVp)
+    ka <- exp(lTVKA)
+
+    k10 <- cl / vc
+    k12 <- q  / vc
+    k21 <- q  / vp
+
+    d/dt(depot)      = -ka * depot
+    d/dt(central)    =  ka * depot - k10 * central - k12 * central + k21 * peripheral
+    d/dt(peripheral) =  k12 * central - k21 * peripheral
+
+    cp = central / vc
+    cp ~ prop(prop.err)
+  })
+}
+t_fit_base16_N80 <- system.time(
+  fit_base16_N80 <- nlmixr2(base_2cmt_oral, ds16_01_N80,
+                            est = "focei", control = scm_focei_n)
+)
+saveRDS(fit_base16_N80, file.path(stage1_dir16_N80, "fit_base_N80.rds"))
+fit_base16_N80 <- readRDS(file.path(stage1_dir16_N80, "fit_base_N80.rds"))
+
+
+## ============================================================================
+##   Part 2 (N=80): runSCM feature tests under a hard covariate scenario
+## ----------------------------------------------------------------------------
+##   Why N=80?  Article scenario 16 has 4 true relations (BW->CL, CrCL->CL,
+##   BW->Vc, SEX->Vc).  We deliberately stress-test runSCM here with:
+##     * smaller N (less data -> looser LRT, more borderline OFV swings)
+##     * BMI in the covariate pool (strongly correlated with BW), to make
+##       sure the algorithm doesn't lock in a redundant BMI relation when
+##       a BW one already wins
+##     * RACE in the covariate pool (3-level categorical, including a rare
+##       level), to probe categorical-on-Vc handling
+##   varsVec / covarsVec / catvarsVec drive the FULL Cartesian product when
+##   runSCM is asked to auto-generate the candidate pool.  The user-curated
+##   `candidate_pairs_test_corContinusous_cat` is used wherever the search
+##   needs an explicit included/test pair list (backward + user).
+## ============================================================================
+
+candidate_pairs_test_corContinusous_cat <- list(
   list(var = "cl", covar = "BW",   shapes = "power"),
   list(var = "cl", covar = "CrCL", shapes = "power"),
   list(var = "vc", covar = "BW",   shapes = "power"),
-  list(var = "vc", covar = "CrCL", shapes = "power")
+  list(var = "vc", covar = "BMI",  shapes = "power"),
+  list(var = "vc", covar = "CrCL", shapes = "power"),
+  list(var = "vc", covar = "SEX",  shapes = "cat"),
+  list(var = "vc", covar = "RACE", shapes = "cat")
 )
 
-##   Continuous + categorical (section 2.6, full SCM):
-##     adds SEX ~ vc (TRUE + at 0.50) and SEX ~ cl (TRUE -- distractor).
-candidate_pairs_scn16_cat <- c(
-  candidate_pairs_scn16_cont,
-  list(
-    list(var = "cl", covar = "SEX", shapes = "cat"),
-    list(var = "vc", covar = "SEX", shapes = "cat")
-  )
+# Knobs reused across all four runs.  Defined once so they stay in sync.
+scm16_vars       <- c("cl", "vc")
+scm16_covars     <- c("BW", "CrCL", "BMI")
+scm16_catvars    <- c("SEX", "RACE")
+scm16_shapes     <- c("power", "lin")
+
+scm_focei_n <- nlmixr2est::foceiControl(
+  sigdig     = 4,
+  outerOpt   = "bobyqa",
+  print      = 0,
+  calcTables = FALSE,     # SCM doesn't need IPRED/CWRES tables
+  covMethod  = "r,s",         # SCM doesn't need cov matrix for LRT
+  maxOuterIterations = 2000,
+  maxInnerIterations = 2000
 )
 
-## ---- 2.2  Forward selection (explicit continuous pairs) ----------------
-res16_fwd <- runSCM_traced(
-  label       = "scn16_forward",
-  fit         = fit_base16,
-  pairsVec    = candidate_pairs_scn16_cont,
+## ---- 2.2.1  Forward selection (auto-generated Cartesian product) -------
+res16_N80_fwd_auto <- runSCM_traced(
+  label       = "scn16_N80_forward_auto",
+  data        = ds16_01_N80,
+  fit         = fit_base16_N80,
+  varsVec     = scm16_vars,
+  covarsVec   = scm16_covars,
+  catvarsVec  = scm16_catvars,
+  shapes      = scm16_shapes,
   searchType  = "forward",
   control     = scm_focei_n,
   saveModels  = FALSE,
   workers     = 3L,
   print       = 100,
-  maxRetries  = 2L
+  maxRetries  = 0L
 )
-t16_fwd    <- attr(res16_fwd, "elapsed_s")
-saveRDS(res16_fwd, file.path(stage1_dir16, "res_fwd.rds"))
-test16_fwd <- package_scm_result("scn16_forward_only", res16_fwd, t16_fwd,
-                                 scenario_id = 16)
-saveRDS(test16_fwd, file.path(stage1_dir16, "test_fwd.rds"))
+t16_N80_fwd_auto    <- attr(res16_N80_fwd_auto, "elapsed_s") #34.6min 
+saveRDS(res16_N80_fwd_auto, file.path(stage1_dir16_N80, "res_fwd_auto.rds"))
+test16_N80_fwd_auto <- package_scm_result(
+  "scn16_N80_forward_auto", res16_N80_fwd_auto, t16_N80_fwd_auto,
+  scenario_id = 16
+)
 
-## ---- 2.2.1  Forward selection (auto-generated continuous + SEX cat) ----
-res16_fwd_auto <- runSCM_traced(
-  label       = "scn16_forward_auto",
-  data        = ds16_01,
-  fit         = fit_base16,
-  varsVec     = c("cl", "vc"),
-  covarsVec   = c("BW", "CrCL"),
-  catvarsVec  = "SEX",
-  shapes      = c("power", "lin"),
-  searchType  = "forward",
-  control     = scm_focei_n,
-  saveModels  = FALSE,
-  workers     = 3L,
-  print       = 100,
-  maxRetries  = 2L
-)
-t16_fwd_auto    <- attr(res16_fwd_auto, "elapsed_s")
-saveRDS(res16_fwd_auto, file.path(stage1_dir16, "res_fwd_auto.rds"))
-test16_fwd_auto <- package_scm_result("scn16_forward_auto", res16_fwd_auto,
-                                       t16_fwd_auto, scenario_id = 16)
-saveRDS(test16_fwd_auto, file.path(stage1_dir16, "test_fwd_auto.rds"))
+saveRDS(test16_N80_fwd_auto, file.path(stage1_dir16_N80, "test_fwd_auto.rds"))
+
 
 ## ---- 2.3  Backward elimination only ------------------------------------
-##   Start with all 6 candidate relations included, then prune.  Truth says
-##   keep 4 (BW~cl, CrCL~cl, BW~vc, SEX~vc) and drop 2 (CrCL~vc, SEX~cl).
-res16_bck <- runSCM_traced(
-  label             = "scn16_backward",
-  fit               = fit_base16,
-  pairsVec          = candidate_pairs_scn16_cat,
-  catvarsVec        = "SEX",
+##   Start with the full curated pool included, then prune.  Article truth
+##   keeps 4 (BW~cl, CrCL~cl, BW~vc, SEX~vc); the extra BMI~vc / CrCL~vc /
+##   RACE~vc relations should all be dropped.  This probes:
+##     * collinearity handling (BMI vs BW on Vc)
+##     * weak true negative pruning (CrCL on Vc, RACE on Vc)
+res16_N80_bck <- runSCM_traced(
+  label             = "scn16_N80_backward",
+  data              = ds16_01_N80,
+  fit               = fit_base16_N80,
+  pairsVec          = candidate_pairs_test_corContinusous_cat,
+  catvarsVec        = scm16_catvars,
   searchType        = "backward",
-  includedRelations = candidate_pairs_scn16_cat,
+  includedRelations = candidate_pairs_test_corContinusous_cat,
   control           = scm_focei_n,
   saveModels        = FALSE,
   workers           = 3L,
   print             = 100,
-  maxRetries        = 2L
+  maxRetries        = 0L
 )
-t16_bck    <- attr(res16_bck, "elapsed_s")
-saveRDS(res16_bck, file.path(stage1_dir16, "res_bck.rds"))
-test16_bck <- package_scm_result("scn16_backward_only", res16_bck, t16_bck,
-                                  scenario_id = 16)
-saveRDS(test16_bck, file.path(stage1_dir16, "test_bck.rds"))
-
-## ---- 2.4  User-specified single relation (BW power on Vc) --------------
-##   Picks the largest-magnitude true positive (TH_BW_VC = 1.0) as the
-##   smoke test for the user-specified search path.
-res16_user <- runSCM_traced(
-  label       = "scn16_user",
-  fit         = fit_base16,
-  pairsVec    = list(list(var = "vc", covar = "BW", shapes = "power")),
-  searchType  = "scm",
-  control     = scm_focei_n,
-  saveModels  = FALSE,
-  workers     = 1L,
-  print       = 100,
-  maxRetries  = 2L
+t16_N80_bck    <- attr(res16_N80_bck, "elapsed_s") # 22.3min
+saveRDS(res16_N80_bck, file.path(stage1_dir16_N80, "res_bck.rds"))
+test16_N80_bck <- package_scm_result(
+  "scn16_N80_backward_only", res16_N80_bck, t16_N80_bck,
+  scenario_id = 16
 )
-t16_user    <- attr(res16_user, "elapsed_s")
-saveRDS(res16_user, file.path(stage1_dir16, "res_user.rds"))
-test16_user <- package_scm_result("scn16_user_BWonVc", res16_user, t16_user,
-                                   scenario_id = 16)
-saveRDS(test16_user, file.path(stage1_dir16, "test_user.rds"))
+saveRDS(test16_N80_bck, file.path(stage1_dir16_N80, "test_bck.rds"))
 
-## ---- 2.5  Full SCM (forward then backward, continuous + SEX cat) -------
-##   End state should mirror the true scenario-16 model: 4 retained
-##   relations, OFV well below base.
-res16_full <- runSCM_traced(
-  label       = "scn16_full",
-  fit         = fit_base16,
-  pairsVec    = candidate_pairs_scn16_cat,
-  catvarsVec  = "SEX",
+
+## ---- 2.4  User-specified true relations  --------------
+##   Largest-magnitude true positive (TH_BW_VC = 1.0); smoke-tests the
+##   user-specified search path on the N=80 cohort.
+scm_focei_production4 <- nlmixr2est::foceiControl(
+  sigdig             = 4,
+  outerOpt           = "bobyqa",
+  print              = 0,
+  calcTables         = FALSE,
+  covMethod          = "r,s",
+  stickyRecalcN      = 20,                      
+  maxOuterIterations = 2000,
+  maxInnerIterations = 2000,
+  rxControl          = rxode2::rxControl(atol = 1e-8, rtol = 1e-6) #Even with this setting, dofv still can be negative
+)
+
+res16_N80_user <- runSCM_traced(
+  label       = "scn16_N80_user",
+  data        = ds16_01_N80,
+  fit         = fit_base16_N80,
+  pairsVec    = list(list(var = "vc", covar = "BW",   shapes = "power"),
+                     list(var = "cl", covar = "BW",   shapes = "power"),
+                     list(var = "cl", covar = "CrCL", shapes = "power"),
+                     list(var = "vc", covar = "SEX",  shapes = "cat")),
+  catvarsVec  = "SEX",     # required: declares SEX so runSCM builds the SEX_<level> dummies
   searchType  = "scm",
-  control     = scm_focei_n,
+  control     = scm_focei_production4,
   saveModels  = FALSE,
   workers     = 3L,
   print       = 100,
-  maxRetries  = 2L
+  maxRetries  = 0L
 )
-t16_full    <- attr(res16_full, "elapsed_s")
-saveRDS(res16_full, file.path(stage1_dir16, "res_full.rds"))
-test16_full <- package_scm_result("scn16_full_scm", res16_full, t16_full,
-                                   scenario_id = 16)
-saveRDS(test16_full, file.path(stage1_dir16, "test_full.rds"))
 
+t16_N80_user    <- attr(res16_N80_user, "elapsed_s") # 9.6 mins
+saveRDS(res16_N80_user, file.path(stage1_dir16_N80, "res_user.rds"))
+test16_N80_user <- package_scm_result(
+  "scn16_N80_user_4tr", res16_N80_user, t16_N80_user,
+  scenario_id = 16
+)
+saveRDS(test16_N80_user, file.path(stage1_dir16_N80, "test_user.rds"))
+
+res16_N80_user_wr <- runSCM_traced(
+  label       = "scn16_N80_user",
+  data        = ds16_01_N80,
+  fit         = fit_base16_N80,
+  pairsVec    = list(list(var = "vc", covar = "BW",   shapes = "power"),
+                     list(var = "cl", covar = "BMI",   shapes = "lin"),
+                     list(var = "cl", covar = "CrCL", shapes = "power"),
+                     list(var = "vc", covar = "RACE",  shapes = "cat")),
+  catvarsVec  = "RACE",     # required: declares SEX so runSCM builds the SEX_<level> dummies
+  searchType  = "scm",
+  control     = scm_focei_production4,
+  saveModels  = FALSE,
+  workers     = 3L,
+  print       = 100,
+  maxRetries  = 0L
+)
+
+t16_N80_user_wr    <- attr(res16_N80_user_wr, "elapsed_s") # 9.6 mins
+saveRDS(res16_N80_user_wr, file.path(stage1_dir16_N80, "res_user_wr.rds"))
+test16_N80_user_wr <- package_scm_result(
+  "scn16_N80_user_2wr", res16_N80_user_wr, t16_N80_user_wr,
+  scenario_id = 16
+)
+saveRDS(test16_N80_user_wr, file.path(stage1_dir16_N80, "test_user.rds"))
+
+## ---- 2.5  Full SCM (forward then backward, full pool incl. BMI/RACE) ---
+##   End state should retain the 4 true relations and drop BMI/CrCL/RACE on
+##   Vc.  At N = 80 some borderline relations may flicker; runSCM should
+##   still converge without errors and produce a plausible final model.
+
+scm_focei_production <- nlmixr2est::foceiControl(
+  sigdig             = 3,
+  outerOpt           = "bobyqa",
+  print              = 0,
+  calcTables         = FALSE,
+  covMethod          = "r,s",
+  stickyRecalcN      = 20,                      
+  maxOuterIterations = 2000,
+  maxInnerIterations = 2000,
+  rxControl          = rxode2::rxControl(atol = 1e-8, rtol = 1e-6) #Even with this setting, dofv still can be negative
+)
+
+res16_N80_full <- runSCM_traced(
+  label       = "scn16_N80_full",
+  data        = ds16_01_N80,
+  fit         = fit_base16_N80,
+  varsVec     = scm16_vars,
+  covarsVec   = scm16_covars,
+  catvarsVec  = scm16_catvars,
+  shapes      = scm16_shapes,
+  searchType  = "scm",
+  control     = scm_focei_production,
+  saveModels  = FALSE,
+  workers     = 3L,
+  print       = 100,
+  maxRetries  = 0L
+)
+t16_N80_full    <- attr(res16_N80_full, "elapsed_s") #31.8min
+saveRDS(res16_N80_full, file.path(stage1_dir16_N80, "res_full.rds"))
+test16_N80_full <- package_scm_result(
+  "scn16_N80_full_scm", res16_N80_full, t16_N80_full,
+  scenario_id = 16
+)
+saveRDS(test16_N80_full, file.path(stage1_dir16_N80, "test_full.rds"))
 
 ## ---- Aggregate Part 2 --------------------------------------------------
-scm_tests16 <- list(
-  forward_only  = test16_fwd,
-  forward_auto  = test16_fwd_auto,
-  backward_only = test16_bck,
-  user_BWonVc   = test16_user,
-  full_scm      = test16_full
+scm_tests16_N80 <- list(
+  forward_auto  = test16_N80_fwd_auto,
+  backward_only = test16_N80_bck,
+  user_4true   = test16_N80_user,
+  user_2true   =test16_N80_user_wr,
+  full_scm      = test16_N80_full
 )
-saveRDS(scm_tests16, file.path(stage1_dir16, "scm_tests.rds"))
 
-part2_summary16 <- purrr::map_dfr(scm_tests16, function(x) {
+part2_summary16_N80 <- purrr::map_dfr(scm_tests16_N80, function(x) {
   tibble::tibble(
     test          = x$label,
     n_selected    = if (is.null(x$selected)) NA_integer_ else nrow(x$selected),
@@ -2448,139 +2702,355 @@ part2_summary16 <- purrr::map_dfr(scm_tests16, function(x) {
     cov_step_ok   = if (is.null(x$diag)) NA else x$diag$cov_ok,
     cond_num      = if (is.null(x$diag)) NA_real_ else x$diag$cond_num,
     cond_num_sqrt = if (is.null(x$diag)) NA_real_ else x$diag$cond_num_sqrt,
-    runtime_sec   = x$runtime_sec
+    runtime_min   = (x$runtime_sec)/60
   )
 })
-saveRDS(part2_summary16, file.path(stage1_dir16, "part2_summary.rds"))
+saveRDS(part2_summary16_N80, file.path(stage1_dir16_N80, "part2_summary.rds"))
 
-## ---- Reporting ---------------------------------------------------------
-overall_runtime16 <- dplyr::bind_rows(
-  tibble::tibble(step = "fit_true_model_refexp",
-                 runtime_sec = unname(t_fit_true16_refexp["elapsed"])),
-  tibble::tibble(step = "fit_true_model_lin",
-                 runtime_sec = unname(t_fit_true16_lin["elapsed"])),
-  tibble::tibble(step = "fit_base_model",
-                 runtime_sec = unname(t_fit_base16["elapsed"])),
-  part2_summary16 %>% dplyr::transmute(step = paste0("scm_", test), runtime_sec)
+
+
+
+##Try fit-refit approach to save time -----------------
+## ============================================================================
+##   Part 2 (FAST path): two-tier control + linCmt rewrite of the model
+## ----------------------------------------------------------------------------
+##   Stacks three speed levers on top of the original Part 2 block above.
+##   The originals are untouched so wall-time, OFV and selections are
+##   directly comparable via `part2_speedup16_N80` at the bottom.
+##
+##     1. covMethod="" + calcTables=FALSE during SCM screening (LRT only
+##        needs OFV).  The surviving model is refit ONCE with covMethod="r,s"
+##        + calcTables=TRUE via package_scm_result(refit_control=...), which
+##        in turn calls refit_final_model() defined above (~L1292).
+##
+##     2. Loose tolerances on the screening control (atol=1e-6, rtol=1e-4).
+##        Combined with stickyRecalcN=20, this keeps the per-subject solver
+##        precision UNIFORM (no silent per-subject relax cascade), which
+##        also addresses the "dofv can still be negative" symptom from
+##        scm_focei_production.  Tight tolerances (atol=1e-8, rtol=1e-6)
+##        are restored for the single final refit.
+##
+##     3. linCmt() replaces the 3-state ODE in all three models
+##        (base_2cmt_oral, true_2cmt_scn16_refexp, true_2cmt_scn16_lin).
+##        rxode2 auto-detects 2-cmt oral from {ka, cl, vc, q, vp}; the
+##        analytical Jacobian eliminates ALL solver-noise diagnostics.
+##        Empirical speedup on 1-3 cmt oral PK is ~5-15x per fit.
+## ============================================================================
+
+# ---- (1) Two-tier foceiControls --------------------------------------------
+##   _screen: applied to every SCM candidate.  No cov, no tables, loose tols.
+##   _final:  applied to ONE refit per SCM mode, via refit_control= in
+##            package_scm_result().  Tight tols + full diagnostics.
+
+scm_focei_screen <- nlmixr2est::foceiControl(
+  sigdig             = 3,
+  outerOpt           = "bobyqa",
+  print              = 0,
+  calcTables         = FALSE,
+  covMethod          = "",            # SKIP: LRT uses OFV only
+  stickyRecalcN      = 20,
+  maxOuterIterations = 2000,
+  maxInnerIterations = 2000,
+  rxControl          = rxode2::rxControl(atol = 1e-6, rtol = 1e-4)
+)
+
+scm_focei_final <- nlmixr2est::foceiControl(
+  sigdig             = 4,
+  outerOpt           = "bobyqa",
+  print              = 0,
+  calcTables         = TRUE,
+  covMethod          = "r,s",         # full sandwich for SE / CN
+  stickyRecalcN      = 20,
+  maxOuterIterations = 2000,
+  maxInnerIterations = 2000,
+  rxControl          = rxode2::rxControl(atol = 1e-8, rtol = 1e-6)
+)
+
+
+# ---- (2) linCmt() rewrites --------------------------------------------------
+##   `ini()` blocks are byte-identical to the ODE versions; only the model
+##   body changes.  rxode2 auto-selects the analytical 2-cmt oral macro
+##   because {ka, cl, vc, q, vp} are all bound and there is no `d/dt(...)`.
+##   Dose CMT mapping (cmt=1 -> depot, cmt=2 -> central) matches the data
+##   produced by `to_nm_dataset()`.
+
+base_2cmt_oral_linCmt <- function() {
+  ini({
+    lTVCL <- log(0.6)
+    lTVQ  <- log(1.8)
+    lTVVc <- log(20)
+    lTVVp <- log(80)
+    lTVKA <- fix(log(0.7))      # KA unidentifiable from this sparse design
+
+    eta.cl + eta.vc ~ c(
+      0.1,
+      0.02,
+      0.1
+    )
+
+    prop.err <- 0.1
+  })
+  model({
+    cl <- exp(lTVCL + eta.cl)
+    vc <- exp(lTVVc + eta.vc)
+    q  <- exp(lTVQ)
+    vp <- exp(lTVVp)
+    ka <- exp(lTVKA)
+    cp <- linCmt()
+    cp ~ prop(prop.err)
+  })
+}
+
+true_2cmt_scn16_refexp_linCmt <- function() {
+  ini({
+    lTVCL      <- log(0.6)
+    lTVQ       <- log(1.8)
+    lTVVc      <- log(20)
+    lTVVp      <- log(80)
+    lTVKA      <- fix(log(0.7))
+    TH_BW_CL   <- 0.75
+    TH_CRCL_CL <- 0.5
+    TH_BW_VC   <- 1.0
+    TH_SEX_VC  <- log(1.5)
+
+    eta.cl + eta.vc ~ c(0.1, 0.02, 0.1)
+    prop.err <- 0.1
+  })
+  model({
+    cl_typ <- exp(lTVCL) * (BW / 70)^TH_BW_CL * (CrCL / 95)^TH_CRCL_CL
+    vc_typ <- exp(lTVVc) * (BW / 70)^TH_BW_VC * exp(TH_SEX_VC * SEX)
+    cl     <- cl_typ * exp(eta.cl)
+    vc     <- vc_typ * exp(eta.vc)
+    q      <- exp(lTVQ)
+    vp     <- exp(lTVVp)
+    ka     <- exp(lTVKA)
+    cp     <- linCmt()
+    cp ~ prop(prop.err)
+  })
+}
+
+true_2cmt_scn16_lin_linCmt <- function() {
+  ini({
+    lTVCL      <- log(0.6)
+    lTVQ       <- log(1.8)
+    lTVVc      <- log(20)
+    lTVVp      <- log(80)
+    lTVKA      <- fix(log(0.7))
+    TH_BW_CL   <- 0.75
+    TH_CRCL_CL <- 0.5
+    TH_BW_VC   <- 1.0
+    TH_SEX_VC  <- log(1.5)
+
+    eta.cl + eta.vc ~ c(0.1, 0.02, 0.1)
+    prop.err <- 0.1
+  })
+  model({
+    lTVCL_typ <- lTVCL + TH_BW_CL * log(BW / 70) + TH_CRCL_CL * log(CrCL / 95)
+    lTVVc_typ <- lTVVc + TH_BW_VC * log(BW / 70) + TH_SEX_VC * SEX
+    cl        <- exp(lTVCL_typ + eta.cl)
+    vc        <- exp(lTVVc_typ + eta.vc)
+    q         <- exp(lTVQ)
+    vp        <- exp(lTVVp)
+    ka        <- exp(lTVKA)
+    cp        <- linCmt()
+    cp ~ prop(prop.err)
+  })
+}
+
+
+# ---- (3) Refit the BASE model on N=80 using the linCmt body ------------------
+##   This becomes the parent fit for every fast SCM run below.
+
+t_fit_base16_N80_linCmt <- system.time(
+  fit_base16_N80_linCmt <- nlmixr2(base_2cmt_oral_linCmt, ds16_01_N80,
+                                    est = "focei", control = scm_focei_screen)
+)
+saveRDS(fit_base16_N80_linCmt,
+        file.path(stage1_dir16_N80, "fit_base_N80_linCmt.rds"))
+
+fit_base16_N80_linCmt <- readRDS(file.path(stage1_dir16_N80, "fit_base_N80_linCmt.rds"))
+# ---- (4) Four SCM modes: screen with fast control, refit-once with final ----
+##   Each runSCM_traced() call mirrors the corresponding ODE call above; only
+##   `fit` and `control` differ.  The final cov + tables come from passing
+##   refit_control = scm_focei_final into package_scm_result().
+
+## 4a. Forward selection (auto-generated Cartesian product)
+res16_N80_fwd_auto_fast <- runSCM_traced(
+  label       = "scn16_N80_forward_auto_fast",
+  data        = ds16_01_N80,
+  fit         = fit_base16_N80_linCmt,
+  varsVec     = scm16_vars,
+  covarsVec   = scm16_covars,
+  catvarsVec  = scm16_catvars,
+  shapes      = scm16_shapes,
+  searchType  = "forward",
+  control     = scm_focei_screen,
+  saveModels  = FALSE,
+  workers     = 3L,
+  print       = 100,
+  maxRetries  = 0L
+)
+t16_N80_fwd_auto_fast <- attr(res16_N80_fwd_auto_fast, "elapsed_s") #19.2min
+saveRDS(res16_N80_fwd_auto_fast,
+        file.path(stage1_dir16_N80, "res_fwd_auto_fast.rds"))
+test16_N80_fwd_auto_fast <- package_scm_result(
+  "scn16_N80_forward_auto_fast",
+  res16_N80_fwd_auto_fast, t16_N80_fwd_auto_fast,
+  scenario_id   = 16,
+  refit_control = scm_focei_final
+)
+saveRDS(test16_N80_fwd_auto_fast,
+        file.path(stage1_dir16_N80, "test_fwd_auto_fast.rds"))
+
+## 4b. Backward elimination only (curated pool incl. BMI / RACE distractors)
+res16_N80_bck_fast <- runSCM_traced(
+  label             = "scn16_N80_backward_fast",
+  data              = ds16_01_N80,
+  fit               = fit_base16_N80_linCmt,
+  pairsVec          = candidate_pairs_test_corContinusous_cat,
+  catvarsVec        = scm16_catvars,
+  searchType        = "backward",
+  includedRelations = candidate_pairs_test_corContinusous_cat,
+  control           = scm_focei_screen,
+  saveModels        = FALSE,
+  workers           = 3L,
+  print             = 100,
+  maxRetries        = 0L
+)
+t16_N80_bck_fast <- attr(res16_N80_bck_fast, "elapsed_s")
+saveRDS(res16_N80_bck_fast,
+        file.path(stage1_dir16_N80, "res_bck_fast.rds"))
+test16_N80_bck_fast <- package_scm_result(
+  "scn16_N80_backward_only_fast",
+  res16_N80_bck_fast, t16_N80_bck_fast,
+  scenario_id   = 16,
+  refit_control = scm_focei_final
+)
+saveRDS(test16_N80_bck_fast,
+        file.path(stage1_dir16_N80, "test_bck_fast.rds"))
+
+## 4c. User-specified true relations (4 true pairs)
+res16_N80_user_fast <- runSCM_traced(
+  label       = "scn16_N80_user_fast",
+  data        = ds16_01_N80,
+  fit         = fit_base16_N80_linCmt,
+  pairsVec    = list(list(var = "vc", covar = "BW",   shapes = "power"),
+                     list(var = "cl", covar = "BW",   shapes = "power"),
+                     list(var = "cl", covar = "CrCL", shapes = "power"),
+                     list(var = "vc", covar = "SEX",  shapes = "cat")),
+  catvarsVec  = "SEX",
+  searchType  = "scm",
+  control     = scm_focei_screen,
+  saveModels  = FALSE,
+  workers     = 3L,
+  print       = 100,
+  maxRetries  = 0L
+)
+t16_N80_user_fast <- attr(res16_N80_user_fast, "elapsed_s")
+saveRDS(res16_N80_user_fast,
+        file.path(stage1_dir16_N80, "res_user_fast.rds"))
+test16_N80_user_fast <- package_scm_result(
+  "scn16_N80_user_4tr_fast",
+  res16_N80_user_fast, t16_N80_user_fast,
+  scenario_id   = 16,
+  refit_control = scm_focei_final
+)
+saveRDS(test16_N80_user_fast,
+        file.path(stage1_dir16_N80, "test_user_fast.rds"))
+
+## 4d. Full SCM (forward then backward, full Cartesian pool)
+res16_N80_full_fast <- runSCM_traced(
+  label       = "scn16_N80_full_fast",
+  data        = ds16_01_N80,
+  fit         = fit_base16_N80_linCmt,
+  varsVec     = scm16_vars,
+  covarsVec   = scm16_covars,
+  catvarsVec  = scm16_catvars,
+  shapes      = scm16_shapes,
+  searchType  = "scm",
+  control     = scm_focei_screen,
+  saveModels  = FALSE,
+  workers     = 3L,
+  print       = 100,
+  maxRetries  = 0L
+)
+t16_N80_full_fast <- attr(res16_N80_full_fast, "elapsed_s")
+saveRDS(res16_N80_full_fast,
+        file.path(stage1_dir16_N80, "res_full_fast.rds"))
+test16_N80_full_fast <- package_scm_result(
+  "scn16_N80_full_scm_fast",
+  res16_N80_full_fast, t16_N80_full_fast,
+  scenario_id   = 16,
+  refit_control = scm_focei_final
+)
+saveRDS(test16_N80_full_fast,
+        file.path(stage1_dir16_N80, "test_full_fast.rds"))
+
+
+# ---- (5) Fast-path summary (parallel to part2_summary16_N80) ----------------
+scm_tests16_N80_fast <- list(
+  forward_auto  = test16_N80_fwd_auto_fast,
+  backward_only = test16_N80_bck_fast,
+  user_4true    = test16_N80_user_fast,
+  full_scm      = test16_N80_full_fast
+)
+
+part2_summary16_N80_fast <- purrr::imap_dfr(scm_tests16_N80_fast, function(x, mode) {
+  tibble::tibble(
+    mode          = mode,
+    test          = x$label,
+    n_selected    = if (is.null(x$selected)) NA_integer_ else nrow(x$selected),
+    converged     = if (is.null(x$diag)) NA else x$diag$converged,
+    objf          = if (is.null(x$diag)) NA_real_ else x$diag$objf,
+    cov_step_ok   = if (is.null(x$diag)) NA else x$diag$cov_ok,
+    cond_num      = if (is.null(x$diag)) NA_real_ else x$diag$cond_num,
+    cond_num_sqrt = if (is.null(x$diag)) NA_real_ else x$diag$cond_num_sqrt,
+    runtime_min   = x$runtime_sec / 60
+  )
+})
+saveRDS(part2_summary16_N80_fast,
+        file.path(stage1_dir16_N80, "part2_summary_fast.rds"))
+
+
+# ---- (6) Side-by-side speedup comparison ------------------------------------
+##   Joins original (ODE + cov-on-every-step) against fast (linCmt + 2-tier).
+##   part2_summary16_N80 has 5 rows; we mirror only the 4 modes that the
+##   fast block runs.  `speedup` > 1 means the fast path is faster.
+
+.orig_mode_map <- tibble::tribble(
+  ~mode,            ~test,
+  "forward_auto",   "scn16_N80_forward_auto",
+  "backward_only",  "scn16_N80_backward_only",
+  "user_4true",     "scn16_N80_user_4tr",
+  "full_scm",       "scn16_N80_full_scm"
+)
+
+part2_speedup16_N80 <- dplyr::full_join(
+  part2_summary16_N80 %>%
+    dplyr::inner_join(.orig_mode_map, by = "test") %>%
+    dplyr::select(mode,
+                  n_sel_orig    = n_selected,
+                  objf_orig     = objf,
+                  cond_num_orig = cond_num,
+                  runtime_orig  = runtime_min),
+  part2_summary16_N80_fast %>%
+    dplyr::select(mode,
+                  n_sel_fast    = n_selected,
+                  objf_fast     = objf,
+                  cond_num_fast = cond_num,
+                  runtime_fast  = runtime_min),
+  by = "mode"
 ) %>%
   dplyr::mutate(
-    minutes      = runtime_sec / 60,
-    proj_250_min = minutes * 250,             # one scenario, all datasets
-    proj_4000_hr = minutes * 250 * 16 / 60    # all 16 scenarios x 250 datasets
-  )
-saveRDS(overall_runtime16, file.path(stage1_dir16, "overall_runtime.rds"))
+    speedup        = runtime_orig / runtime_fast,
+    dObjf          = objf_fast - objf_orig,
+    same_n_sel     = n_sel_orig == n_sel_fast
+  ) %>%
+  dplyr::arrange(dplyr::desc(speedup))
 
-cat("\n========== SCENARIO 16 SMOKE TEST -- summary ==========\n\n")
-cat("Part 1 (true-model robustness, refexp + lin):\n")
-print(part1_summary16)
-cat("\nPart 1 rel-err per parameter (long, refexp vs lin):\n")
-print(err_true16_compare)
-cat("\nPart 1 estimate side-by-side (wide):\n")
-print(err_true16_wide)
-cat("\nPart 2 (runSCM feature tests):\n")
-print(part2_summary16)
-cat("\nOverall runtime + projections (scenario 16):\n")
-print(overall_runtime16)
+saveRDS(part2_speedup16_N80,
+        file.path(stage1_dir16_N80, "part2_speedup.rds"))
 
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-## ---- Aggregate the categorical smoke-test results -----------------------
-scm_tests_cat <- list(
-  forward_cat            = test_fwd_cat,
-  backward_cat           = test_bck_cat,
-  user_specified_SEXonCL = test_user_cat,
-  full_scm_cat           = test_full_cat
-)
-saveRDS(scm_tests_cat, file.path(stage1_dir, "scm_tests_cat.rds"))
-
-part2_summary_cat <- purrr::map_dfr(scm_tests_cat, function(x) {
-  tibble::tibble(
-    test          = x$label,
-    n_selected    = if (is.null(x$selected)) NA_integer_ else nrow(x$selected),
-    converged     = if (is.null(x$diag)) NA else x$diag$converged,
-    objf          = if (is.null(x$diag)) NA_real_ else x$diag$objf,
-    cov_step_ok   = if (is.null(x$diag)) NA else x$diag$cov_ok,
-    cond_num      = if (is.null(x$diag)) NA_real_ else x$diag$cond_num,
-    cond_num_sqrt = if (is.null(x$diag)) NA_real_ else x$diag$cond_num_sqrt,
-    runtime_sec   = x$runtime_sec
-  )
-})
-saveRDS(part2_summary_cat, file.path(stage1_dir, "part2_summary_cat.rds"))
-
-
-## ---- Aggregate Part 2 results -------------------------------------------
-scm_tests <- list(
-  forward_only          = test_fwd,
-  backward_only         = test_bck,
-  user_specified_BWonCL = test_user,
-  full_scm              = test_full
-)
-saveRDS(scm_tests, file.path(stage1_dir, "scm_tests.rds"))
-
-## Per-test summary tibble
-part2_summary <- purrr::map_dfr(scm_tests, function(x) {
-  tibble::tibble(
-    test          = x$label,
-    n_selected    = if (is.null(x$selected)) NA_integer_ else nrow(x$selected),
-    converged     = if (is.null(x$diag)) NA else x$diag$converged,
-    objf          = if (is.null(x$diag)) NA_real_ else x$diag$objf,
-    cov_step_ok   = if (is.null(x$diag)) NA else x$diag$cov_ok,
-    cond_num      = if (is.null(x$diag)) NA_real_ else x$diag$cond_num,
-    cond_num_sqrt = if (is.null(x$diag)) NA_real_ else x$diag$cond_num_sqrt,
-    runtime_sec   = x$runtime_sec
-  )
-})
-saveRDS(part2_summary, file.path(stage1_dir, "part2_summary.rds"))
-
-
-## ============================================================================
-## Stage-1 reporting
-## ============================================================================
-overall_runtime <- dplyr::bind_rows(
-  tibble::tibble(step = "fit_true_model_refexp",
-                 runtime_sec = unname(t_fit_true_refexp["elapsed"])),
-  tibble::tibble(step = "fit_true_model_lin",
-                 runtime_sec = unname(t_fit_true_lin["elapsed"])),
-  tibble::tibble(step = "fit_base_model",
-                 runtime_sec = unname(t_fit_base["elapsed"])),
-  part2_summary %>% dplyr::transmute(step = paste0("scm_", test), runtime_sec)
-) %>%
-  dplyr::mutate(
-    minutes        = runtime_sec / 60,
-    proj_250_min   = minutes * 250,             # one scenario, all datasets
-    proj_4000_hr   = minutes * 250 * 16 / 60    # all 16 scenarios x 250 datasets
-  )
-saveRDS(overall_runtime, file.path(stage1_dir, "overall_runtime.rds"))
-
-cat("\n========== STAGE 1 SMOKE TEST -- summary ==========\n\n")
-cat("Part 1 (true-model robustness, refexp + lin parameterisations):\n")
-print(part1_summary)
-cat("\nPart 1 relative error per parameter (long, refexp vs lin):\n")
-print(err_true_compare)
-cat("\nPart 1 estimate side-by-side (wide):\n")
-print(err_true_wide)
-cat("\nPart 1 extended -- all 6 configs (long, baseline + lbfgsb3c):\n")
-print(err_true_compare_all, n = Inf)
-cat("\nPart 1 extended -- per-config OFV / convergence:\n")
-print(err_true_summary_all)
-cat("\nPart 1 extended -- estimate side-by-side (wide, all configs):\n")
-print(err_true_wide_all, n = Inf, width = Inf)
-cat("\nPart 2 (runSCM feature tests):\n"); print(part2_summary)
-cat("\nOverall runtime + projections:\n"); print(overall_runtime)
