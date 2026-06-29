@@ -6,7 +6,6 @@ options(download.file.method = "wininet")
 remotes::install_github("kestrel99/nlmixr2scm")
 ##updated all R packages. 
 
-
 ##1. Run test suites first for nlmixr2scm
 ## NOTE: ~/.Rprofile sets options(rxode2.cache.dir = ...);
 ##       ~/.Renviron sets TMPDIR (must be in .Renviron, not .Rprofile,
@@ -21,7 +20,6 @@ devtools::load_all("C:/Users/LIUYA8J/OneDrive - Novartis Pharma AG/Internship/Gi
 library(nlmixr2utils)
 #testthat::test_file("tests/testthat/test-scm.R") #Pass228, warning from nlmixrest[near-singular cov on toy fixture]
 #testthat::test_file("tests/testthat/test-parsing.R")#pass29, after fixing the function calling issue
-
 
 ## Run once per R session, before any nlmixr2() fit
 ##   With dev rxode2 (PR-1072) + nlmixr2est (PR-664) the cross-DLL OpenMP
@@ -923,42 +921,36 @@ saveRDS(fit_true_lin,
 
 
 ## Convergence diagnostics
-##   converged     : TRUE iff optimizer reported success (fit$convergence == 0)
-##                   AND objf is finite.  fit$convergence is the canonical
-##                   optimizer status flag (0 = success); the earlier
-##                   is.finite(objf)-only test silently treated non-converged
-##                   fits as converged whenever OFV happened to be finite.
-##   cond_num      : raw condition number = lambda_max / lambda_min of the
-##                   parameter cov matrix.  This is what nlmixr2 stores in
-##                   fit$conditionNumber*.  Populated only when covMethod
-##                   != "" was used at fit time.
-##   cond_num_sqrt : sqrt(cond_num) = sqrt(lambda_max / lambda_min).  This
-##                   is the NONMEM / Beal convention reported by $COV with
-##                   PRINT=E.  Most PMX papers (incl. Khandelwal 2019)
-##                   quote thresholds against this form -- e.g. < 1000 for
-##                   a well-conditioned model.  Roughly: sqrt(35492) ~ 188.
-##   cov_ok        : TRUE iff fit$cov is a finite-diagonal matrix.  Will be
-##                   FALSE when covMethod = "" was used (cov not computed).
-##   message       : optimizer exit message, e.g. "Normal exit from bobyqa".
+##   converged    : TRUE iff optimizer reported success (fit$convergence == 0)
+##                  AND objf is finite.  fit$convergence is the canonical
+##                  optimizer status flag (0 = success); the earlier
+##                  is.finite(objf)-only test silently treated non-converged
+##                  fits as converged whenever OFV happened to be finite.
+##   cond_num_cor : raw condition number of the *correlation* matrix of fixed
+##                  effects (lambda_max / lambda_min of cor).  This is the
+##                  pharma-standard "Condition#(Cor)" reported by nlmixr2
+##                  since 2.1.4.  Populated only when covMethod != "" was
+##                  used at fit time -- or after a post-hoc getVarCov() call
+##                  that triggers .setCov().  Common threshold: < 1000.
+##   cov_ok       : TRUE iff fit$cov is a finite-diagonal matrix.  Will be
+##                  FALSE when covMethod = "" was used (cov not computed).
+##   message      : optimizer exit message, e.g. "Normal exit from bobyqa".
 diagnose_fit <- function(fit) {
   if (is.null(fit)) {
     return(list(converged = NA, objf = NA_real_,
-                cond_num = NA_real_, cond_num_sqrt = NA_real_,
+                cond_num_cor = NA_real_,
                 cov_ok = NA, message = NA_character_))
   }
   conv_code <- if (!is.null(fit$convergence)) fit$convergence else NA_integer_
-  cn <- fit$conditionNumber
-  if (is.null(cn)) cn <- fit$conditionNumberCov
-  if (is.null(cn)) cn <- fit$conditionNumberTheta
-  cn_val <- if (is.null(cn)) NA_real_ else as.numeric(cn)
+  cn_cor    <- fit$conditionNumberCor
+  cn_cor_val <- if (is.null(cn_cor)) NA_real_ else as.numeric(cn_cor)
   list(
-    converged     = isTRUE(conv_code == 0L) &&
-                      !is.null(fit$objf) && is.finite(fit$objf),
-    objf          = if (!is.null(fit$objf)) fit$objf else NA_real_,
-    cond_num      = cn_val,
-    cond_num_sqrt = if (is.na(cn_val)) NA_real_ else sqrt(cn_val),
-    cov_ok        = isTRUE(!is.null(fit$cov) && all(is.finite(diag(fit$cov)))),
-    message       = if (!is.null(fit$message)) as.character(fit$message) else NA_character_
+    converged    = isTRUE(conv_code == 0L) &&
+                     !is.null(fit$objf) && is.finite(fit$objf),
+    objf         = if (!is.null(fit$objf)) fit$objf else NA_real_,
+    cond_num_cor = cn_cor_val,
+    cov_ok       = isTRUE(!is.null(fit$cov) && all(is.finite(diag(fit$cov)))),
+    message      = if (!is.null(fit$message)) as.character(fit$message) else NA_character_
   )
 }
 diag_true_refexp <- diagnose_fit(fit_true_refexp) #-16805
@@ -1243,8 +1235,7 @@ saveRDS(err_true_wide,
     converged        = diag_x$converged,
     objf             = diag_x$objf,
     cov_step_ok      = diag_x$cov_ok,
-    cond_num         = diag_x$cond_num,
-    cond_num_sqrt    = diag_x$cond_num_sqrt,  # NONMEM convention (< 1000 healthy)
+    cond_num_cor     = diag_x$cond_num_cor,  # Cor-matrix CN (< 1000 healthy)
     runtime_sec      = unname(t_x["elapsed"])
   )
 }
@@ -1265,26 +1256,17 @@ scm_focei <- nlmixr2est::foceiControl(
   covMethod  = ""         # SCM doesn't need cov matrix for LRT
 )
 
-## ---- Control for the post-SCM diagnostic refit ---------------------------
-
-## ---- Helper: refit a final SCM-selected model with full diagnostics ------
-##   Reuses the model UI baked into the SCM-final fit (which already includes
-##   all retained covariate relations) and the same training data, but with
-##   a richer foceiControl.  Output is a fully-instrumented nlmixr2 fit with
-##     fit$cov, fit$conditionNumber, fit$parFixedDf (SE/%RSE/CI), etc.
-##   Errors are caught and returned as NULL with a warning so a bad refit
-##   doesn't blow up downstream packaging.
-refit_final_model <- function(final_fit, control = final_focei) {
-  if (is.null(final_fit)) return(NULL)
-  tryCatch({
-    nlmixr2(final_fit$ui, nlme::getData(final_fit),
-            est = final_fit$est, control = control)
-  }, error = function(e) {
-    warning("refit_final_model() failed: ", conditionMessage(e),
-            call. = FALSE)
-    NULL
-  })
-}
+## ---- Post-SCM covariance: now via getVarCov() in package_scm_result() ----
+##   The old `refit_final_model()` helper performed a full re-estimation of
+##   the SCM-final model with foceiControl(covMethod = "r,s").  That took
+##   ~60s/dataset and was conceptually unnecessary: the parameter point
+##   estimates are already at the SCM optimum, so all we need is the cov.
+##   We now call nlme::getVarCov(final_fit) directly inside
+##   package_scm_result(), which dispatches to nlmixr2est's S3 method
+##   .setCov() with maxOuterIterations=0L / maxInnerIterations=0L -- i.e.
+##   ONLY the Hessian/sandwich step, no re-estimation.  Cost: ~5-20s/ds.
+##   Side effects on the fit env: populates $cov, $parFixedDf,
+##   $conditionNumberCov, $conditionNumberCor.
 ## ---- 2.1  Base model (no covariates) ------------------------------------
 base_2cmt_oral <- function() {
   ini({
@@ -1352,21 +1334,25 @@ fit_base_cov <- readRDS(file.path(stage1_dir, "fit_base_cov.rds"))
 ##     - rel_err:         relative error vs true scenario parameters
 ##     - runtime_sec:     wall-clock seconds for the runSCM call
 ##     - diag:            convergence diagnostics for the final fit
-##     - parFixed:        nlmixr2 parFixedDf (Estimate, SE, %RSE, CI) when a
-##                         refit was performed; NULL otherwise
-##     - refit_done:      TRUE iff refit_control was supplied AND the refit
-##                         succeeded; final_fit is then the refit object
+##     - parFixed:        nlmixr2 parFixedDf (Estimate, SE, %RSE, CI) when
+##                         the covariance was successfully attached; else NULL
+##     - cov_done:        TRUE iff getVarCov() populated $cov + parFixedDf
+##                         on the final fit; FALSE otherwise (e.g. singular
+##                         Hessian).  When FALSE: cond_num_cor stays NA and
+##                         PowerCN becomes unavailable for that dataset.
 ##
-##   refit_control:
-##     When NULL (default) the SCM-final fit (covMethod = "", no tables) is
-##     used as-is -- fast, but SE / condition number are unavailable.
-##     When non-NULL (typically `final_focei`) the SCM-final model is refit
-##     ONCE with the supplied control, producing full diagnostics.  The
-##     refitted fit REPLACES final_fit (we don't keep the pre-refit copy --
-##     it would just be ~800 KB of duplicate object per .rds).
+##   Covariance computation: instead of a full re-estimation (the old
+##   refit_final_model path that took ~60s/ds), we call nlme::getVarCov()
+##   on the SCM-final fit -- which dispatches to nlmixr2est's S3 method
+##   .setCov().  That sets maxOuterIterations=0L / maxInnerIterations=0L
+##   internally, so it computes the Hessian-based cov ONLY without any
+##   re-estimation (~5-20s/ds depending on dim(theta)).  Side effects on the
+##   fit env: populates $cov, $parFixedDf, $conditionNumberCov,
+##   $conditionNumberCor.  Failures (singular Hessian etc.) emit a warning
+##   and leave $cov as NULL -- diagnose_fit() then naturally returns
+##   cond_num_cor = NA, cov_ok = FALSE.
 package_scm_result <- function(label, scm_res, runtime_sec,
-                               true_long = true_params, scenario_id = 9,
-                               refit_control = NULL) {
+                               true_long = true_params, scenario_id = 9) {
   ## Pick the final fit.  runSCM() returns scm_res$resFwd / scm_res$resBck as
   ## UNNAMED 3-element lists: [[1]] = nlmixr2FitCore fit, [[2]] = step table,
   ## [[3]] = final-selection data.frame.  The previous code looked for
@@ -1380,18 +1366,25 @@ package_scm_result <- function(label, scm_res, runtime_sec,
   final_fit <- .pickFit(scm_res$resBck)
   if (is.null(final_fit)) final_fit <- .pickFit(scm_res$resFwd)
 
-  ## Optional: refit final model with full diagnostics (cov, IPRED tables).
-  ## When the refit succeeds it REPLACES final_fit so every downstream
-  ## extraction (estimates, rel_err, diag) reflects the diagnostic fit.
-  ## We previously kept the refit under a separate `final_fit_refit` slot,
-  ## but it was always identical to `final_fit` post-swap -- pure duplication.
-  ## Now we just keep a boolean flag indicating whether the swap happened.
-  refit_done <- FALSE
-  if (!is.null(final_fit) && !is.null(refit_control)) {
-    refit <- refit_final_model(final_fit, control = refit_control)
-    if (!is.null(refit)) {
-      final_fit  <- refit
-      refit_done <- TRUE
+  ## Cov-only pass on the SCM-final fit (no re-estimation).
+  ## getVarCov() short-circuits when $cov already exists, otherwise it
+  ## triggers .setCov() with maxOuterIterations=0L / maxInnerIterations=0L.
+  ## We discard the returned matrix because the side effects (populating
+  ## $cov, $parFixedDf, $conditionNumberCor on the fit env) are all we need.
+  cov_done <- FALSE
+  if (!is.null(final_fit)) {
+    if (!is.null(final_fit$cov) && all(is.finite(diag(final_fit$cov)))) {
+      ## Cov already there (rare: someone fit with covMethod != "" upstream)
+      cov_done <- TRUE
+    } else {
+      tryCatch({
+        invisible(nlme::getVarCov(final_fit))
+        cov_done <- !is.null(final_fit$cov) &&
+                      all(is.finite(diag(final_fit$cov)))
+      }, error = function(e) {
+        warning("package_scm_result(): getVarCov() failed: ",
+                conditionMessage(e), call. = FALSE)
+      })
     }
   }
 
@@ -1436,9 +1429,9 @@ package_scm_result <- function(label, scm_res, runtime_sec,
     rel_err_one(final_est, true_long, scenario_id)
   } else NULL
   diag      <- if (!is.null(final_fit)) diagnose_fit(final_fit) else NULL
-  ## parFixedDf is only populated when covMethod was non-empty; that's exactly
-  ## the refit_done case, since the screening control sets covMethod = "".
-  parFixed  <- if (refit_done) final_fit$parFixedDf else NULL
+  ## parFixedDf is only populated when covMethod was non-empty, which after
+  ## a successful getVarCov() means cov_done == TRUE.
+  parFixed  <- if (cov_done) final_fit$parFixedDf else NULL
 
   ## --- Packaged result -----------------------------------------------------
   ## `step_hist` is the ONLY view of the search trace we keep.  Previously we
@@ -1456,7 +1449,7 @@ package_scm_result <- function(label, scm_res, runtime_sec,
     rel_err     = rel_err,
     diag        = diag,
     parFixed    = parFixed,
-    refit_done  = refit_done,
+    cov_done    = cov_done,
     runtime_sec = runtime_sec
   )
 }
@@ -2701,8 +2694,7 @@ part2_summary16_N80 <- purrr::map_dfr(scm_tests16_N80, function(x) {
     converged     = if (is.null(x$diag)) NA else x$diag$converged,
     objf          = if (is.null(x$diag)) NA_real_ else x$diag$objf,
     cov_step_ok   = if (is.null(x$diag)) NA else x$diag$cov_ok,
-    cond_num      = if (is.null(x$diag)) NA_real_ else x$diag$cond_num,
-    cond_num_sqrt = if (is.null(x$diag)) NA_real_ else x$diag$cond_num_sqrt,
+    cond_num_cor  = if (is.null(x$diag)) NA_real_ else x$diag$cond_num_cor,
     runtime_min   = (x$runtime_sec)/60
   )
 })
@@ -2720,9 +2712,10 @@ saveRDS(part2_summary16_N80, file.path(stage1_dir16_N80, "part2_summary.rds"))
 ##   directly comparable via `part2_speedup16_N80` at the bottom.
 ##
 ##     1. covMethod="" + calcTables=FALSE during SCM screening (LRT only
-##        needs OFV).  The surviving model is refit ONCE with covMethod="r,s"
-##        + calcTables=TRUE via package_scm_result(refit_control=...), which
-##        in turn calls refit_final_model() defined above (~L1292).
+##        needs OFV).  The surviving model gets a post-hoc covariance via
+##        nlme::getVarCov() called inside package_scm_result() -- this
+##        invokes nlmixr2est's .setCov() method (no re-estimation,
+##        ~5-20s/ds), populating $cov, $parFixedDf, $conditionNumberCor.
 ##
 ##     2. Loose tolerances on the screening control (atol=1e-6, rtol=1e-4).
 ##        Combined with stickyRecalcN=20, this keeps the per-subject solver
@@ -2740,8 +2733,9 @@ saveRDS(part2_summary16_N80, file.path(stage1_dir16_N80, "part2_summary.rds"))
 
 # ---- (1) Two-tier foceiControls --------------------------------------------
 ##   _screen: applied to every SCM candidate.  No cov, no tables, loose tols.
-##   _final:  applied to ONE refit per SCM mode, via refit_control= in
-##            package_scm_result().  Tight tols + full diagnostics.
+##   _final:  HISTORICAL -- previously fed to refit_final_model() for a full
+##            re-estimation.  Now retained only as a hand-off reference; the
+##            post-hoc cov pass uses getVarCov() (no control object needed).
 
 scm_focei_screen <- nlmixr2est::foceiControl(
   sigdig             = 3,
@@ -2870,10 +2864,10 @@ saveRDS(fit_base16_N80_linCmt,
         file.path(stage1_dir16_N80, "fit_base_N80_linCmt.rds"))
 
 fit_base16_N80_linCmt <- readRDS(file.path(stage1_dir16_N80, "fit_base_N80_linCmt.rds"))
-# ---- (4) Four SCM modes: screen with fast control, refit-once with final ----
+# ---- (4) Four SCM modes: screen with fast control, cov via getVarCov() ----
 ##   Each runSCM_traced() call mirrors the corresponding ODE call above; only
-##   `fit` and `control` differ.  The final cov + tables come from passing
-##   refit_control = scm_focei_final into package_scm_result().
+##   `fit` and `control` differ.  Post-hoc cov + parFixedDf are attached by
+##   package_scm_result() via nlme::getVarCov() on the SCM-final fit.
 
 ## 4a. Forward selection (auto-generated Cartesian product)
 res16_N80_fwd_auto_fast <- runSCM_traced(
@@ -2897,8 +2891,7 @@ saveRDS(res16_N80_fwd_auto_fast,
 test16_N80_fwd_auto_fast <- package_scm_result(
   "scn16_N80_forward_auto_fast",
   res16_N80_fwd_auto_fast, t16_N80_fwd_auto_fast,
-  scenario_id   = 16,
-  refit_control = scm_focei_final
+  scenario_id   = 16
 )
 saveRDS(test16_N80_fwd_auto_fast,
         file.path(stage1_dir16_N80, "test_fwd_auto_fast.rds"))
@@ -2924,8 +2917,7 @@ saveRDS(res16_N80_bck_fast,
 test16_N80_bck_fast <- package_scm_result(
   "scn16_N80_backward_only_fast",
   res16_N80_bck_fast, t16_N80_bck_fast,
-  scenario_id   = 16,
-  refit_control = scm_focei_final
+  scenario_id   = 16
 )
 saveRDS(test16_N80_bck_fast,
         file.path(stage1_dir16_N80, "test_bck_fast.rds"))
@@ -2953,8 +2945,7 @@ saveRDS(res16_N80_user_fast,
 test16_N80_user_fast <- package_scm_result(
   "scn16_N80_user_4tr_fast",
   res16_N80_user_fast, t16_N80_user_fast,
-  scenario_id   = 16,
-  refit_control = scm_focei_final
+  scenario_id   = 16
 )
 saveRDS(test16_N80_user_fast,
         file.path(stage1_dir16_N80, "test_user_fast.rds"))
@@ -2981,8 +2972,7 @@ saveRDS(res16_N80_full_fast,
 test16_N80_full_fast <- package_scm_result(
   "scn16_N80_full_scm_fast",
   res16_N80_full_fast, t16_N80_full_fast,
-  scenario_id   = 16,
-  refit_control = scm_focei_final
+  scenario_id   = 16
 )
 saveRDS(test16_N80_full_fast,
         file.path(stage1_dir16_N80, "test_full_fast.rds"))
@@ -3004,8 +2994,7 @@ part2_summary16_N80_fast <- purrr::imap_dfr(scm_tests16_N80_fast, function(x, mo
     converged     = if (is.null(x$diag)) NA else x$diag$converged,
     objf          = if (is.null(x$diag)) NA_real_ else x$diag$objf,
     cov_step_ok   = if (is.null(x$diag)) NA else x$diag$cov_ok,
-    cond_num      = if (is.null(x$diag)) NA_real_ else x$diag$cond_num,
-    cond_num_sqrt = if (is.null(x$diag)) NA_real_ else x$diag$cond_num_sqrt,
+    cond_num_cor  = if (is.null(x$diag)) NA_real_ else x$diag$cond_num_cor,
     runtime_min   = x$runtime_sec / 60
   )
 })
@@ -3030,16 +3019,16 @@ part2_speedup16_N80 <- dplyr::full_join(
   part2_summary16_N80 %>%
     dplyr::inner_join(.orig_mode_map, by = "test") %>%
     dplyr::select(mode,
-                  n_sel_orig    = n_selected,
-                  objf_orig     = objf,
-                  cond_num_orig = cond_num,
-                  runtime_orig  = runtime_min),
+                  n_sel_orig        = n_selected,
+                  objf_orig         = objf,
+                  cond_num_cor_orig = cond_num_cor,
+                  runtime_orig      = runtime_min),
   part2_summary16_N80_fast %>%
     dplyr::select(mode,
-                  n_sel_fast    = n_selected,
-                  objf_fast     = objf,
-                  cond_num_fast = cond_num,
-                  runtime_fast  = runtime_min),
+                  n_sel_fast        = n_selected,
+                  objf_fast         = objf,
+                  cond_num_cor_fast = cond_num_cor,
+                  runtime_fast      = runtime_min),
   by = "mode"
 ) %>%
   dplyr::mutate(
@@ -3134,11 +3123,17 @@ match_selected_to_truth <- function(selected, true_rel) {
   )
 }
 
-##  Compute Power, PowerCN (cond_num_sqrt < cn_sqrt_cut), PowerMinSuc
+##  Compute Power, PowerCN (cond_num_cor < cn_cor_cut), PowerMinSuc
 ##  (converged == TRUE), plus a relative-power tibble (k = 1..n_true).
-compute_power_block <- function(per_ds, n_true, cn_sqrt_cut = 1000) {
+##  cond_num_cor is the correlation-matrix condition number (lambda_max /
+##  lambda_min) from fit$conditionNumberCor.  Convention: < 1000 is "well
+##  conditioned" (FDA / pharma pop-PK threshold).  We do NOT take a sqrt
+##  any more -- the old cond_num_sqrt was sqrt(cond_num_cov), and Cor and
+##  Cov condition numbers are on different scales (Cor is more sensitive
+##  to high parameter correlations, Cov is dominated by scale differences).
+compute_power_block <- function(per_ds, n_true, cn_cor_cut = 1000) {
   N      <- nrow(per_ds)
-  ok_cn  <- per_ds$cond_num_sqrt < cn_sqrt_cut & !is.na(per_ds$cond_num_sqrt)
+  ok_cn  <- per_ds$cond_num_cor < cn_cor_cut & !is.na(per_ds$cond_num_cor)
   ok_min <- per_ds$converged
   ok_min[is.na(ok_min)] <- FALSE
 
@@ -3164,13 +3159,25 @@ compute_power_block <- function(per_ds, n_true, cn_sqrt_cut = 1000) {
   list(power = power_main, rel_power = rel_power)
 }
 
-##  Compute unconditional + conditional RMRSE for a parameter set.
+##  Compute unconditional + conditional RMRSE / MARE for a parameter set.
 ##    pop_params: vector of population-parameter names (always estimated).
 ##                Unconditional denom = runs with finite estimate.
 ##    cov_params: vector of true covariate-effect parameter names.
 ##                Unconditional denom = runs where that cov was SELECTED
 ##                (and therefore estimated, => non-NA estimate).
 ##    Conditional denom for BOTH groups = runs with exact_match == TRUE.
+##
+##  Metrics returned per parameter:
+##    RMRSE_pct: 100 * sqrt(mean(rel_err^2))   -- mean accuracy + variance
+##                                                penalty, sensitive to outliers
+##    MARE_pct:  100 * median(|rel_err|)       -- robust central tendency,
+##                                                outlier-resistant
+##    n_used:    # of finite contributions
+##
+##  Rationale: with N = 4 (pilot) or even N = 250 (scale-up) draws, a single
+##  numerically-unstable estimate (e.g. cov_VcCL near the noise floor) can
+##  dominate RMRSE.  MARE gives a complementary view that's stable to that
+##  single bad draw.  Report both side-by-side.
 compute_rmrse_block <- function(per_ds, true_long, scenario_id,
                                 pop_params, cov_params) {
   truth <- true_long %>%
@@ -3185,15 +3192,20 @@ compute_rmrse_block <- function(per_ds, true_long, scenario_id,
                   exact_match = per_ds$exact_match[i])
   }) %>%
     dplyr::inner_join(truth, by = "parameter") %>%
-    dplyr::mutate(sq_rel = ((estimate - true_value) / true_value)^2)
+    dplyr::mutate(
+      rel_err = (estimate - true_value) / true_value,
+      sq_rel  = rel_err^2,
+      abs_rel = abs(rel_err)
+    )
 
   rmrse_one <- function(df) {
     df <- dplyr::filter(df, is.finite(sq_rel))
     if (nrow(df) == 0L) {
-      tibble::tibble(RMRSE_pct = NA_real_, n_used = 0L)
+      tibble::tibble(RMRSE_pct = NA_real_, MARE_pct = NA_real_, n_used = 0L)
     } else {
       tibble::tibble(
         RMRSE_pct = 100 * sqrt(mean(df$sq_rel)),
+        MARE_pct  = 100 * stats::median(df$abs_rel),
         n_used    = nrow(df)
       )
     }
@@ -3215,11 +3227,12 @@ compute_rmrse_block <- function(per_ds, true_long, scenario_id,
 
 
 # ---- (P3.2) Per-dataset driver ----------------------------------------------
-##  Filters the long sim file to one DATASET, refits base with linCmt,
-##  runs full SCM via the fast screening control, refits surviving model
-##  with tight final control for cov + tables.  Wrapped in tryCatch so a
-##  single bad dataset returns a stub list (no $test) instead of halting
-##  the loop.  `confirm = FALSE` is forced -- no interactive prompts.
+##  Filters the long sim file to one DATASET, fits base with linCmt, runs full
+##  SCM via the fast screening control, then attaches a post-hoc covariance to
+##  the SCM-final model via nlme::getVarCov() (inside package_scm_result --
+##  no re-estimation, ~5-20s/ds vs ~60s/ds for the old refit path).  Wrapped
+##  in tryCatch so a single bad dataset returns a stub list (no $test) instead
+##  of halting the loop.  `confirm = FALSE` is forced -- no interactive prompts.
 ##
 ##  Resilience design:
 ##    * `true_long` is threaded explicitly so an unloaded `true_params` in
@@ -3237,12 +3250,12 @@ compute_rmrse_block <- function(per_ds, true_long, scenario_id,
 ##    * Set `force_rerun = TRUE` to redo a specific dataset (or just delete
 ##      its test_*.rds before calling).
 ##
-##  Refit policy:
-##    * "full" (default): scm_focei_final -- covMethod="r,s" + tables.
-##                         Full SE + condition number.  ~30-60s per ds.
-##    * "skip":            NULL -- no refit at all (~0s).  Loses cov_ok,
-##                         cond_num, parFixed -- PowerCN becomes unavailable.
-##                         Use only when scale-up time dominates.
+##  Covariance:
+##    * Always attempted via getVarCov() on the SCM-final fit.  On singular
+##      Hessian / numerical failure we emit a warning and set cov_done=FALSE;
+##      cond_num_cor stays NA and PowerCN becomes unavailable for that ds.
+##      No user toggle -- the cov pass is cheap (~5-20s) and conceptually
+##      always desirable.
 ##
 ##  Parallelism:
 ##    * `workers` controls INNER parallelism: candidates within one SCM step.
@@ -3254,13 +3267,11 @@ run_one_dataset_scn16_N80 <- function(ds_id, save_dir,
                                        sim_long     = sim_obs_scn16_N80,
                                        base_fn      = base_2cmt_oral_linCmt,
                                        screen_ctrl  = scm_focei_screen,
-                                       final_ctrl   = scm_focei_final,
                                        vars_vec     = scm16_vars,
                                        covars_vec   = scm16_covars,
                                        catvars_vec  = scm16_catvars,
                                        shapes_vec   = scm16_shapes,
                                        true_long    = true_params,
-                                       refit_policy = c("full", "skip"),
                                        workers      = 3L,
                                        keep_res     = TRUE,
                                        force_rerun  = FALSE,
@@ -3287,12 +3298,6 @@ run_one_dataset_scn16_N80 <- function(ds_id, save_dir,
   message(sprintf("\n>>> [%s] starting dataset %d at %s",
                   ds_tag, ds_id, format(Sys.time(), "%H:%M:%S")))
 
-  ## -- Resolve refit policy to a control object (or NULL for skip)
-  refit_policy <- match.arg(refit_policy)
-  refit_ctrl <- switch(refit_policy,
-                       full = final_ctrl,
-                       skip = NULL)
-
   ## -- Pre-flight (a): every helper function the driver + package_scm_result()
   ##    transitively call must be in scope.  Promise forcing only catches
   ##    missing *arguments*; missing *functions* fail silently 15 min into
@@ -3302,7 +3307,6 @@ run_one_dataset_scn16_N80 <- function(ds_id, save_dir,
   needed_fns <- c("to_nm_dataset", "runSCM_traced", "package_scm_result",
                   "diagnose_fit", "extract_params_long", "rel_err_one",
                   "match_selected_to_truth")
-  if (!is.null(refit_ctrl)) needed_fns <- c(needed_fns, "refit_final_model")
   missing_fns <- needed_fns[!vapply(needed_fns, exists, logical(1),
                                     mode = "function", inherits = TRUE)]
   if (length(missing_fns)) {
@@ -3315,7 +3319,6 @@ run_one_dataset_scn16_N80 <- function(ds_id, save_dir,
   ##    true_params (or any other default argument) fails loudly here,
   ##    not silently 25 min later inside package_scm_result().
   force(true_long); force(sim_long); force(base_fn); force(screen_ctrl)
-  if (!is.null(refit_ctrl)) force(refit_ctrl)
 
   res_i <- NULL  # placeholder visible to the error handler
 
@@ -3359,20 +3362,24 @@ run_one_dataset_scn16_N80 <- function(ds_id, save_dir,
                                sprintf("res_full_fast_%s.rds", ds_tag)))
     }
 
+    ## package_scm_result() now ALWAYS attempts a post-hoc cov pass via
+    ## getVarCov() on the SCM-final fit (no re-estimation).  Returns
+    ## cov_done = FALSE if the Hessian is singular; downstream OC code
+    ## handles that by filtering on cond_num_cor < cn_cor_cut.
     test_i <- package_scm_result(
       label         = sprintf("scn%02d_%s_N80_full_fast", scenario_id, ds_tag),
       scm_res       = res_i,
       runtime_sec   = t_scm_sec,
       true_long     = true_long,         # explicit -- no lazy global lookup
-      scenario_id   = scenario_id,
-      refit_control = refit_ctrl         # NULL for "skip", else final_ctrl
+      scenario_id   = scenario_id
     )
 
     saveRDS(test_i, test_path)
 
-    message(sprintf("<<< [%s] done in %.1f min (base %.1fs + scm %.1fs, refit=%s)",
+    message(sprintf("<<< [%s] done in %.1f min (base %.1fs + scm %.1fs, cov=%s)",
                     ds_tag, (t_base_sec + t_scm_sec) / 60,
-                    t_base_sec, t_scm_sec, refit_policy))
+                    t_base_sec, t_scm_sec,
+                    if (isTRUE(test_i$cov_done)) "ok" else "FAIL"))
 
     list(
       ds_id       = ds_id,
@@ -3492,6 +3499,76 @@ t_pilot_total <- system.time(
 .summarize_pilot(scm_pilot_scn16_N80)
 
 
+# ---- (P3.3.5) One-shot migration of cached pilot files ---------------------
+##   Earlier pilot runs produced `test_full_fast_<ds_tag>.rds` whose `$diag`
+##   slot has the OLD schema (cond_num, cond_num_sqrt) and an obsolete
+##   `$refit_done` flag.  After the cond_num_cor + getVarCov refactor those
+##   names no longer match what compute_power_block() / oc_pilot_per_ds /
+##   compute_rmrse_block expect.  Rather than redo the ~17-min/ds SCM, this
+##   helper re-runs diagnose_fit() on each cached fit (filling cond_num_cor)
+##   and replaces refit_done with cov_done.  In-place; idempotent (safe to
+##   call on already-migrated files).
+##
+##   Note: cached `$final_fit` came from the old refit path which used
+##   covMethod="r,s", so $cov / $conditionNumberCor are already populated.
+##   We only need to recompute the per-test $diag and reset the new flag.
+.rediag_pilot_cache <- function(save_dir,
+                                pattern = "^test_full_fast_ds\\d+\\.rds$") {
+  if (!dir.exists(save_dir)) {
+    message(sprintf("  no pilot cache dir: %s", save_dir))
+    return(invisible(0L))
+  }
+  files <- list.files(save_dir, pattern = pattern, full.names = TRUE)
+  if (length(files) == 0L) {
+    message(sprintf("  no cached pilot files matching %s in %s",
+                    pattern, save_dir))
+    return(invisible(0L))
+  }
+  n_changed <- 0L
+  for (f in files) {
+    t <- readRDS(f)
+    needs_diag  <- is.null(t$diag) || is.null(t$diag$cond_num_cor)
+    needs_flag  <- is.null(t$cov_done)
+    needs_pfix  <- !is.null(t$final_fit) &&
+                    is.null(t$parFixed)  &&
+                    !is.null(t$final_fit$parFixedDf)
+    if (!(needs_diag || needs_flag || needs_pfix)) next  # already current
+
+    if (!is.null(t$final_fit)) {
+      ## Cov already attached from old refit -- diagnose_fit reads it.
+      t$diag     <- diagnose_fit(t$final_fit)
+      t$cov_done <- !is.null(t$final_fit$cov) &&
+                     all(is.finite(diag(t$final_fit$cov)))
+      t$parFixed <- if (isTRUE(t$cov_done)) t$final_fit$parFixedDf else NULL
+    } else {
+      t$diag     <- diagnose_fit(NULL)
+      t$cov_done <- FALSE
+      t$parFixed <- NULL
+    }
+    ## Drop the obsolete field name so the schema is clean.
+    t$refit_done <- NULL
+    saveRDS(t, f)
+    n_changed <- n_changed + 1L
+  }
+  message(sprintf("  re-diagnosed %d / %d cached pilot files in %s",
+                  n_changed, length(files), basename(save_dir)))
+  invisible(n_changed)
+}
+.rediag_pilot_cache(stage1_pilot_scn16_N80)
+
+## After migration the in-memory `scm_pilot_scn16_N80` may still hold the
+## OLD-schema list from the resume path (run_one_dataset_scn16_N80() does
+## `readRDS(test_path)` at the top of every cached run).  Re-load the
+## migrated copies so the downstream oc_pilot_per_ds / compute_power_block
+## chain sees cond_num_cor + cov_done immediately.
+for (ds_id in seq_along(scm_pilot_scn16_N80)) {
+  ds_tag <- sprintf("ds%02d", ds_id)
+  tp <- file.path(stage1_pilot_scn16_N80,
+                  sprintf("test_full_fast_%s.rds", ds_tag))
+  if (file.exists(tp)) scm_pilot_scn16_N80[[ds_id]]$test <- readRDS(tp)
+}
+
+
 # ---- (P3.4) Per-dataset audit tibble ----------------------------------------
 ##   `p$test` is NULL when the driver hit its error handler (it still returns
 ##   a list carrying $error and any salvaged $res); skip those rows.
@@ -3510,8 +3587,7 @@ oc_pilot_per_ds <- purrr::map_dfr(scm_pilot_scn16_N80, function(p) {
     t_total_min   = p$t_total_sec / 60,
     converged     = isTRUE(tt$diag$converged),
     cov_ok        = isTRUE(tt$diag$cov_ok),
-    cond_num      = tt$diag$cond_num,
-    cond_num_sqrt = tt$diag$cond_num_sqrt,
+    cond_num_cor  = tt$diag$cond_num_cor,
     n_selected    = if (is.null(tt$selected)) NA_integer_ else nrow(tt$selected),
     n_true_hit    = mat$n_true_hit,
     n_false_pos   = mat$n_false_pos,
@@ -3533,7 +3609,7 @@ cov_params_rmrse <- c("CLBW", "CLcrCL", "VcBW", "VcSEX")
 
 power_out <- compute_power_block(oc_pilot_per_ds,
                                  n_true      = n_true_scn16,
-                                 cn_sqrt_cut = 1000)
+                                 cn_cor_cut  = 1000)
 oc_pilot_power    <- power_out$power
 oc_pilot_relpower <- power_out$rel_power
 
@@ -3636,7 +3712,6 @@ if (FALSE) {  # guard: do not execute via source()
         ds_id        = dataset_id,
         save_dir     = save_dir,
         sim_long     = sim_long,
-        refit_policy = "full",    # keep cov for now (per user request)
         workers      = 1L,         # disable inner parallelism under outer
         keep_res     = FALSE,      # drop heavy candidate trails
         force_rerun  = FALSE,      # resume previously-completed datasets
