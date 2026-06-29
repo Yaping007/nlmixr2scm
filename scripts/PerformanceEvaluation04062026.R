@@ -32,6 +32,7 @@ rxode2::rxClean()
 library(nlmixr2)
 library(rxode2)
 library(tidyverse)
+
 library(devtools)
 library(haven)
 
@@ -3052,5 +3053,604 @@ saveRDS(part2_speedup16_N80,
         file.path(stage1_dir16_N80, "part2_speedup.rds"))
 
 
+## ============================================================================
+##   Part 3: Operating-characteristics pilot (4 datasets, scenario 16, N=80)
+## ----------------------------------------------------------------------------
+##   Wraps the fast-route full-SCM pipeline used above (single dataset) into
+##   a per-dataset driver, loops 4 replicates of scenario 16, then computes
+##   six OC artefacts:
+##     - oc_pilot_power       : Power, PowerCN, PowerMinSuc
+##     - oc_pilot_relpower    : relative power at k = 1..Ntrue
+##     - oc_pilot_rmrse_uncond: unconditional RMRSE %
+##     - oc_pilot_rmrse_cond  : conditional RMRSE % (exact-match runs only)
+##     - oc_pilot_timing      : per-dataset + aggregate wall-clock
+##     - oc_pilot_per_ds      : audit log (one row per dataset)
+##
+##   Helpers below are intentionally scenario-agnostic so the same code drops
+##   onto the 100 x 16 scale-up.  See the SCALE-UP STUB at the end.
+## ============================================================================
 
 
+# ---- (P3.1) OC helpers (reusable across scenarios) --------------------------
+
+##  Canonical-shape normalizer.  runSCM emits per-LEVEL theta names for
+##  categorical covariates (e.g. cov_SEX_1_vc, cov_RACE_2_vc); the parser
+##  in package_scm_result() leaves the level digit in `shape`.  For
+##  semantic matching against truth (where the relation is one entity)
+##  we collapse any all-digit shape to "cat".  This also folds a 3-level
+##  cat that selected multiple levels into ONE relation row.
+.canon_shape_tbl <- function(rel) {
+  rel %>%
+    dplyr::mutate(shape = ifelse(grepl("^[0-9]+$", shape), "cat", shape)) %>%
+    dplyr::distinct(var, covar, shape)
+}
+
+##  Build the truth tibble of "what runSCM should have selected" for a given
+##  scenario.  Reads true_long, keeps rows with non-zero true_value AND a
+##  parameter name that maps to a (var, covar, shape) triple.  Defaults
+##  cover the article scenarios (scn 1-16); pass `shape_map` if you add
+##  custom covariate effects later.
+extract_true_relations <- function(
+    true_long, scenario_id,
+    shape_map = list(
+      CLBW   = list(var = "cl", covar = "BW",   shape = "power"),
+      CLcrCL = list(var = "cl", covar = "CrCL", shape = "power"),
+      VcBW   = list(var = "vc", covar = "BW",   shape = "power"),
+      VcSEX  = list(var = "vc", covar = "SEX",  shape = "cat")
+    )) {
+  hits <- true_long %>%
+    dplyr::filter(scenario == scenario_id,
+                  parameter %in% names(shape_map),
+                  !is.na(true_value), true_value != 0) %>%
+    dplyr::pull(parameter)
+  if (length(hits) == 0L) {
+    return(tibble::tibble(var = character(), covar = character(),
+                          shape = character()))
+  }
+  purrr::map_dfr(hits, function(p) {
+    m <- shape_map[[p]]
+    tibble::tibble(var = m$var, covar = m$covar, shape = m$shape)
+  })
+}
+
+##  Compare a single run's `selected` tibble against truth.  Returns a
+##  list with: n_true_hit, n_false_pos, exact_match (set equality on
+##  (var, covar, shape) after canonicalization).
+match_selected_to_truth <- function(selected, true_rel) {
+  if (is.null(selected) || nrow(selected) == 0L) {
+    return(list(n_true_hit  = 0L,
+                n_false_pos = 0L,
+                exact_match = nrow(true_rel) == 0L))
+  }
+  sel <- .canon_shape_tbl(selected)
+  tru <- .canon_shape_tbl(true_rel)
+  true_hit  <- dplyr::inner_join(sel, tru, by = c("var", "covar", "shape"))
+  false_pos <- dplyr::anti_join (sel, tru, by = c("var", "covar", "shape"))
+  miss      <- dplyr::anti_join (tru, sel, by = c("var", "covar", "shape"))
+  list(
+    n_true_hit  = nrow(true_hit),
+    n_false_pos = nrow(false_pos),
+    exact_match = (nrow(false_pos) == 0L) && (nrow(miss) == 0L)
+  )
+}
+
+##  Compute Power, PowerCN (cond_num_sqrt < cn_sqrt_cut), PowerMinSuc
+##  (converged == TRUE), plus a relative-power tibble (k = 1..n_true).
+compute_power_block <- function(per_ds, n_true, cn_sqrt_cut = 1000) {
+  N      <- nrow(per_ds)
+  ok_cn  <- per_ds$cond_num_sqrt < cn_sqrt_cut & !is.na(per_ds$cond_num_sqrt)
+  ok_min <- per_ds$converged
+  ok_min[is.na(ok_min)] <- FALSE
+
+  power_main <- tibble::tibble(
+    metric = c("Power", "PowerCN", "PowerMinSuc"),
+    num    = c(
+      sum(per_ds$exact_match, na.rm = TRUE),
+      sum(per_ds$exact_match & ok_cn,  na.rm = TRUE),
+      sum(per_ds$exact_match & ok_min, na.rm = TRUE)
+    ),
+    denom  = c(N, sum(ok_cn), sum(ok_min))
+  ) %>%
+    dplyr::mutate(value = num / denom)
+
+  rel_power <- tibble::tibble(
+    k                   = seq_len(n_true),
+    n_at_least_k        = vapply(seq_len(n_true), function(k)
+      sum(per_ds$n_true_hit >= k, na.rm = TRUE), integer(1)),
+    fraction_at_least_k = vapply(seq_len(n_true), function(k)
+      mean(per_ds$n_true_hit >= k, na.rm = TRUE), numeric(1))
+  )
+
+  list(power = power_main, rel_power = rel_power)
+}
+
+##  Compute unconditional + conditional RMRSE for a parameter set.
+##    pop_params: vector of population-parameter names (always estimated).
+##                Unconditional denom = runs with finite estimate.
+##    cov_params: vector of true covariate-effect parameter names.
+##                Unconditional denom = runs where that cov was SELECTED
+##                (and therefore estimated, => non-NA estimate).
+##    Conditional denom for BOTH groups = runs with exact_match == TRUE.
+compute_rmrse_block <- function(per_ds, true_long, scenario_id,
+                                pop_params, cov_params) {
+  truth <- true_long %>%
+    dplyr::filter(scenario == scenario_id,
+                  parameter %in% c(pop_params, cov_params)) %>%
+    dplyr::select(parameter, true_value)
+
+  long <- purrr::imap_dfr(per_ds$final_est, function(est, i) {
+    if (is.null(est)) return(NULL)
+    dplyr::mutate(est,
+                  dataset_id  = per_ds$dataset_id[i],
+                  exact_match = per_ds$exact_match[i])
+  }) %>%
+    dplyr::inner_join(truth, by = "parameter") %>%
+    dplyr::mutate(sq_rel = ((estimate - true_value) / true_value)^2)
+
+  rmrse_one <- function(df) {
+    df <- dplyr::filter(df, is.finite(sq_rel))
+    if (nrow(df) == 0L) {
+      tibble::tibble(RMRSE_pct = NA_real_, n_used = 0L)
+    } else {
+      tibble::tibble(
+        RMRSE_pct = 100 * sqrt(mean(df$sq_rel)),
+        n_used    = nrow(df)
+      )
+    }
+  }
+
+  uncond <- long %>%
+    dplyr::group_by(parameter) %>%
+    dplyr::group_modify(~ rmrse_one(.x)) %>%
+    dplyr::ungroup()
+
+  cond <- long %>%
+    dplyr::filter(exact_match) %>%
+    dplyr::group_by(parameter) %>%
+    dplyr::group_modify(~ rmrse_one(.x)) %>%
+    dplyr::ungroup()
+
+  list(rmrse_uncond = uncond, rmrse_cond = cond)
+}
+
+
+# ---- (P3.2) Per-dataset driver ----------------------------------------------
+##  Filters the long sim file to one DATASET, refits base with linCmt,
+##  runs full SCM via the fast screening control, refits surviving model
+##  with tight final control for cov + tables.  Wrapped in tryCatch so a
+##  single bad dataset returns a stub list (no $test) instead of halting
+##  the loop.  `confirm = FALSE` is forced -- no interactive prompts.
+##
+##  Resilience design:
+##    * `true_long` is threaded explicitly so an unloaded `true_params` in
+##      the calling env can't cause silent NULL returns from package_scm_result.
+##    * SCM result `res_i` is saved to disk IMMEDIATELY after runSCM_traced,
+##      before any packaging.  Even if package_scm_result errors later,
+##      the (expensive) SCM artefact stays recoverable.
+##    * Error handler echoes the exception via warning() AND writes a
+##      per-dataset error log to <save_dir>/<ds_tag>_ERROR.txt.
+##
+##  Resume support:
+##    * `force_rerun = FALSE` (default) makes the driver skip any dataset
+##      whose `test_full_fast_<ds_tag>.rds` already exists on disk.  The
+##      cached object is returned untouched so OC aggregation stays valid.
+##    * Set `force_rerun = TRUE` to redo a specific dataset (or just delete
+##      its test_*.rds before calling).
+##
+##  Refit policy:
+##    * "full" (default): scm_focei_final -- covMethod="r,s" + tables.
+##                         Full SE + condition number.  ~30-60s per ds.
+##    * "skip":            NULL -- no refit at all (~0s).  Loses cov_ok,
+##                         cond_num, parFixed -- PowerCN becomes unavailable.
+##                         Use only when scale-up time dominates.
+##
+##  Parallelism:
+##    * `workers` controls INNER parallelism: candidates within one SCM step.
+##      For the pilot (sequential outer loop) workers = 3L is the default.
+##      For the scale-up under outer parallelism (future_pmap), set workers
+##      = 1L to avoid nested-future thrash.
+
+run_one_dataset_scn16_N80 <- function(ds_id, save_dir,
+                                       sim_long     = sim_obs_scn16_N80,
+                                       base_fn      = base_2cmt_oral_linCmt,
+                                       screen_ctrl  = scm_focei_screen,
+                                       final_ctrl   = scm_focei_final,
+                                       vars_vec     = scm16_vars,
+                                       covars_vec   = scm16_covars,
+                                       catvars_vec  = scm16_catvars,
+                                       shapes_vec   = scm16_shapes,
+                                       true_long    = true_params,
+                                       refit_policy = c("full", "skip"),
+                                       workers      = 3L,
+                                       keep_res     = TRUE,
+                                       force_rerun  = FALSE,
+                                       scenario_id  = 16L) {
+  ds_tag <- sprintf("ds%02d", ds_id)
+
+  ## -- Resume check FIRST: before any expensive work or promise forcing
+  dir.create(save_dir, showWarnings = FALSE, recursive = TRUE)
+  test_path <- file.path(save_dir, sprintf("test_full_fast_%s.rds", ds_tag))
+  if (!force_rerun && file.exists(test_path)) {
+    message(sprintf(">>> [%s] cached, skipping (delete %s or pass force_rerun=TRUE to redo)",
+                    ds_tag, basename(test_path)))
+    return(list(
+      ds_id       = ds_id,
+      ds_tag      = ds_tag,
+      test        = readRDS(test_path),
+      t_base_sec  = NA_real_,
+      t_scm_sec   = NA_real_,
+      t_total_sec = NA_real_,
+      resumed     = TRUE
+    ))
+  }
+
+  message(sprintf("\n>>> [%s] starting dataset %d at %s",
+                  ds_tag, ds_id, format(Sys.time(), "%H:%M:%S")))
+
+  ## -- Resolve refit policy to a control object (or NULL for skip)
+  refit_policy <- match.arg(refit_policy)
+  refit_ctrl <- switch(refit_policy,
+                       full = final_ctrl,
+                       skip = NULL)
+
+  ## -- Pre-flight (a): every helper function the driver + package_scm_result()
+  ##    transitively call must be in scope.  Promise forcing only catches
+  ##    missing *arguments*; missing *functions* fail silently 15 min into
+  ##    SCM (cf. the diagnose_fit crash on first dry run).  Checking here
+  ##    converts that into an instant hard stop that halts the pilot loop,
+  ##    forcing the caller to source the helpers before retrying.
+  needed_fns <- c("to_nm_dataset", "runSCM_traced", "package_scm_result",
+                  "diagnose_fit", "extract_params_long", "rel_err_one",
+                  "match_selected_to_truth")
+  if (!is.null(refit_ctrl)) needed_fns <- c(needed_fns, "refit_final_model")
+  missing_fns <- needed_fns[!vapply(needed_fns, exists, logical(1),
+                                    mode = "function", inherits = TRUE)]
+  if (length(missing_fns)) {
+    stop(sprintf("[%s] missing helper function(s): %s -- source PerformanceEvaluation04062026.R first.",
+                 ds_tag, paste(missing_fns, collapse = ", ")),
+         call. = FALSE)
+  }
+
+  ## -- Pre-flight (b): force evaluation of every promise so a missing
+  ##    true_params (or any other default argument) fails loudly here,
+  ##    not silently 25 min later inside package_scm_result().
+  force(true_long); force(sim_long); force(base_fn); force(screen_ctrl)
+  if (!is.null(refit_ctrl)) force(refit_ctrl)
+
+  res_i <- NULL  # placeholder visible to the error handler
+
+  tryCatch({
+    ds_i <- to_nm_dataset(sim_long) %>%
+      dplyr::filter(DATASET == ds_id) %>%
+      dplyr::select(-SCENARIO, -DATASET) %>%
+      dplyr::mutate(ID   = as.integer(ID),
+                    SEX  = as.integer(SEX),
+                    RACE = as.integer(RACE))
+
+    t_base <- system.time(
+      fit_base_i <- nlmixr2(base_fn, ds_i,
+                            est = "focei", control = screen_ctrl)
+    )
+    t_base_sec <- as.numeric(t_base["elapsed"])
+
+    res_i <- runSCM_traced(
+      label       = sprintf("scn%02d_%s_N80_full_fast", scenario_id, ds_tag),
+      data        = ds_i,
+      fit         = fit_base_i,
+      varsVec     = vars_vec,
+      covarsVec   = covars_vec,
+      catvarsVec  = catvars_vec,
+      shapes      = shapes_vec,
+      searchType  = "scm",
+      control     = screen_ctrl,
+      saveModels  = FALSE,
+      workers     = workers,
+      print       = 100,
+      maxRetries  = 0L,
+      confirm     = FALSE        # no interactive y/n prompt
+    )
+    t_scm_sec <- as.numeric(attr(res_i, "elapsed_s"))
+
+    ## Save the (expensive) SCM result FIRST -- before any packaging.
+    ## Then if package_scm_result fails downstream we can replay it
+    ## offline without losing the SCM compute.
+    if (keep_res) {
+      saveRDS(res_i, file.path(save_dir,
+                               sprintf("res_full_fast_%s.rds", ds_tag)))
+    }
+
+    test_i <- package_scm_result(
+      label         = sprintf("scn%02d_%s_N80_full_fast", scenario_id, ds_tag),
+      scm_res       = res_i,
+      runtime_sec   = t_scm_sec,
+      true_long     = true_long,         # explicit -- no lazy global lookup
+      scenario_id   = scenario_id,
+      refit_control = refit_ctrl         # NULL for "skip", else final_ctrl
+    )
+
+    saveRDS(test_i, test_path)
+
+    message(sprintf("<<< [%s] done in %.1f min (base %.1fs + scm %.1fs, refit=%s)",
+                    ds_tag, (t_base_sec + t_scm_sec) / 60,
+                    t_base_sec, t_scm_sec, refit_policy))
+
+    list(
+      ds_id       = ds_id,
+      ds_tag      = ds_tag,
+      test        = test_i,
+      t_base_sec  = t_base_sec,
+      t_scm_sec   = t_scm_sec,
+      t_total_sec = t_base_sec + t_scm_sec,
+      resumed     = FALSE
+    )
+  }, error = function(e) {
+    msg <- conditionMessage(e)
+    err_path <- file.path(save_dir, sprintf("%s_ERROR.txt", ds_tag))
+    writeLines(c(format(Sys.time()), msg), err_path)
+    warning(sprintf("[%s] FAILED: %s (see %s)", ds_tag, msg, err_path),
+            call. = FALSE, immediate. = TRUE)
+    ## Even on failure, return enough info to recover.  res_i is the SCM
+    ## result if it got that far -- callers can rerun package_scm_result()
+    ## offline.  When NULL we know the failure was before/during SCM.
+    list(ds_id = ds_id, ds_tag = ds_tag, error = msg, res = res_i,
+         resumed = FALSE)
+  })
+}
+
+
+# ---- (P3.3) Run the 4-dataset pilot -----------------------------------------
+out_dir <- "simulated_virtual_dataset"
+out_dir_v2_N80   <- "simulated_virtual_dataset_eta_filtered_N80"
+
+stage1_dir16_N80 <- file.path(out_dir_v2_N80 , "stage1_smoke_scn16_ds01_N80")
+sim_obs_scn16_N80 <- readRDS(file.path(out_dir_v2_N80, "sim_obs_scenario_16.rds")) #250 files N=80
+
+stage1_pilot_scn16_N80 <- file.path(out_dir_v2_N80,
+                                     "stage1_pilot_scn16_N80")
+
+base_2cmt_oral_linCmt <- function() {
+  ini({
+    lTVCL <- log(0.6)
+    lTVQ  <- log(1.8)
+    lTVVc <- log(20)
+    lTVVp <- log(80)
+    lTVKA <- fix(log(0.7))      # KA unidentifiable from this sparse design
+
+    eta.cl + eta.vc ~ c(
+      0.1,
+      0.02,
+      0.1
+    )
+
+    prop.err <- 0.1
+  })
+  model({
+    cl <- exp(lTVCL + eta.cl)
+    vc <- exp(lTVVc + eta.vc)
+    q  <- exp(lTVQ)
+    vp <- exp(lTVVp)
+    ka <- exp(lTVKA)
+    cp <- linCmt()
+    cp ~ prop(prop.err)
+  })
+}
+
+scm_focei_screen <- nlmixr2est::foceiControl(
+  sigdig             = 3,
+  outerOpt           = "bobyqa",
+  print              = 0,
+  calcTables         = FALSE,
+  covMethod          = "",            # SKIP: LRT uses OFV only
+  stickyRecalcN      = 20,
+  maxOuterIterations = 2000,
+  maxInnerIterations = 2000,
+  rxControl          = rxode2::rxControl(atol = 1e-6, rtol = 1e-4)
+)
+
+scm_focei_final <- nlmixr2est::foceiControl(
+  sigdig             = 4,
+  outerOpt           = "bobyqa",
+  print              = 0,
+  calcTables         = TRUE,
+  covMethod          = "r,s",         # full sandwich for SE / CN
+  stickyRecalcN      = 20,
+  maxOuterIterations = 2000,
+  maxInnerIterations = 2000,
+  rxControl          = rxode2::rxControl(atol = 1e-8, rtol = 1e-6)
+)
+
+scm16_vars       <- c("cl", "vc")
+scm16_covars     <- c("BW", "CrCL", "BMI")
+scm16_catvars    <- c("SEX", "RACE")
+scm16_shapes     <- c("power", "lin")
+
+
+t_pilot_total <- system.time(
+  scm_pilot_scn16_N80 <- purrr::map(
+    1:4,
+    run_one_dataset_scn16_N80,
+    save_dir = stage1_pilot_scn16_N80
+  ) %>%
+    rlang::set_names(sprintf("ds%02d", 1:4))
+)
+
+## Loop summary: fresh runs vs cache hits vs failures.
+.summarize_pilot <- function(pilot_list) {
+  n_total   <- length(pilot_list)
+  n_resumed <- sum(vapply(pilot_list, function(x) isTRUE(x$resumed), logical(1)))
+  n_failed  <- sum(vapply(pilot_list,
+                          function(x) !is.null(x$error) && is.null(x$test),
+                          logical(1)))
+  n_fresh   <- n_total - n_resumed - n_failed
+  message(sprintf(
+    "\n=== pilot loop done: %d fresh + %d resumed + %d failed / %d total ===",
+    n_fresh, n_resumed, n_failed, n_total
+  ))
+  invisible(list(fresh = n_fresh, resumed = n_resumed,
+                 failed = n_failed, total = n_total))
+}
+.summarize_pilot(scm_pilot_scn16_N80)
+
+
+# ---- (P3.4) Per-dataset audit tibble ----------------------------------------
+##   `p$test` is NULL when the driver hit its error handler (it still returns
+##   a list carrying $error and any salvaged $res); skip those rows.
+true_params <- readRDS(file.path(out_dir, "true_params_long.rds"))
+true_rel_scn16 <- extract_true_relations(true_params, scenario_id = 16)
+
+oc_pilot_per_ds <- purrr::map_dfr(scm_pilot_scn16_N80, function(p) {
+  if (is.null(p) || is.null(p$test)) return(NULL)
+  tt  <- p$test
+  mat <- match_selected_to_truth(tt$selected, true_rel_scn16)
+  tibble::tibble(
+    dataset_id    = p$ds_id,
+    ds_tag        = p$ds_tag,
+    t_base_min    = p$t_base_sec / 60,
+    t_scm_min     = p$t_scm_sec  / 60,
+    t_total_min   = p$t_total_sec / 60,
+    converged     = isTRUE(tt$diag$converged),
+    cov_ok        = isTRUE(tt$diag$cov_ok),
+    cond_num      = tt$diag$cond_num,
+    cond_num_sqrt = tt$diag$cond_num_sqrt,
+    n_selected    = if (is.null(tt$selected)) NA_integer_ else nrow(tt$selected),
+    n_true_hit    = mat$n_true_hit,
+    n_false_pos   = mat$n_false_pos,
+    exact_match   = mat$exact_match,
+    selected      = list(tt$selected),
+    final_est     = list(tt$final_est)
+  )
+})
+
+
+# ---- (P3.5) Six OC artefacts ------------------------------------------------
+n_true_scn16 <- nrow(true_rel_scn16)   # = 4 for scenario 16
+
+
+## Pop params for RMRSE (TVKA dropped: fixed in model)
+pop_params_rmrse <- c("TVCL", "TVVc", "TVQ", "TVVp",
+                      "var_CL", "var_Vc", "cov_VcCL", "ResErr")
+cov_params_rmrse <- c("CLBW", "CLcrCL", "VcBW", "VcSEX")
+
+power_out <- compute_power_block(oc_pilot_per_ds,
+                                 n_true      = n_true_scn16,
+                                 cn_sqrt_cut = 1000)
+oc_pilot_power    <- power_out$power
+oc_pilot_relpower <- power_out$rel_power
+
+rmrse_out <- compute_rmrse_block(
+  per_ds      = oc_pilot_per_ds,
+  true_long   = true_params,
+  scenario_id = 16,
+  pop_params  = pop_params_rmrse,
+  cov_params  = cov_params_rmrse
+)
+oc_pilot_rmrse_uncond <- rmrse_out$rmrse_uncond
+oc_pilot_rmrse_cond   <- rmrse_out$rmrse_cond
+
+## Timing summary + scale-up projection
+oc_pilot_timing <- tibble::tibble(
+  metric = c("median_min_per_ds", "max_min_per_ds", "total_pilot_min",
+             "projected_hours_100x16_seq",
+             "projected_hours_100x16_workers4"),
+  value  = c(
+    stats::median(oc_pilot_per_ds$t_total_min, na.rm = TRUE),
+    max(oc_pilot_per_ds$t_total_min,           na.rm = TRUE),
+    sum(oc_pilot_per_ds$t_total_min,           na.rm = TRUE),
+    stats::median(oc_pilot_per_ds$t_total_min, na.rm = TRUE) * 100 * 16 / 60,
+    stats::median(oc_pilot_per_ds$t_total_min, na.rm = TRUE) * 100 * 16 / 60 / 4
+  )
+)
+
+
+# ---- (P3.6) Persist OC artefacts --------------------------------------------
+dir.create(stage1_pilot_scn16_N80, showWarnings = FALSE, recursive = TRUE)
+saveRDS(oc_pilot_per_ds,
+        file.path(stage1_pilot_scn16_N80, "oc_pilot_per_ds.rds"))
+saveRDS(oc_pilot_power,
+        file.path(stage1_pilot_scn16_N80, "oc_pilot_power.rds"))
+saveRDS(oc_pilot_relpower,
+        file.path(stage1_pilot_scn16_N80, "oc_pilot_relpower.rds"))
+saveRDS(oc_pilot_rmrse_uncond,
+        file.path(stage1_pilot_scn16_N80, "oc_pilot_rmrse_uncond.rds"))
+saveRDS(oc_pilot_rmrse_cond,
+        file.path(stage1_pilot_scn16_N80, "oc_pilot_rmrse_cond.rds"))
+saveRDS(oc_pilot_timing,
+        file.path(stage1_pilot_scn16_N80, "oc_pilot_timing.rds"))
+
+
+# ---- SCALE-UP SCAFFOLD (NOT EXECUTED) --------------------------------------
+##  Future-ready template for the 16-scenario x 100-dataset study.
+##  Layered to keep behavior identical to the pilot when reused, but flips
+##  three knobs that matter at scale:
+##
+##    1. Resume:        force_rerun = FALSE (default).  Reruns of any ds
+##                       that already has its test_*.rds are instant.
+##    2. Refit policy:  "full" keeps cov / SEs (current pilot setting).
+##                       Switch to "skip" later to save ~30-60s per ds
+##                       if PowerCN / parFixed are not needed.
+##    3. Parallelism:   OUTER via future_pmap across (scenario x dataset);
+##                       INNER via runSCM workers = 1L to prevent nested
+##                       future plan thrashing on Windows.
+##
+##  Disk hygiene:
+##    * `keep_res = FALSE` drops the candidate trail (~50-200 MB per run);
+##       only the slim ~1-5 MB test_*.rds is kept per replicate.
+##    * At 1600 runs that's the difference between ~3 GB and ~500 GB of
+##       persistence.
+##
+##  Reproducibility:
+##    * `furrr_options(seed = TRUE)` gives reproducible RNG per worker.
+##    * `packages = ...` must list every package the worker R session needs
+##       (auto-detection sometimes misses S4 methods).
+
+if (FALSE) {  # guard: do not execute via source()
+
+  library(future)
+  library(furrr)
+
+  ## Pick worker count: leave 1 physical core free for OS / IDE.
+  n_workers_outer <- max(parallel::detectCores(logical = FALSE) - 1L, 1L)
+  message(sprintf("outer workers = %d (inner = 1)", n_workers_outer))
+
+  ## Plan grid: every (scenario, dataset) combination.
+  plan_grid <- tidyr::expand_grid(scenario_id = 1:16, dataset_id = 1:100)
+
+  ## Activate outer plan; revert when done.
+  oplan <- future::plan(future::multisession, workers = n_workers_outer)
+  on.exit(future::plan(oplan), add = TRUE)
+
+  ## Per-job invocation.  All driver args are explicit so workers don't have
+  ## to chase globals; furrr will serialize what's needed.
+  scaleup_results <- furrr::future_pmap(
+    plan_grid,
+    function(scenario_id, dataset_id) {
+      sim_long <- readRDS(file.path(
+        "simulated_virtual_dataset_eta_filtered_N80",
+        sprintf("sim_obs_scenario_%02d.rds", scenario_id)
+      ))
+      save_dir <- file.path(
+        "simulated_virtual_dataset_eta_filtered_N80",
+        sprintf("stage1_full_scn%02d_N80", scenario_id)
+      )
+      run_one_dataset_scn16_N80(
+        ds_id        = dataset_id,
+        save_dir     = save_dir,
+        sim_long     = sim_long,
+        refit_policy = "full",    # keep cov for now (per user request)
+        workers      = 1L,         # disable inner parallelism under outer
+        keep_res     = FALSE,      # drop heavy candidate trails
+        force_rerun  = FALSE,      # resume previously-completed datasets
+        scenario_id  = scenario_id
+      )
+    },
+    .options = furrr::furrr_options(
+      seed     = TRUE,
+      globals  = TRUE,
+      packages = c("nlmixr2", "nlmixr2est", "nlmixr2scm",
+                   "rxode2", "dplyr", "purrr", "tibble", "tidyr")
+    )
+  )
+
+  ## Optional: aggregate across scenarios using compute_power_block and
+  ## compute_rmrse_block helpers, looping over scenario_id.
+}
