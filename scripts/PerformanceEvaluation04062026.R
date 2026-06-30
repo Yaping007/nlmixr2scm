@@ -967,7 +967,6 @@ runSCM_traced <- function(label, ...) {
 ## ############################################################################
 
 ## ---- DATA Preparation ---------------------------------------------------------------
-
 ## NM-format dataset for SCENARIO = 16, DATASET = 1 (n=300)----
 out_dir_v2   <- "simulated_virtual_dataset_eta_filtered"
 stage1_dir16 <- file.path(out_dir_v2, "stage1_smoke_scn16_ds01")
@@ -2357,6 +2356,7 @@ run_one_dataset_scn16_N80 <- function(ds_id, save_dir,
 
 
 # ---- (P3.3) Run the 4-dataset pilot -----------------------------------------
+true_params <- readRDS(file.path(out_dir, "true_params_long.rds"))
 out_dir <- "simulated_virtual_dataset"
 out_dir_v2_N80   <- "simulated_virtual_dataset_eta_filtered_N80"
 
@@ -2427,6 +2427,52 @@ t_pilot_total <- system.time(
     rlang::set_names(sprintf("ds%02d", 1:4))
 )
 res_full_fast_ds01_T02 <- readRDS("simulated_virtual_dataset_eta_filtered_N80/stage1_pilot_scn16_N80_m02/res_full_fast_ds01.rds")
+## Loop over cached SCM screening results.
+pilot_dir <- "simulated_virtual_dataset_eta_filtered_N80/stage1_pilot_scn16_N80_m02"
+res_files <- list.files(pilot_dir,
+                        pattern = "^res_full_fast_ds\\d+\\.rds$",
+                        full.names = TRUE)
+
+scm_pilot_scn16_N80 <- purrr::map(res_files, function(rp) {
+  ds_tag    <- sub("^res_full_fast_(ds\\d+)\\.rds$", "\\1", basename(rp))
+  ds_id     <- as.integer(sub("^ds", "", ds_tag))
+  test_path <- file.path(pilot_dir, sprintf("test_full_fast_%s.rds", ds_tag))
+
+  message(sprintf(">>> [%s] loading SCM cache + refitting", ds_tag))
+  res_i  <- readRDS(rp)
+  t_scm  <- as.numeric(attr(res_i, "elapsed_s"))
+
+  t_pkg <- system.time(
+    test_i <- package_scm_result(
+      label       = sprintf("scn16_%s_N80_full_fast", ds_tag),
+      scm_res     = res_i,
+      runtime_sec = t_scm,
+      true_long   = true_params,
+      scenario_id = 16,
+      final_ctrl  = scm_focei_final     # tight-tol refit for cov + SE
+    )
+  )
+
+  saveRDS(test_i, test_path)
+  message(sprintf("<<< [%s] refit %.1fs, cov_done=%s, cn_cor=%.1f",
+                  ds_tag, t_pkg["elapsed"],
+                  isTRUE(test_i$cov_done),
+                  if (is.null(test_i$diag$cond_num_cor)) NA_real_
+                  else test_i$diag$cond_num_cor))
+
+  ## Mimic the driver's return shape so downstream OC code works unchanged.
+  list(
+    ds_id       = ds_id,
+    ds_tag      = ds_tag,
+    test        = test_i,
+    t_base_sec  = NA_real_,                       # base fit not re-timed here
+    t_scm_sec   = t_scm,
+    t_total_sec = t_scm,
+    resumed     = FALSE
+  )
+}) %>% rlang::set_names(sprintf("ds%02d", seq_along(res_files)))
+
+
 
 ## Loop summary: fresh runs vs cache hits vs failures.
 .summarize_pilot <- function(pilot_list) {
