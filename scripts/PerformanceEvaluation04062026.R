@@ -809,26 +809,42 @@ rel_err_one <- function(est_long, true_long, scenario_id) {
 ##     - runtime_sec:     wall-clock seconds for the runSCM call
 ##     - diag:            convergence diagnostics for the final fit
 ##     - parFixed:        nlmixr2 parFixedDf (Estimate, SE, %RSE, CI) when
-##                         the covariance was successfully attached; else NULL
-##     - cov_done:        TRUE iff getVarCov() populated $cov + parFixedDf
-##                         on the final fit; FALSE otherwise (e.g. singular
-##                         Hessian).  When FALSE: cond_num_cor stays NA and
-##                         PowerCN becomes unavailable for that dataset.
+##                         the refit succeeded; else NULL
+##     - cov_done:        TRUE iff the final_ctrl refit succeeded and the
+##                         resulting fit has a populated $cov + parFixedDf.
+##                         FALSE when (a) final_ctrl = NULL, or (b) the refit
+##                         hit an error.  When FALSE: cond_num_cor stays NA
+##                         and PowerCN becomes unavailable for that dataset.
 ##
-##   Covariance computation: instead of a full re-estimation (the old
-##   refit_final_model path that took ~60s/ds), we call nlme::getVarCov()
-##   on the SCM-final fit -- which dispatches to nlmixr2est's S3 method
-##   .setCov().  That sets maxOuterIterations=0L / maxInnerIterations=0L
-##   internally, so it computes the Hessian-based cov ONLY without any
-##   re-estimation (~5-20s/ds depending on dim(theta)).  Side effects on the
-##   fit env: populates $cov, $parFixedDf, $conditionNumberCov,
-##   $conditionNumberCor.  Failures (singular Hessian etc.) emit a warning
-##   and leave $cov as NULL -- diagnose_fit() then naturally returns
-##   cond_num_cor = NA, cov_ok = FALSE.
+##   Covariance computation (the refit path -- restored after the failed
+##   getVarCov() experiment).  Why a full refit instead of just cov:
+##     * getVarCov() / .setCov() freezes theta + ETAs at the SCM-final point
+##       (maxOuterIterations=0L, maxInnerIterations=0L) and only recomputes
+##       the Hessian.  But the screening control stops on sigdig=3 with
+##       atol=1e-6 / rtol=1e-4, so theta is NOT at a tight-tol stationary
+##       point.  The numerical Hessian at a non-stationary theta is ill-
+##       conditioned -> R-matrix inversion fails -> fallback to S-only cov
+##       -> SEs are 5-50x too small (S inflated by the systematic non-zero
+##       gradient).  No cov-time tolerance tightening can fix this -- only
+##       moving theta to a tight-tol stationary point does.
+##     * The refit (scm_focei_final: sigdig=4, atol=1e-8, rtol=1e-6,
+##       covMethod="r,s") re-converges theta + ETAs at tight tols and lands
+##       on a stationary point where R is well-conditioned.  Theta shifts
+##       are tiny (<3% on covariate effects in pilot ds01) but the cov
+##       quality is qualitatively different.
+##     * Cost: ~30-60s/ds, negligible against the ~15 min SCM screening.
+##
+##   final_ctrl:
+##     * NULL (default): skip the refit entirely.  selected / step_hist /
+##       final_est / rel_err / diag still populate from the screening-tol
+##       fit; parFixed = NULL and cov_done = FALSE.
+##     * scm_focei_final (or similar): trigger the refit.  Recommended
+##       whenever uncertainty / cond_num_cor / PowerCN are needed.
 ## ============================================================================
 package_scm_result <- function(label, scm_res, runtime_sec,
-                               true_long = true_params, scenario_id = 9) {
-  ## Pick the final fit. 
+                               true_long = true_params, scenario_id = 9,
+                               final_ctrl = NULL) {
+  ## Pick the final fit.
   .pickFit <- function(x) {
     if (is.null(x)) return(NULL)
     cand <- if (is.list(x) && length(x) >= 1L) x[[1L]] else x
@@ -837,25 +853,23 @@ package_scm_result <- function(label, scm_res, runtime_sec,
   final_fit <- .pickFit(scm_res$resBck)
   if (is.null(final_fit)) final_fit <- .pickFit(scm_res$resFwd)
 
-  ## Cov-only pass on the SCM-final fit (no re-estimation).
-  ## getVarCov() short-circuits when $cov already exists, otherwise it
-  ## triggers .setCov() with maxOuterIterations=0L / maxInnerIterations=0L.
-  ## We discard the returned matrix because the side effects (populating
-  ## $cov, $parFixedDf, $conditionNumberCor on the fit env) are all we need.
+  ## Optional refit with the diagnostic control.  On success the refit
+  ## REPLACES final_fit so every downstream extraction (estimates, rel_err,
+  ## diag, parFixed) reflects the tight-tol stationary point.
   cov_done <- FALSE
-  if (!is.null(final_fit)) {
-    if (!is.null(final_fit$cov) && all(is.finite(diag(final_fit$cov)))) {
-      ## Cov already there (rare: someone fit with covMethod != "" upstream)
-      cov_done <- TRUE
-    } else {
-      tryCatch({
-        invisible(nlme::getVarCov(final_fit))
-        cov_done <- !is.null(final_fit$cov) &&
-                      all(is.finite(diag(final_fit$cov)))
-      }, error = function(e) {
-        warning("package_scm_result(): getVarCov() failed: ",
+  if (!is.null(final_fit) && !is.null(final_ctrl)) {
+    refit <- tryCatch(
+      nlmixr2(final_fit$ui, nlme::getData(final_fit),
+              est = final_fit$est, control = final_ctrl),
+      error = function(e) {
+        warning("package_scm_result(): refit failed: ",
                 conditionMessage(e), call. = FALSE)
-      })
+        NULL
+      }
+    )
+    if (!is.null(refit)) {
+      final_fit <- refit
+      cov_done  <- !is.null(refit$cov) && all(is.finite(diag(refit$cov)))
     }
   }
 
@@ -895,12 +909,11 @@ package_scm_result <- function(label, scm_res, runtime_sec,
     rel_err_one(final_est, true_long, scenario_id)
   } else NULL
   diag      <- if (!is.null(final_fit)) diagnose_fit(final_fit) else NULL
-  ## parFixedDf is only populated when covMethod was non-empty, which after
-  ## a successful getVarCov() means cov_done == TRUE.
+  ## parFixedDf is only populated when the refit succeeded.
   parFixed  <- if (cov_done) final_fit$parFixedDf else NULL
 
   ## --- Packaged result -----------------------------------------------------
-  ## `step_hist` is the ONLY view of the search trace we keep.  
+  ## `step_hist` is the ONLY view of the search trace we keep.
   list(
     label       = label,
     selected    = selected,
@@ -1659,9 +1672,10 @@ saveRDS(part2_summary16_N80, file.path(stage1_dir16_N80, "part2_summary.rds"))
 
 # ---- (1) Two-tier foceiControls --------------------------------------------
 ##   _screen: applied to every SCM candidate.  No cov, no tables, loose tols.
-##   _final:  HISTORICAL -- previously fed to refit_final_model() for a full
-##            re-estimation.  Now retained only as a hand-off reference; the
-##            post-hoc cov pass uses getVarCov() (no control object needed).
+##   _final:  tight tols + covMethod="r,s" + calcTables=TRUE.  Fed to
+##            package_scm_result(final_ctrl = scm_focei_final) for the
+##            single post-SCM refit that gives trustworthy SE / cond_num_cor
+##            (see package_scm_result docstring for why a refit is needed).
 
 scm_focei_screen <- nlmixr2est::foceiControl(
   sigdig             = 3,
@@ -2176,28 +2190,22 @@ compute_rmrse_block <- function(per_ds, true_long, scenario_id,
 ##    * Set `force_rerun = TRUE` to redo a specific dataset (or just delete
 ##      its test_*.rds before calling).
 ##
-##  Per-step SCM cache (audit trail):
-##    * runSCM is invoked with `saveModels = TRUE, restart = FALSE,
-##      outputDir = <save_dir>/scm_<ds_tag>/`.  Every accepted forward /
-##      backward step writes 3 files to that subdir: `*_table_*.rds`,
-##      `*_completetable_*.rds`, `*_fit_*.rds`.  Useful for offline
-##      diagnosis of an anomalous run without re-running SCM.
-##    * If a previous attempt crashed mid-SCM, the subdir is left half-
-##      populated.  We defensively wipe it BEFORE calling runSCM, since
-##      the package errors out on an existing outputDir + restart=FALSE
-##      (nlmixr2scm/R/scm.R L425).  Cross-session resume of SCM itself is
-##      therefore not currently supported -- only whole-dataset resume
-##      via test_*.rds.
-##    * `keep_res = FALSE` (recommended for scale-up) ALSO unlinks the
-##      scm_<ds_tag>/ subdir after a successful test_*.rds save, keeping
-##      working-set disk tiny (~MB/ds instead of ~30 MB/ds).
-##
 ##  Covariance:
-##    * Always attempted via getVarCov() on the SCM-final fit.  On singular
-##      Hessian / numerical failure we emit a warning and set cov_done=FALSE;
-##      cond_num_cor stays NA and PowerCN becomes unavailable for that ds.
-##      No user toggle -- the cov pass is cheap (~5-20s) and conceptually
-##      always desirable.
+##    * The driver passes `final_ctrl = scm_focei_final` to
+##      package_scm_result(), which re-fits the SCM-final model ONCE with
+##      tight tols + covMethod="r,s".  Cost: ~30-60s/ds (negligible vs the
+##      ~15 min SCM screening).  Yields trustworthy parFixed / cond_num_cor.
+##    * Why a full refit rather than getVarCov() on the screening-tol fit:
+##      the screening optimum is not a tight-tol stationary point, so the
+##      numerical Hessian there is ill-conditioned and the cov calculation
+##      falls back to a deflated S-only matrix.  See package_scm_result()
+##      docstring for the full explanation.
+##
+##  saveModels = FALSE inside runSCM:
+##    * The package's per-accepted-step audit trail (scm_<ds_tag>/...rds)
+##      is disabled to keep the working-set disk small and avoid OneDrive
+##      sync overhead on each step.  The only persisted artefact per ds is
+##      the packaged `test_full_fast_<ds_tag>.rds`.
 ##
 ##  Parallelism:
 ##    * `workers` controls INNER parallelism: candidates within one SCM step.
@@ -2223,7 +2231,6 @@ run_one_dataset_scn16_N80 <- function(ds_id, save_dir,
   ## -- Resume check FIRST: before any expensive work or promise forcing
   dir.create(save_dir, showWarnings = FALSE, recursive = TRUE)
   test_path <- file.path(save_dir, sprintf("test_full_fast_%s.rds", ds_tag))
-  scm_dir   <- file.path(save_dir, sprintf("scm_%s", ds_tag))
   if (!force_rerun && file.exists(test_path)) {
     message(sprintf(">>> [%s] cached, skipping (delete %s or pass force_rerun=TRUE to redo)",
                     ds_tag, basename(test_path)))
@@ -2236,15 +2243,6 @@ run_one_dataset_scn16_N80 <- function(ds_id, save_dir,
       t_total_sec = NA_real_,
       resumed     = TRUE
     ))
-  }
-
-  ## -- Defensive: wipe any stale per-step cache left over from a previous
-  ##    crashed attempt.  We get here only if test_path doesn't exist, so
-  ##    any leftover scm_dir is partial.  Required because runSCM() refuses
-  ##    to write into a pre-existing outputDir when restart=FALSE
-  ##    (nlmixr2scm/R/scm.R L425).
-  if (dir.exists(scm_dir)) {
-    unlink(scm_dir, recursive = TRUE, force = TRUE)
   }
 
   message(sprintf("\n>>> [%s] starting dataset %d at %s",
@@ -2298,9 +2296,7 @@ run_one_dataset_scn16_N80 <- function(ds_id, save_dir,
       shapes      = shapes_vec,
       searchType  = "scm",
       control     = screen_ctrl,
-      saveModels  = TRUE,        # per-accepted-step audit trail
-      restart     = FALSE,       # honor any pre-existing scm_dir (none after defensive unlink)
-      outputDir   = scm_dir,     # per-ds subdir of save_dir
+      saveModels  = FALSE,       # skip per-step audit trail (OneDrive sync tax)
       workers     = workers,
       print       = 0,           # silence per-iteration FOCEi noise
       maxRetries  = 0L,
@@ -2316,26 +2312,20 @@ run_one_dataset_scn16_N80 <- function(ds_id, save_dir,
                                sprintf("res_full_fast_%s.rds", ds_tag)))
     }
 
-    ## package_scm_result() now ALWAYS attempts a post-hoc cov pass via
-    ## getVarCov() on the SCM-final fit (no re-estimation).  Returns
-    ## cov_done = FALSE if the Hessian is singular; downstream OC code
+    ## package_scm_result() refits the SCM-final model once with scm_focei_final
+    ## (tight tols + covMethod="r,s") to obtain trustworthy SE / cond_num_cor.
+    ## Returns cov_done = FALSE if the refit hits an error; downstream OC code
     ## handles that by filtering on cond_num_cor < cn_cor_cut.
     test_i <- package_scm_result(
       label         = sprintf("scn%02d_%s_N80_full_fast", scenario_id, ds_tag),
       scm_res       = res_i,
       runtime_sec   = t_scm_sec,
       true_long     = true_long,         # explicit -- no lazy global lookup
-      scenario_id   = scenario_id
+      scenario_id   = scenario_id,
+      final_ctrl    = scm_focei_final    # tight-tol refit for cov + SE
     )
 
     saveRDS(test_i, test_path)
-
-    ## When the caller doesn't want bulky per-dataset artefacts (typical
-    ## scale-up), drop the per-step audit subdir now that test_path holds
-    ## the only thing OC aggregation needs.  Saves ~30 MB / ds.
-    if (!keep_res && dir.exists(scm_dir)) {
-      unlink(scm_dir, recursive = TRUE, force = TRUE)
-    }
 
     message(sprintf("<<< [%s] done in %.1f min (base %.1fs + scm %.1fs, cov=%s)",
                     ds_tag, (t_base_sec + t_scm_sec) / 60,
@@ -2376,8 +2366,11 @@ sim_obs_scn16_N80 <- readRDS(file.path(out_dir_v2_N80, "sim_obs_scenario_16.rds"
 stage1_pilot_scn16_N80 <- file.path(out_dir_v2_N80,
                                      "stage1_pilot_scn16_N80")
 
+## Pilot output dir for the corrected pipeline (refit restored, saveModels=FALSE).
+## The _m01 copy contains results from the failed getVarCov() experiment and
+## is kept for reference / diff comparisons.
 stage1_pilot_scn16_N80 <- file.path(out_dir_v2_N80,
-                                     "stage1_pilot_scn16_N80_m01")
+                                     "stage1_pilot_scn16_N80_m02")
 
 base_2cmt_oral_linCmt <- function() {
   ini({
@@ -2433,6 +2426,7 @@ t_pilot_total <- system.time(
   ) %>%
     rlang::set_names(sprintf("ds%02d", 1:4))
 )
+res_full_fast_ds01_T02 <- readRDS("simulated_virtual_dataset_eta_filtered_N80/stage1_pilot_scn16_N80_m02/res_full_fast_ds01.rds")
 
 ## Loop summary: fresh runs vs cache hits vs failures.
 .summarize_pilot <- function(pilot_list) {
