@@ -1,0 +1,30 @@
+\begin{table}[!h]
+\centering
+\caption{\label{tab:cov-cor-preservation}Preservation of pairwise Pearson correlations of covariates in bootstrap virtual populations, referenced to NHANES 2021--2023. NHANES column: single-sample Pearson $r$. Cohort columns: pooled $r$ across all subjects $\pm$ SD across 250 bootstrap datasets. $|\Delta r|$ = $|\text{pooled } r - \text{NHANES } r|$.}
+\centering
+\begin{tabular}[t]{lcccc}
+\toprule
+Covariate pair & \makecell{NHANES\\(n = 3576)} & \makecell{$N = 40$\\(250 datasets)} & \makecell{$N = 80$\\(250 datasets)} & \makecell{$N = 300$\\(250 datasets)}\\
+\midrule
+\addlinespace[0.3em]
+\multicolumn{5}{l}{\textbf{Pairwise correlation ($r \pm$ SD)}}\\
+\cellcolor{gray!10}{\hspace{1em}BMI–BW} & \cellcolor{gray!10}{0.88} & \cellcolor{gray!10}{0.88 ± 0.03} & \cellcolor{gray!10}{0.88 ± 0.02} & \cellcolor{gray!10}{0.88 ± 0.01}\\
+\hspace{1em}BMI–CrCL & 0.50 & 0.50 ± 0.07 & 0.50 ± 0.05 & 0.49 ± 0.03\\
+\cellcolor{gray!10}{\hspace{1em}BW–CrCL} & \cellcolor{gray!10}{0.58} & \cellcolor{gray!10}{0.59 ± 0.06} & \cellcolor{gray!10}{0.59 ± 0.04} & \cellcolor{gray!10}{0.58 ± 0.02}\\
+\hspace{1em}BMI–RACE & 0.18 & 0.19 ± 0.07 & 0.18 ± 0.05 & 0.18 ± 0.02\\
+\cellcolor{gray!10}{\hspace{1em}BW–RACE} & \cellcolor{gray!10}{0.23} & \cellcolor{gray!10}{0.23 ± 0.06} & \cellcolor{gray!10}{0.24 ± 0.04} & \cellcolor{gray!10}{0.23 ± 0.02}\\
+\hspace{1em}CrCL–RACE & 0.04 & 0.04 ± 0.07 & 0.04 ± 0.06 & 0.04 ± 0.03\\
+\cellcolor{gray!10}{\hspace{1em}BMI–SEX} & \cellcolor{gray!10}{-0.04} & \cellcolor{gray!10}{-0.05 ± 0.07} & \cellcolor{gray!10}{-0.04 ± 0.05} & \cellcolor{gray!10}{-0.05 ± 0.03}\\
+\hspace{1em}BW–SEX & 0.29 & 0.28 ± 0.07 & 0.29 ± 0.05 & 0.29 ± 0.02\\
+\cellcolor{gray!10}{\hspace{1em}CrCL–SEX} & \cellcolor{gray!10}{0.08} & \cellcolor{gray!10}{0.08 ± 0.07} & \cellcolor{gray!10}{0.08 ± 0.05} & \cellcolor{gray!10}{0.08 ± 0.03}\\
+\hspace{1em}RACE–SEX & 0.00 & -0.03 ± 0.00 & 0.01 ± 0.00 & 0.00 ± 0.03\\
+\addlinespace[0.3em]
+\multicolumn{5}{l}{\textbf{Preservation summary}}\\
+\cellcolor{gray!10}{\hspace{1em}Pairs within ±0.05} & \cellcolor{gray!10}{—} & \cellcolor{gray!10}{20/20} & \cellcolor{gray!10}{20/20} & \cellcolor{gray!10}{20/20}\\
+\hspace{1em}Max |Δr| vs NHANES & — & 0.036 & 0.011 & 0.005\\
+\cellcolor{gray!10}{\hspace{1em}Mean |Δr| vs NHANES} & \cellcolor{gray!10}{—} & \cellcolor{gray!10}{0.010} & \cellcolor{gray!10}{0.004} & \cellcolor{gray!10}{0.002}\\
+\bottomrule
+\multicolumn{5}{l}{\textsuperscript{a} Stratified bootstrap by SEX $\times$ RACE with rejection gate $|\text{cor} - \text{NHANES}| \le 0.05$ on the upper triangle; tolerance scaled by $\sqrt{300 / N}$.}\\
+\multicolumn{5}{l}{\textsuperscript{b} SD $= 0$ for RACE--SEX at $N = 40$ and $N = 80$ reflects fixed per-cell counts in the SEX $\times$ RACE stratification.}\\
+\end{tabular}
+\end{table}
