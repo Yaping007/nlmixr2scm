@@ -2901,9 +2901,9 @@ match_selected_to_truth <- function(selected, true_rel) {
     exact_match = (nrow(false_pos) == 0L) && (nrow(miss) == 0L)
   )
 }
-compute_power_block <- function(per_ds, n_true, cn_sqrt_cut = 1000) {
+compute_power_block <- function(per_ds, n_true, cn_cor_cut = 1000) {
   N      <- nrow(per_ds)
-  ok_cn  <- per_ds$cond_num_sqrt < cn_sqrt_cut & !is.na(per_ds$cond_num_sqrt)
+  ok_cn  <- per_ds$cond_num_cor < cn_cor_cut & !is.na(per_ds$cond_num_cor)
   ok_min <- per_ds$converged
   ok_min[is.na(ok_min)] <- FALSE
 
@@ -2942,15 +2942,20 @@ compute_rmrse_block <- function(per_ds, true_long, scenario_id,
                   exact_match = per_ds$exact_match[i])
   }) %>%
     dplyr::inner_join(truth, by = "parameter") %>%
-    dplyr::mutate(sq_rel = ((estimate - true_value) / true_value)^2)
+    dplyr::mutate(
+      rel_err = (estimate - true_value) / true_value,
+      sq_rel  = rel_err^2,
+      abs_rel = abs(rel_err)
+    )
 
   rmrse_one <- function(df) {
     df <- dplyr::filter(df, is.finite(sq_rel))
     if (nrow(df) == 0L) {
-      tibble::tibble(RMRSE_pct = NA_real_, n_used = 0L)
+      tibble::tibble(RMRSE_pct = NA_real_, MARE_pct = NA_real_, n_used = 0L)
     } else {
       tibble::tibble(
         RMRSE_pct = 100 * sqrt(mean(df$sq_rel)),
+        MARE_pct  = 100 * stats::median(df$abs_rel),
         n_used    = nrow(df)
       )
     }
@@ -2973,13 +2978,11 @@ run_one_dataset_scn16_N80 <- function(ds_id, save_dir,
                                        sim_long     = sim_obs_scn16_N80,
                                        base_fn      = base_2cmt_oral_linCmt,
                                        screen_ctrl  = scm_focei_screen,
-                                       final_ctrl   = scm_focei_final,
                                        vars_vec     = scm16_vars,
                                        covars_vec   = scm16_covars,
                                        catvars_vec  = scm16_catvars,
                                        shapes_vec   = scm16_shapes,
                                        true_long    = true_params,
-                                       refit_policy = c("full", "skip"),
                                        workers      = 3L,
                                        keep_res     = TRUE,
                                        force_rerun  = FALSE,
@@ -3006,17 +3009,10 @@ run_one_dataset_scn16_N80 <- function(ds_id, save_dir,
   message(sprintf("\n>>> [%s] starting dataset %d at %s",
                   ds_tag, ds_id, format(Sys.time(), "%H:%M:%S")))
 
-  ## -- Resolve refit policy to a control object (or NULL for skip)
-  refit_policy <- match.arg(refit_policy)
-  refit_ctrl <- switch(refit_policy,
-                       full = final_ctrl,
-                       skip = NULL)
-
   ## -- Pre-flight: surface missing-dependency errors BEFORE expensive SCM.
   ##    Force evaluation of every promise so a missing true_params (or any
   ##    other default argument) fails loudly here, not silently 25 min later.
   force(true_long); force(sim_long); force(base_fn); force(screen_ctrl)
-  if (!is.null(refit_ctrl)) force(refit_ctrl)
 
   res_i <- NULL  # placeholder visible to the error handler
 
@@ -3065,15 +3061,15 @@ run_one_dataset_scn16_N80 <- function(ds_id, save_dir,
       scm_res       = res_i,
       runtime_sec   = t_scm_sec,
       true_long     = true_long,         # explicit -- no lazy global lookup
-      scenario_id   = scenario_id,
-      refit_control = refit_ctrl         # NULL for "skip", else final_ctrl
+      scenario_id   = scenario_id
     )
 
     saveRDS(test_i, test_path)
 
-    message(sprintf("<<< [%s] done in %.1f min (base %.1fs + scm %.1fs, refit=%s)",
+    message(sprintf("<<< [%s] done in %.1f min (base %.1fs + scm %.1fs, cov=%s)",
                     ds_tag, (t_base_sec + t_scm_sec) / 60,
-                    t_base_sec, t_scm_sec, refit_policy))
+                    t_base_sec, t_scm_sec,
+                    if (isTRUE(test_i$cov_done)) "ok" else "FAIL"))
 
     list(
       ds_id       = ds_id,
@@ -3228,13 +3224,11 @@ run_one_dataset_scn16_N80 <- function(ds_id, save_dir,
                                        sim_long     = sim_obs_scn16_N80,
                                        base_fn      = base_2cmt_oral_linCmt,
                                        screen_ctrl  = scm_focei_screen,
-                                       final_ctrl   = scm_focei_final,
                                        vars_vec     = scm16_vars,
                                        covars_vec   = scm16_covars,
                                        catvars_vec  = scm16_catvars,
                                        shapes_vec   = scm16_shapes,
                                        true_long    = true_params,
-                                       refit_policy = c("full", "skip"),
                                        workers      = 3L,
                                        keep_res     = TRUE,
                                        force_rerun  = FALSE,
@@ -3261,12 +3255,6 @@ run_one_dataset_scn16_N80 <- function(ds_id, save_dir,
   message(sprintf("\n>>> [%s] starting dataset %d at %s",
                   ds_tag, ds_id, format(Sys.time(), "%H:%M:%S")))
 
-  ## -- Resolve refit policy to a control object (or NULL for skip)
-  refit_policy <- match.arg(refit_policy)
-  refit_ctrl <- switch(refit_policy,
-                       full = final_ctrl,
-                       skip = NULL)
-
   ## -- Pre-flight (a): every helper function the driver + package_scm_result()
   ##    transitively call must be in scope.  Promise forcing only catches
   ##    missing *arguments*; missing *functions* fail silently 15 min into
@@ -3276,7 +3264,6 @@ run_one_dataset_scn16_N80 <- function(ds_id, save_dir,
   needed_fns <- c("to_nm_dataset", "runSCM_traced", "package_scm_result",
                   "diagnose_fit", "extract_params_long", "rel_err_one",
                   "match_selected_to_truth")
-  if (!is.null(refit_ctrl)) needed_fns <- c(needed_fns, "refit_final_model")
   missing_fns <- needed_fns[!vapply(needed_fns, exists, logical(1),
                                     mode = "function", inherits = TRUE)]
   if (length(missing_fns)) {
@@ -3289,7 +3276,6 @@ run_one_dataset_scn16_N80 <- function(ds_id, save_dir,
   ##    true_params (or any other default argument) fails loudly here,
   ##    not silently 25 min later inside package_scm_result().
   force(true_long); force(sim_long); force(base_fn); force(screen_ctrl)
-  if (!is.null(refit_ctrl)) force(refit_ctrl)
 
   res_i <- NULL  # placeholder visible to the error handler
 
@@ -3338,15 +3324,15 @@ run_one_dataset_scn16_N80 <- function(ds_id, save_dir,
       scm_res       = res_i,
       runtime_sec   = t_scm_sec,
       true_long     = true_long,         # explicit -- no lazy global lookup
-      scenario_id   = scenario_id,
-      refit_control = refit_ctrl         # NULL for "skip", else final_ctrl
+      scenario_id   = scenario_id
     )
 
     saveRDS(test_i, test_path)
 
-    message(sprintf("<<< [%s] done in %.1f min (base %.1fs + scm %.1fs, refit=%s)",
+    message(sprintf("<<< [%s] done in %.1f min (base %.1fs + scm %.1fs, cov=%s)",
                     ds_tag, (t_base_sec + t_scm_sec) / 60,
-                    t_base_sec, t_scm_sec, refit_policy))
+                    t_base_sec, t_scm_sec,
+                    if (isTRUE(test_i$cov_done)) "ok" else "FAIL"))
 
     list(
       ds_id       = ds_id,
