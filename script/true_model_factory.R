@@ -35,7 +35,11 @@
 PSN_INIT_CONT   <- 0.001                          # continuous cov init
 PSN_INIT_CAT    <- 0.001                          # categorical cov init
 BOUNDARY_WIDE   <- c(-1e5, 1e5)                   # PsN default
-BOUNDARY_NARROW <- c(-10, 10)                     # narrow test
+BOUNDARY_NARROW <- c(-5, 5)                       # narrow test (tightened
+                                                  # from c(-10, 10) on
+                                                  # 2026-07-09 to further
+                                                  # constrain continuous-cov
+                                                  # thetas)
 
 # ---- Build one scenario x boundary UI function -----------------------------
 #   Returns:
