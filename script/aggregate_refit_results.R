@@ -146,7 +146,7 @@ load_one_refit_rds <- function(path) {
 # ---- File discovery --------------------------------------------------------
 discover_refit_files <- function(root       = "output",
                                  cohorts    = c("N40", "N80", "N300"),
-                                 boundaries = c("none", "wide", "narrow"),
+                                 boundaries = c("none", "wide", "narrow", "tight"),
                                  scenarios  = 2:16) {
   purrr::map_dfr(cohorts, function(co) {
     co_dir <- file.path(root, paste0("refit_true_", co))
@@ -362,4 +362,40 @@ if (!interactive() && length(commandArgs(trailingOnly = TRUE)) > 0L) {
     }
   }
   aggregate_refit_run(root = root)
+}
+
+
+setwd("C:/Users/LIUYA8J/OneDrive - Novartis Pharma AG/Internship/GithubRepo/nlmixr2scm")
+source("script/aggregate_refit_results.R")
+
+res <- aggregate_refit_run(root = "outputs", verbose = TRUE)
+
+cat("\n--- diag_long (10 datasets x 3 boundaries) ---\n")
+print(res$diag_long[, c("cohort","scenario","boundary","dataset_id",
+                        "status","min_suc","cov_step","phys_bnd",
+                        "objf","cond_num_cor","runtime_sec")], n = 30)
+## Diagnostic rates per cell
+cat("=== Table-3 style diagnostic rates (per boundary cell) ===\n")
+print(res$diag_rates)
+
+## RMSE for the 4 covariate thetas, all fits
+cat("\n=== RMSE (all 10 fits) - covariate thetas ===\n")
+cov_par <- c("CLBW","CLcrCL","VcBW","VcSEX")
+print(dplyr::filter(res$rmse_all, parameter %in% cov_par) |>
+      dplyr::arrange(parameter, boundary))
+
+## Success-filtered RMSE (min_suc & cov_step & !phys_bnd)
+cat("\n=== RMSE (success-only: min_suc & cov_step & !phys_bnd) ===\n")
+print(dplyr::filter(res$rmse_success, parameter %in% cov_par) |>
+      dplyr::arrange(parameter, boundary))
+
+## Wide pivot for a quick Table-3 view
+cat("\n=== Table-3 wide (scenario x boundary_metric) ===\n")
+print(table3_diag_wide(res$diag_rates, "N300",
+                       c("MinSuc_pct","CovStep_pct","PhysBnd_pct","MedCN")))
+
+cat("\n=== RMSE across boundaries per covariate theta ===\n")
+for (p in cov_par) {
+  cat(sprintf("\n-- %s --\n", p))
+  print(table3_rmse_wide(res$rmse_all, "N300", p))
 }

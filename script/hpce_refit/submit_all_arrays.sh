@@ -3,44 +3,50 @@
 # submit_all_arrays.sh
 # ------------------------------------------------------------------------------
 # Submit ALL LSF job arrays for the refit-true-model study.  One array per
-# (cohort, scenario, boundary) triple:
+# (cohort, scenario, boundary) triple.
 #
-#   scenario 1        -> skip (no covariates -> no thetas to bound)
-#   scenario 2        -> single boundary ("none"): only categorical TH_SEX_VC,
-#                        which is always unbounded regardless of config
-#   scenarios 3..16   -> three boundaries: none, wide, narrow
+# Boundary tiers (see script/true_model_factory.R):
+#   * none    -> no bounds on continuous cov thetas
+#   * wide    -> c(-1e5, 1e5)       PsN default
+#   * narrow  -> c(-10,  10)        paper's narrow tier
+#   * tight   -> c(-5,   5)         sensitivity tier (added 2026-07-09)
 #
-# Combos per cohort: 1 + 14 * 3 = 43
-# Cohorts:           N40, N80, N300  (3)
-# Total arrays:      43 * 3 = 129
-# Total fits (pilot, 10 ds):  129 * 10  = 1,290
-# Total fits (full,  250 ds): 129 * 250 = 32,250
+# Scenario rules:
+#   scenario 1      -> skipped entirely (no covariates -> no thetas to bound)
+#   scenario 2      -> only categorical TH_SEX_VC (always unbounded); the only
+#                      meaningful boundary is "none". Submitted only when the
+#                      filter includes "none".
+#   scenarios 3..16 -> honor whatever is in BOUNDARIES (default: none wide narrow)
 #
-# Usage:
-#   bash <hpce_dir>/submit_all_arrays.sh <n_datasets> [max_parallel] [cohorts...]
+# Filter via ENV VARS (preferred over positional cohort args):
+#   COHORTS='N300'          -> only submit that cohort (default: N40 N80 N300)
+#   BOUNDARIES='narrow'     -> only that boundary  (default: none wide narrow)
+#   BOUNDARIES='none wide'  -> multiple; space-separated
+#   BOUNDARIES='tight'      -> the new sensitivity tier only
 #
 # The script auto-detects its own directory, so <hpce_dir> can be
 # scripts/hpce/, script/hpce_refit/, or any path you choose.
 # Override REPO_ROOT via env var if the scripts are not exactly 2 levels
 # below the repo root.
 #
-# Filter via ENV VARS (preferred over positional cohort args):
-#   COHORTS='N300'          -> only submit that cohort (default: N40 N80 N300)
-#   BOUNDARIES='narrow'     -> only that boundary (default: none wide narrow)
-#   BOUNDARIES='none wide'  -> multiple; space-separated
+# Usage:
+#   bash <hpce_dir>/submit_all_arrays.sh <n_datasets> [max_parallel] [cohorts...]
 #
 # Examples:
-#   # Pilot (10 datasets per combo, all 3 cohorts, all boundaries):
+#   # Pilot (10 datasets per combo, all 3 cohorts, paper's 3 boundaries):
 #   bash script/hpce_refit/submit_all_arrays.sh 10 50
 #
-#   # Full run (250 datasets per combo, all 3 cohorts, all boundaries):
+#   # Full run (250 datasets per combo, all 3 cohorts, paper's 3 boundaries):
 #   bash script/hpce_refit/submit_all_arrays.sh 250 100
 #
-#   # Only N=300 cohort, 250 datasets (positional, all boundaries):
+#   # Only N=300 cohort, 250 datasets (positional; all 3 boundaries):
 #   bash script/hpce_refit/submit_all_arrays.sh 250 100 N300
 #
 #   # Only N=300 x narrow, 250 datasets (env-var filter):
 #   BOUNDARIES=narrow COHORTS=N300 bash script/hpce_refit/submit_all_arrays.sh 250 50
+#
+#   # Only N=300 x tight (new sensitivity tier), 250 datasets:
+#   BOUNDARIES=tight  COHORTS=N300 bash script/hpce_refit/submit_all_arrays.sh 250 50
 # ==============================================================================
 
 set -euo pipefail
@@ -63,30 +69,34 @@ else
 fi
 
 # ---- Boundary filter (env-var only) ---------------------------------------
-# Default = full grid (none wide narrow).
-# Override with:  BOUNDARIES='narrow'  or  BOUNDARIES='none wide'
+# Default = paper's 3 tiers (none wide narrow).  The new "tight" tier
+# is NOT in the default set -- request it explicitly via BOUNDARIES=tight.
 if [ -n "${BOUNDARIES:-}" ]; then
     read -r -a BND_FILTER <<< "$BOUNDARIES"
 else
     BND_FILTER=(none wide narrow)
 fi
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-# ---- (scenario, boundaries) map --------------------------------------------
-# Use two parallel arrays (bash 3 compatible; assoc arrays need bash 4+)
-SCENARIOS=(2 3 4 5 6 7 8 9 10 11 12 13 14 15 16)
-BOUNDARIES_FOR_2="none"
-BOUNDARIES_FOR_MULTI="none wide narrow"
-
-# Return 0 iff $1 is in BND_FILTER
-_want_bnd() {
+# Validate every requested boundary against the master list.
+ALL_BOUNDARIES=(none wide narrow tight)
+_is_valid_bnd() {
     local needle="$1" b
-    for b in "${BND_FILTER[@]}"; do
+    for b in "${ALL_BOUNDARIES[@]}"; do
         [ "$b" = "$needle" ] && return 0
     done
     return 1
 }
+for b in "${BND_FILTER[@]}"; do
+    if ! _is_valid_bnd "$b"; then
+        echo "ERROR: boundary '$b' not one of: ${ALL_BOUNDARIES[*]}" >&2
+        exit 1
+    fi
+done
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ---- Scenarios --------------------------------------------------------------
+SCENARIOS=(2 3 4 5 6 7 8 9 10 11 12 13 14 15 16)
 
 # ---- Sanity check -----------------------------------------------------------
 if ! [[ "$NDS" =~ ^[0-9]+$ ]] || [ "$NDS" -lt 1 ]; then
@@ -95,17 +105,16 @@ if ! [[ "$NDS" =~ ^[0-9]+$ ]] || [ "$NDS" -lt 1 ]; then
 fi
 
 # ---- Count expected submissions for the banner ----------------------------
+# Rules:
+#   scn == 2 -> only submit when "none" is in the filter
+#   scn > 2  -> submit for every boundary in the filter
 n_expected=0
 for SCN in "${SCENARIOS[@]}"; do
-    if [ "$SCN" -eq 2 ]; then
-        avail="$BOUNDARIES_FOR_2"
-    else
-        avail="$BOUNDARIES_FOR_MULTI"
-    fi
-    for BND in $avail; do
-        if _want_bnd "$BND"; then
-            n_expected=$((n_expected + ${#COHORTS_ARR[@]}))
+    for BND in "${BND_FILTER[@]}"; do
+        if [ "$SCN" -eq 2 ] && [ "$BND" != "none" ]; then
+            continue
         fi
+        n_expected=$((n_expected + ${#COHORTS_ARR[@]}))
     done
 done
 
@@ -127,16 +136,12 @@ fi
 n_submitted=0
 for COHORT in "${COHORTS_ARR[@]}"; do
     for SCN in "${SCENARIOS[@]}"; do
-        if [ "$SCN" -eq 2 ]; then
-            avail="$BOUNDARIES_FOR_2"
-        else
-            avail="$BOUNDARIES_FOR_MULTI"
-        fi
-        for BND in $avail; do
-            if _want_bnd "$BND"; then
-                bash "$HERE/submit_one_array.sh" "$COHORT" "$SCN" "$BND" "$NDS" "$MAXPAR"
-                n_submitted=$((n_submitted + 1))
+        for BND in "${BND_FILTER[@]}"; do
+            if [ "$SCN" -eq 2 ] && [ "$BND" != "none" ]; then
+                continue
             fi
+            bash "$HERE/submit_one_array.sh" "$COHORT" "$SCN" "$BND" "$NDS" "$MAXPAR"
+            n_submitted=$((n_submitted + 1))
         done
     done
 done
