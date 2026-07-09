@@ -21,7 +21,8 @@
 # Boundary configurations (applied only to continuous covariate thetas):
 #   * "none"   - bare initial estimate, no bounds
 #   * "wide"   - c(-1e5, init, 1e5)   (PsN default from paper Fig 7)
-#   * "narrow" - c(-10,  init, 10)
+#   * "narrow" - c(-10,  init, 10)    (paper's narrow tier)
+#   * "tight"  - c(-5,   init, 5)     (sensitivity tier added 2026-07-09)
 #
 # Initial estimates for continuous covariate thetas: 0.001 (PsN convention,
 # paper Fig 7).  This is deliberately far from the true value so that the
@@ -35,11 +36,10 @@
 PSN_INIT_CONT   <- 0.001                          # continuous cov init
 PSN_INIT_CAT    <- 0.001                          # categorical cov init
 BOUNDARY_WIDE   <- c(-1e5, 1e5)                   # PsN default
-BOUNDARY_NARROW <- c(-5, 5)                       # narrow test (tightened
-                                                  # from c(-10, 10) on
-                                                  # 2026-07-09 to further
-                                                  # constrain continuous-cov
-                                                  # thetas)
+BOUNDARY_NARROW <- c(-10, 10)                     # paper's narrow tier
+BOUNDARY_TIGHT  <- c(-5, 5)                       # added 2026-07-09: tighter
+                                                  # sensitivity tier below
+                                                  # BOUNDARY_NARROW
 
 # ---- Build one scenario x boundary UI function -----------------------------
 #   Returns:
@@ -53,7 +53,7 @@ BOUNDARY_NARROW <- c(-5, 5)                       # narrow test (tightened
 #         estimated_cont_params <- character vector of continuous cov names
 #         categorical_params    <- character vector of cat cov names
 #         fn_text               <- assembled source text (for debugging)
-make_true_model <- function(scenario_id, boundary = c("none", "wide", "narrow"),
+make_true_model <- function(scenario_id, boundary = c("none", "wide", "narrow", "tight"),
                             scenarios = PsN_scenarios) {
   boundary <- match.arg(boundary)
   scn <- scenarios[scenarios$scenario == scenario_id, , drop = FALSE]
@@ -77,14 +77,17 @@ make_true_model <- function(scenario_id, boundary = c("none", "wide", "narrow"),
       "wide"   = sprintf("%s <- c(%.6g, %.6g, %.6g)",
                          name, BOUNDARY_WIDE[1], init, BOUNDARY_WIDE[2]),
       "narrow" = sprintf("%s <- c(%.6g, %.6g, %.6g)",
-                         name, BOUNDARY_NARROW[1], init, BOUNDARY_NARROW[2])
+                         name, BOUNDARY_NARROW[1], init, BOUNDARY_NARROW[2]),
+      "tight"  = sprintf("%s <- c(%.6g, %.6g, %.6g)",
+                         name, BOUNDARY_TIGHT[1],  init, BOUNDARY_TIGHT[2])
     )
   }
   bounds_of <- function(boundary) {
     switch(boundary,
       "none"   = c(-Inf, Inf),
       "wide"   = BOUNDARY_WIDE,
-      "narrow" = BOUNDARY_NARROW
+      "narrow" = BOUNDARY_NARROW,
+      "tight"  = BOUNDARY_TIGHT
     )
   }
 

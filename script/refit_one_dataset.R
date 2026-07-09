@@ -101,7 +101,7 @@ refit_one_dataset <- function(scenario_id,
 
   stopifnot(is.numeric(scenario_id), length(scenario_id) == 1L,
             is.character(boundary),  length(boundary) == 1L,
-            boundary %in% c("none", "wide", "narrow"),
+            boundary %in% c("none", "wide", "narrow", "tight"),
             is.numeric(dataset_id),  length(dataset_id) == 1L,
             is.character(cohort),    length(cohort) == 1L,
             cohort %in% c("N40", "N80", "N300"))
@@ -256,7 +256,7 @@ refit_one_dataset <- function(scenario_id,
   missing_flags <- setdiff(required, names(args))
   if (length(missing_flags) > 0L) {
     stop("Missing required flag(s): ", paste(missing_flags, collapse = ", "),
-         "\nUsage: Rscript refit_one_dataset.R --scenario <int> --boundary <none|wide|narrow> --dataset <int> [--cohort <N40|N80|N300>] [--master_rds <path>] [--out_dir <path>]")
+         "\nUsage: Rscript refit_one_dataset.R --scenario <int> --boundary <none|wide|narrow|tight> --dataset <int> [--cohort <N40|N80|N300>] [--master_rds <path>] [--out_dir <path>]")
   }
 
   refit_one_dataset(
