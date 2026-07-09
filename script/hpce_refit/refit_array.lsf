@@ -1,0 +1,89 @@
+#!/bin/bash
+# ==============================================================================
+# refit_array.lsf
+# ------------------------------------------------------------------------------
+# LSF job-array template for the Figure 3 / Table 3 refit robustness study.
+# ONE task per (cohort, scenario, boundary, dataset) quadruple.
+#
+# This file is NOT submitted directly; it is submitted via
+#   scripts/hpce/submit_one_array.sh <cohort> <scenario> <boundary> <n_datasets>
+# which sets -J, -o, -e (they cannot reference shell vars in #BSUB lines) and
+# passes SCN, BND, COHORT, REPO_ROOT via `bsub -env`.
+#
+# Resource sizing (per array element = one fit):
+#   - 1 CPU core       (nlmixr2 focei is serial per fit; parallelism = array width)
+#   - 4000 MB RAM      (peak seen: ~1.8 GB for N=300 with linCmt)
+#   - 60 min walltime  (typical N=300 fit ~5 min; add margin for pathological
+#                       optimizer trajectories in the "none"/"wide" boundaries)
+# ==============================================================================
+
+#BSUB -n 1
+#BSUB -R "span[hosts=1]"
+#BSUB -M 4000
+#BSUB -W 01:00
+
+set -euo pipefail
+
+# ---- Required env vars (set by submit_one_array.sh via `bsub -env`) --------
+: "${REPO_ROOT:?REPO_ROOT must be set (workspace root containing scripts/ or script/)}"
+: "${COHORT:?COHORT must be set (N40|N80|N300)}"
+: "${SCN:?SCN must be set (2..16)}"
+: "${BND:?BND must be set (none|wide|narrow)}"
+: "${LSB_JOBINDEX:?LSB_JOBINDEX must be set (populated by LSF for job arrays)}"
+
+# SCRIPTS_DIR = R-script subdir ("scripts" or "script").  Defaults to "scripts"
+# if the submitter didn't set it (e.g. running this template standalone).
+SCRIPTS_DIR="${SCRIPTS_DIR:-scripts}"
+
+# Optional env-var overrides for data / output paths.  If set, they are
+# passed straight to Rscript as --master_rds / --out_dir flags, overriding
+# the cohort-based defaults hard-coded in refit_helpers.R.
+# Deployments whose data lives under Inputdataset/ (not
+# simulated_virtual_dataset_eta_filtered_<cohort>/) should set MASTER_RDS.
+EXTRA_R_ARGS=()
+if [ -n "${MASTER_RDS:-}" ]; then
+    EXTRA_R_ARGS+=(--master_rds "$MASTER_RDS")
+fi
+if [ -n "${OUT_DIR:-}" ]; then
+    EXTRA_R_ARGS+=(--out_dir "$OUT_DIR")
+fi
+
+echo "=========================================================="
+echo "Task started at: $(date)"
+echo "Job ID:      ${LSB_JOBID}"
+echo "Job name:    ${LSB_JOBNAME}"
+echo "Array idx:   ${LSB_JOBINDEX}"
+echo "Host:        $(hostname)"
+echo "Cohort:      ${COHORT}"
+echo "Scenario:    ${SCN}"
+echo "Boundary:    ${BND}"
+echo "Dataset:     ${LSB_JOBINDEX}"
+echo "Repo root:   ${REPO_ROOT}"
+echo "Scripts dir: ${SCRIPTS_DIR}"
+echo "Master RDS:  ${MASTER_RDS:-<cohort default>}"
+echo "Out dir:     ${OUT_DIR:-<cohort default>}"
+echo "=========================================================="
+
+# ---- Load R -----------------------------------------------------------------
+if command -v module >/dev/null 2>&1; then
+  module load R
+fi
+
+cd "$REPO_ROOT"
+
+# ---- Run one fit ------------------------------------------------------------
+Rscript "$SCRIPTS_DIR/refit_one_dataset.R" \
+    --cohort   "$COHORT" \
+    --scenario "$SCN" \
+    --boundary "$BND" \
+    --dataset  "$LSB_JOBINDEX" \
+    "${EXTRA_R_ARGS[@]}"
+
+exit_code=$?
+
+echo "=========================================================="
+echo "Task finished at: $(date)"
+echo "Exit code: ${exit_code}"
+echo "=========================================================="
+
+exit ${exit_code}

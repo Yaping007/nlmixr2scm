@@ -27,8 +27,10 @@ library(tidyverse)
 
 library(devtools)
 library(haven)
-
-
+test_ds02_m02 <- readRDS("simulated_virtual_dataset_eta_filtered_N80/stage1_pilot_scn16_N80_m02/test_full_fast_ds02.rds")
+test_ds02 <- readRDS("simulated_virtual_dataset_eta_filtered_N80/stage1_pilot_scn16_N80/test_full_fast_ds02.rds")
+test_ds03 <- readRDS("simulated_virtual_dataset_eta_filtered_N80/stage1_pilot_scn16_N80/test_full_fast_ds03.rds")
+test_ds13 <- readRDS("output_N80/test_ds13.rds")
 ##1.Virtual Patients_2021-2023 cycle NHANES covariate population for SCM simulation--------
 #Covariates:
 ##   BW   = body weight, kg
@@ -158,17 +160,20 @@ iCov_full <- virtual_pop %>%
                 BW, BMI, CrCL, SEX, RACE)
 
 ## ---- (b) Typical terminal half-life (beta phase of 2-cmt model) ----------
-TVCL <- 0.6;  TVQ <- 1.8;  TVVc <- 20;  TVVp <- 80
+TVCL <- 0.6;  TVQ <- 1.8;  TVVc <- 20;  TVVp <- 80 ; Ka <- 0.7
 k10_typ <- TVCL / TVVc
 k12_typ <- TVQ  / TVVc
 k21_typ <- TVQ  / TVVp
 sum_k    <- k10_typ + k12_typ + k21_typ
 beta_typ <- 0.5 * (sum_k - sqrt(sum_k^2 - 4 * k10_typ * k21_typ))
 t_half_typ <- log(2) / beta_typ
+t_half_ab <- log(2) / Ka
+
 cat(sprintf("Typical terminal half-life: %.2f h\n", t_half_typ)) #Typical terminal half-life: 141.29 h
 
 hl_mult      <- c(0, 0.05, 0.1, 0.5, 1, 3)
 sample_times <- hl_mult * t_half_typ
+
 ## ---- (c) Event table: 100 mg single oral dose + sampling times -----------
 ##   Build a one-subject template (1 dose + 6 observation times), then
 ##   replicate it for every subject so each `id` appears with the full
@@ -974,7 +979,7 @@ if (!dir.exists(stage1_dir16)) dir.create(stage1_dir16, recursive = TRUE)
 
 sim_obs_scn16 <- readRDS(file.path(out_dir_v2, "sim_obs_scenario_16.rds"))
 ds16_01 <- to_nm_dataset(sim_obs_scn16) %>%
-  dplyr::filter(DATASET == 1) %>%
+  dplyr::filter(DATASET == 1) %>% #getDATASET1
   dplyr::select(-SCENARIO, -DATASET) %>%
   dplyr::mutate(
     ID   = as.integer(ID),
@@ -2182,12 +2187,29 @@ compute_rmrse_block <- function(per_ds, true_long, scenario_id,
 ##    * Error handler echoes the exception via warning() AND writes a
 ##      per-dataset error log to <save_dir>/<ds_tag>_ERROR.txt.
 ##
-##  Resume support:
-##    * `force_rerun = FALSE` (default) makes the driver skip any dataset
-##      whose `test_full_fast_<ds_tag>.rds` already exists on disk.  The
-##      cached object is returned untouched so OC aggregation stays valid.
-##    * Set `force_rerun = TRUE` to redo a specific dataset (or just delete
-##      its test_*.rds before calling).
+##  Resume support (two-tier cache):
+##    * Tier 1 -- packaged result.  If `test_full_fast_<ds_tag>.rds` exists
+##      and neither `force_rerun` nor `force_repackage` is TRUE, the driver
+##      returns the cached `test_*` object untouched (~ms cost).
+##    * Tier 2 -- SCM screening result.  If `res_full_fast_<ds_tag>.rds`
+##      exists (and tier 1 was skipped or bypassed via `force_repackage`),
+##      the driver skips base-fit + SCM screening and runs only
+##      package_scm_result() (~30-60s for the tight-tol refit).  This is
+##      the supported recovery path when package_scm_result() crashed on
+##      a previous run, or when `scm_focei_final` settings have changed
+##      and only the cov/SE step needs to be redone.
+##    * Tier 3 -- full pipeline.  Both caches missing, or `force_rerun =
+##      TRUE`.  Runs base fit + SCM screening + packaging end-to-end.
+##
+##    Flags:
+##      - `force_rerun = TRUE`     bypasses BOTH caches -> tier 3.
+##      - `force_repackage = TRUE` ignores stale `test_*` but still reuses
+##        cached `res_*` -> tier 2 (saves the ~15 min SCM screening).
+##        When `res_*` is also missing, falls through to tier 3.
+##
+##    On tier-3 success the driver unlinks any stale
+##    `<ds_tag>_ERROR.txt` from a prior failed run so the log doesn't
+##    accumulate misleading sentinels.
 ##
 ##  Covariance:
 ##    * The driver passes `final_ctrl = scm_focei_final` to
@@ -2221,17 +2243,22 @@ run_one_dataset_scn16_N80 <- function(ds_id, save_dir,
                                        catvars_vec  = scm16_catvars,
                                        shapes_vec   = scm16_shapes,
                                        true_long    = true_params,
-                                       workers      = 3L,
-                                       keep_res     = TRUE,
-                                       force_rerun  = FALSE,
-                                       scenario_id  = 16L) {
-  ds_tag <- sprintf("ds%02d", ds_id)
-
-  ## -- Resume check FIRST: before any expensive work or promise forcing
+                                       workers          = 3L,
+                                       keep_res         = TRUE,
+                                       force_rerun      = FALSE,
+                                       force_repackage  = FALSE,
+                                       scenario_id      = 16L) {
+  ds_tag    <- sprintf("ds%02d", ds_id)
   dir.create(save_dir, showWarnings = FALSE, recursive = TRUE)
   test_path <- file.path(save_dir, sprintf("test_full_fast_%s.rds", ds_tag))
-  if (!force_rerun && file.exists(test_path)) {
-    message(sprintf(">>> [%s] cached, skipping (delete %s or pass force_rerun=TRUE to redo)",
+  res_path  <- file.path(save_dir, sprintf("res_full_fast_%s.rds",  ds_tag))
+  err_path  <- file.path(save_dir, sprintf("%s_ERROR.txt",          ds_tag))
+
+  ## -- Tier 1: packaged result already on disk -> return immediately.
+  ##    force_rerun trumps everything; force_repackage skips tier 1 so the
+  ##    driver falls through to tier 2 (repackage from cached res_*).
+  if (!force_rerun && !force_repackage && file.exists(test_path)) {
+    message(sprintf(">>> [%s] tier-1 cached, skipping (%s)",
                     ds_tag, basename(test_path)))
     return(list(
       ds_id       = ds_id,
@@ -2244,8 +2271,60 @@ run_one_dataset_scn16_N80 <- function(ds_id, save_dir,
     ))
   }
 
-  message(sprintf("\n>>> [%s] starting dataset %d at %s",
-                  ds_tag, ds_id, format(Sys.time(), "%H:%M:%S")))
+  ## -- Tier 2: SCM screening cached but packaging missing or invalidated.
+  ##    Re-run only package_scm_result() on the cached res_*.  This is the
+  ##    supported recovery path for a crashed packaging step OR a deliberate
+  ##    re-package after scm_focei_final has been tightened/changed.
+  ##    Wrapped in its own tryCatch so a refit crash here doesn't lose the
+  ##    expensive res_* artefact -- the ERROR.txt is written and the user
+  ##    can retry after fixing helpers or final_ctrl.
+  if (!force_rerun && file.exists(res_path)) {
+    message(sprintf(">>> [%s] tier-2 re-packaging from cached %s",
+                    ds_tag, basename(res_path)))
+    return(tryCatch({
+      res_i     <- readRDS(res_path)
+      t_scm_sec <- suppressWarnings(as.numeric(attr(res_i, "elapsed_s")))
+      if (!is.finite(t_scm_sec)) {
+        cli::cli_warn("[{ds_tag}] cached res_* missing `elapsed_s` attr; t_scm_sec set to NA.")
+        t_scm_sec <- NA_real_
+      }
+      t_pkg <- system.time(
+        test_i <- package_scm_result(
+          label       = sprintf("scn%02d_%s_N80_full_fast", scenario_id, ds_tag),
+          scm_res     = res_i,
+          runtime_sec = t_scm_sec,
+          true_long   = true_long,
+          scenario_id = scenario_id,
+          final_ctrl  = scm_focei_final
+        )
+      )
+      saveRDS(test_i, test_path)
+      if (file.exists(err_path)) unlink(err_path)  # stale sentinel from prior fail
+      message(sprintf("<<< [%s] tier-2 done; refit %.1fs, cov=%s",
+                      ds_tag, as.numeric(t_pkg["elapsed"]),
+                      if (isTRUE(test_i$cov_done)) "ok" else "FAIL"))
+      list(
+        ds_id       = ds_id,
+        ds_tag      = ds_tag,
+        test        = test_i,
+        t_base_sec  = NA_real_,
+        t_scm_sec   = t_scm_sec,
+        t_total_sec = t_scm_sec,
+        resumed     = TRUE
+      )
+    }, error = function(e) {
+      msg <- conditionMessage(e)
+      writeLines(c(format(Sys.time()), "tier-2 repackage failed:", msg), err_path)
+      warning(sprintf("[%s] tier-2 FAILED: %s (see %s)", ds_tag, msg, err_path),
+              call. = FALSE, immediate. = TRUE)
+      list(ds_id = ds_id, ds_tag = ds_tag, error = msg, res = NULL,
+           resumed = TRUE)
+    }))
+  }
+
+  ## -- Tier 3: full pipeline (base fit + SCM screening + package).
+  message(sprintf("\n>>> [%s] tier-3 starting full pipeline at %s",
+                  ds_tag, format(Sys.time(), "%H:%M:%S")))
 
   ## -- Pre-flight (a): every helper function the driver + package_scm_result()
   ##    transitively call must be in scope.  Promise forcing only catches
@@ -2325,6 +2404,7 @@ run_one_dataset_scn16_N80 <- function(ds_id, save_dir,
     )
 
     saveRDS(test_i, test_path)
+    if (file.exists(err_path)) unlink(err_path)  # clear stale sentinel on recovery
 
     message(sprintf("<<< [%s] done in %.1f min (base %.1fs + scm %.1fs, cov=%s)",
                     ds_tag, (t_base_sec + t_scm_sec) / 60,
@@ -2342,7 +2422,6 @@ run_one_dataset_scn16_N80 <- function(ds_id, save_dir,
     )
   }, error = function(e) {
     msg <- conditionMessage(e)
-    err_path <- file.path(save_dir, sprintf("%s_ERROR.txt", ds_tag))
     writeLines(c(format(Sys.time()), msg), err_path)
     warning(sprintf("[%s] FAILED: %s (see %s)", ds_tag, msg, err_path),
             call. = FALSE, immediate. = TRUE)
@@ -2722,3 +2801,5 @@ if (FALSE) {  # guard: do not execute via source()
   ## Optional: aggregate across scenarios using compute_power_block and
   ## compute_rmrse_block helpers, looping over scenario_id.
 }
+
+
