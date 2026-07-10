@@ -28,7 +28,7 @@ set -euo pipefail
 : "${REPO_ROOT:?REPO_ROOT must be set (workspace root containing scripts/ or script/)}"
 : "${COHORT:?COHORT must be set (N40|N80|N300)}"
 : "${SCN:?SCN must be set (2..16)}"
-: "${BND:?BND must be set (none|wide|narrow)}"
+: "${BND:?BND must be set (none|wide|narrow|tight)}"
 : "${LSB_JOBINDEX:?LSB_JOBINDEX must be set (populated by LSF for job arrays)}"
 
 # SCRIPTS_DIR = R-script subdir ("scripts" or "script").  Defaults to "scripts"
