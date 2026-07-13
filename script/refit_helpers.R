@@ -116,9 +116,52 @@ load_scenario_dataset <- function(master_rds, scenario_id, dataset_id) {
 }
 
 # ---- Base convergence diagnostics ------------------------------------------
-#   Copy of PerformanceEvaluation04062026.R:707 verbatim.  Returns a 5-field
-#   list.  For NONMEM Table-3 style diagnostics use diagnose_fit_table3().
+#   Two convergence flags returned:
+#     converged  (lenient / numerical): finite OFV + cov_ok + finite cond#
+#     cn_below_cutoff:                    cond_num_cor <= CN_STRICT_CUTOFF (1000)
+#   The aggregator combines these with est_bnd (from diagnose_fit_table3)
+#   to form `converged_strict`, matching NONMEM/Khandelwal Table 3 practice:
+#     converged_strict := converged & cn_below_cutoff & !est_bnd
+#   The 1000 cutoff matches NONMEM's default "CONDITION NUMBER > 1000" warning
+#   and Khandelwal 2019 Fig 7 reporting.
+CN_STRICT_CUTOFF <- 1000
+
+## Canonical diagnose_fit (2026-07 rewrite; see scm_bench_helpers.R for notes).
+## Kept as duplicate here to avoid a cross-script source dependency in HPCE.
 diagnose_fit <- function(fit) {
+  if (is.null(fit)) {
+    return(list(converged = NA, objf = NA_real_,
+                cond_num_cor = NA_real_, cond_num_cor_source = NA_character_,
+                cn_below_cutoff = NA,
+                cov_ok = NA, convergence_code = NA_integer_,
+                message = NA_character_))
+  }
+  conv_code <- if (!is.null(fit$convergence)) as.integer(fit$convergence) else NA_integer_
+  objf_val  <- if (!is.null(fit$objf)) as.numeric(fit$objf) else NA_real_
+  cov_ok    <- isTRUE(!is.null(fit$cov) && all(is.finite(diag(fit$cov))))
+  cn_native <- fit$conditionNumberCor
+  if (!is.null(cn_native) && is.finite(as.numeric(cn_native))) {
+    cn_val <- as.numeric(cn_native); cn_src <- "native"
+  } else if (cov_ok) {
+    cn_val <- tryCatch(kappa(stats::cov2cor(fit$cov), exact = TRUE),
+                       error = function(e) NA_real_)
+    cn_src <- if (is.finite(cn_val)) "fallback" else NA_character_
+  } else {
+    cn_val <- NA_real_; cn_src <- NA_character_
+  }
+  return(list(
+    converged           = isTRUE(is.finite(objf_val) && cov_ok && is.finite(cn_val)),
+    objf                = objf_val,
+    cond_num_cor        = cn_val,
+    cond_num_cor_source = cn_src,
+    cn_below_cutoff     = isTRUE(is.finite(cn_val) && cn_val <= CN_STRICT_CUTOFF),
+    cov_ok              = cov_ok,
+    convergence_code    = conv_code,
+    message             = if (!is.null(fit$message)) as.character(fit$message) else NA_character_
+  ))
+}
+
+.diagnose_fit_OLD <- function(fit) {
   if (is.null(fit)) {
     return(list(converged = NA, objf = NA_real_,
                 cond_num_cor = NA_real_,

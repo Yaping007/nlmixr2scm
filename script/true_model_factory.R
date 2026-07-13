@@ -33,8 +33,8 @@
 # faster than the ODE form, verified in scripts/PerformanceEvaluation04062026.R).
 # ==============================================================================
 
-PSN_INIT_CONT   <- 0.001                          # continuous cov init
-PSN_INIT_CAT    <- 0.001                          # categorical cov init
+PSN_INIT_CONT   <- 0.5                            # continuous cov init (2026-07-12: was 0.1; still plateau-trapped for nlminb/lbfgsb3c)
+PSN_INIT_CAT    <- log(1.5)                       # categorical cov init ~= 0.405 (matches truth for TH_SEX_VC scenarios)
 BOUNDARY_WIDE   <- c(-1e5, 1e5)                   # PsN default
 BOUNDARY_NARROW <- c(-10, 10)                     # paper's narrow tier
 BOUNDARY_TIGHT  <- c(-5, 5)                       # added 2026-07-09: tighter
@@ -117,12 +117,14 @@ make_true_model <- function(scenario_id, boundary = c("none", "wide", "narrow", 
     estimated_cont <- c(estimated_cont, "TH_BW_VC")
   }
 
-  # ---- Categorical covariate theta (always unbounded per spec) -------------
+  # ---- Categorical covariate theta ----------------------------------------
+  # 2026-07-12: previously always unbounded; that let lbfgsb3c/saem diverge to
+  # 1e13 on VcSEX. Now bounded by same tier as continuous covs.
   categorical <- character(0)
   if (scn$I_SEX_VC == 1L) {
-    ini_lines <- c(ini_lines,
-                   sprintf("TH_SEX_VC <- %.6g", PSN_INIT_CAT))
+    ini_lines <- c(ini_lines, emit_bounded("TH_SEX_VC", PSN_INIT_CAT, boundary))
     cov_body_terms_vc <- c(cov_body_terms_vc, "TH_SEX_VC * SEX")
+    if (boundary != "none") bounds_spec$TH_SEX_VC <- bounds_of(boundary)
     categorical <- "TH_SEX_VC"
   }
 

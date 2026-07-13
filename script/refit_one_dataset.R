@@ -74,18 +74,18 @@ refit_focei_control <- function() {
   )
 }
 
-## ---- Cohort -> (master RDS, out_dir) defaults ----------------------------
-##   The three sim cohorts share a canonical directory naming convention.
-##   Note: N=300 lives in the un-suffixed *_eta_filtered/ dir (historical).
-.cohort_defaults <- function(cohort) {
+## ---- Cohort -> (per-scenario RDS resolver, out_dir) defaults --------------
+##   New layout (2026-07): one RDS per scenario, under
+##   Inputdataset/sim_obs_N{NN}/sim_obs_scenario_{SS}.rds
+.cohort_defaults <- function(cohort, scenario_id = NULL,
+                             input_root = "Inputdataset") {
   stopifnot(cohort %in% c("N40", "N80", "N300"))
-  master_dir <- switch(cohort,
-    N40  = "simulated_virtual_dataset_eta_filtered_N40",
-    N80  = "simulated_virtual_dataset_eta_filtered_N80",
-    N300 = "simulated_virtual_dataset_eta_filtered"
-  )
+  N <- as.integer(sub("^N", "", cohort))
+  master_rds <- if (is.null(scenario_id)) NA_character_ else
+    file.path(input_root, sprintf("sim_obs_N%d", N),
+              sprintf("sim_obs_scenario_%02d.rds", as.integer(scenario_id)))
   list(
-    master_rds = file.path(master_dir, "sim_obs_all_scenarios.rds"),
+    master_rds = master_rds,
     out_root   = file.path("outputs", paste0("refit_true_", cohort))
   )
 }
@@ -106,7 +106,7 @@ refit_one_dataset <- function(scenario_id,
             is.character(cohort),    length(cohort) == 1L,
             cohort %in% c("N40", "N80", "N300"))
 
-  defaults <- .cohort_defaults(cohort)
+  defaults <- .cohort_defaults(cohort, scenario_id = scenario_id)
   if (is.null(master_rds)) master_rds <- defaults$master_rds
   if (is.null(out_dir)) {
     out_dir <- file.path(defaults$out_root,
