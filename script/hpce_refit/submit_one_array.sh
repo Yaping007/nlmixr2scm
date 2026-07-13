@@ -25,9 +25,9 @@
 
 set -euo pipefail
 
-COHORT=${1:?"Usage: $0 <cohort:N40|N80|N300> <scenario:2..16> <boundary:none|wide|narrow> <n_datasets> [max_parallel]"}
+COHORT=${1:?"Usage: $0 <cohort:N40|N80|N300> <scenario:2..16> <boundary:none|wide|narrow|tight> <n_datasets> [max_parallel]"}
 SCN=${2:?"scenario (2..16) required"}
-BND=${3:?"boundary (none|wide|narrow) required"}
+BND=${3:?"boundary (none|wide|narrow|tight) required"}
 NDS=${4:?"n_datasets required (e.g. 10 for pilot, 250 for full)"}
 MAXPAR=${5:-50}
 
@@ -109,6 +109,26 @@ JOBNAME="refit_${COHORT}_scn${SCN_PAD}_${BND}"
 #   {SCN}    -> 2-digit zero-padded scenario, e.g. "04", "16"
 # Example for the HPCE per-scenario layout:
 #   export MASTER_RDS_TEMPLATE='Inputdataset/sim_obs_{COHORT}/sim_obs_scenario_{SCN}.rds'
+#
+# ---- HPCE auto-detection ---------------------------------------------------
+# If neither MASTER_RDS nor MASTER_RDS_TEMPLATE was set by the caller AND the
+# HPCE-conventional Inputdataset/ directory exists at REPO_ROOT, assume the
+# HPCE per-scenario layout and set both MASTER_RDS_TEMPLATE and OUT_ROOT to
+# the values that made the earlier "narrow" runs work.  This prevents the
+# R driver from silently falling back to its Windows workspace defaults
+# ("simulated_virtual_dataset_*/sim_obs_all_scenarios.rds" +
+#  "outputs/refit_true_*/") on HPCE, which produce
+#   ERROR: file.exists(master_rds) is not TRUE
+# and outputs landing in the wrong directory tree.
+if [ -z "${MASTER_RDS:-}" ] && [ -z "${MASTER_RDS_TEMPLATE:-}" ] \
+        && [ -d "$REPO_ROOT/Inputdataset" ]; then
+    MASTER_RDS_TEMPLATE='Inputdataset/sim_obs_{COHORT}/sim_obs_scenario_{SCN}.rds'
+    : "${OUT_ROOT:=output}"
+    echo "[hpce-auto] Inputdataset/ found -> using HPCE defaults:"
+    echo "            MASTER_RDS_TEMPLATE='$MASTER_RDS_TEMPLATE'"
+    echo "            OUT_ROOT='$OUT_ROOT'"
+fi
+
 if [ -z "${MASTER_RDS:-}" ] && [ -n "${MASTER_RDS_TEMPLATE:-}" ]; then
     MASTER_RDS="${MASTER_RDS_TEMPLATE//\{COHORT\}/$COHORT}"
     MASTER_RDS="${MASTER_RDS//\{SCN\}/$SCN_PAD}"
@@ -132,6 +152,11 @@ if [ -n "${MASTER_RDS:-}" ]; then
     if [ ! -f "$MASTER_RDS_ABS" ]; then
         echo "ERROR: master RDS not found at: $MASTER_RDS_ABS" >&2
         echo "       (derived from MASTER_RDS='$MASTER_RDS')" >&2
+        echo "" >&2
+        echo "  Fixes:" >&2
+        echo "    1. Verify the file exists at that path." >&2
+        echo "    2. Or set MASTER_RDS_TEMPLATE explicitly, e.g.:" >&2
+        echo "         export MASTER_RDS_TEMPLATE='Inputdataset/sim_obs_{COHORT}/sim_obs_scenario_{SCN}.rds'" >&2
         exit 1
     fi
 fi
