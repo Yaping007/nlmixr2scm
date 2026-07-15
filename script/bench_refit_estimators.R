@@ -42,6 +42,7 @@
 source(file.path(.script_dir, "refit_helpers.R"),      chdir = FALSE)
 source(file.path(.script_dir, "true_model_factory.R"), chdir = FALSE)
 source(file.path(.script_dir, "estimator_factory.R"),  chdir = FALSE)
+source(file.path(.script_dir, "output_schema.R"),      chdir = FALSE)
 
 suppressPackageStartupMessages({
   library(nlmixr2)
@@ -119,64 +120,72 @@ bench_refit_one <- function(N, scenario_id, dataset_id,
         RACE = as.integer(RACE)
       )
 
-    ## 2. True model
-    true_mod    <- make_true_model(scenario_id, boundary = boundary)
+    ## 2. True model (ODE is canonical; see output_schema.R model_type tag)
+    true_mod    <- make_true_model(scenario_id, boundary = boundary,
+                                   structure = "ode")
     bounds_spec <- attr(true_mod, "bounds_spec")
 
     ## 3. Fit with the chosen (est, outer_opt) at final tier
     cfg <- make_est_control(estimator, outer_opt = outer_opt, tier = "final")
 
+    ## Grid label maps to nlmixr2's est= dispatch string via nlmixr_est_name
+    ## (foceif/irlsfoceif -> "focei"; the interaction/muModel behaviour is
+    ## carried by the control from make_est_control, see estimator_factory.R).
+    est_dispatch <- nlmixr_est_name(estimator)
+
     t0  <- Sys.time()
-    fit <- nlmixr2(true_mod, ds_nm, est = estimator, control = cfg$ctrl)
+    fit <- nlmixr2(true_mod, ds_nm, est = est_dispatch, control = cfg$ctrl)
     t_fit <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
 
-    ## 4. Optional post-refit for SAEM (cov step delegated to foceif)
+    ## 4. Optional post-refit for SAEM (cov step delegated to focei+bobyqa)
     refit_estimator <- estimator
     t_refit <- NA_real_
     if (isTRUE(cfg$needs_post_refit)) {
-      cat("[bench-refit]  ... post-SAEM foceif cov refit\n")
+      cat("[bench-refit]  ... post-SAEM focei cov refit (bobyqa)\n")
       t1 <- Sys.time()
       refit_ctrl <- make_saem_refit_control()
       fit_refit  <- tryCatch(
-        nlmixr2(true_mod, ds_nm, est = "foceif", control = refit_ctrl),
+        ## est="focei" (FOCEi + interaction, bobyqa, FD) for the post-SAEM
+        ## covariance refit. NOT foceif: under bobyqa the analytic gradient
+        ## (foceif's only edge) downgrades to FD, so foceif==focei here.
+        nlmixr2(true_mod, ds_nm, est = nlmixr_est_name("focei"),
+                control = refit_ctrl),
         error = function(e) { message("post-refit failed: ", conditionMessage(e)); NULL }
       )
       t_refit <- as.numeric(difftime(Sys.time(), t1, units = "secs"))
       if (!is.null(fit_refit)) {
         fit <- fit_refit
-        refit_estimator <- "foceif"
+        refit_estimator <- "focei"
       }
     }
 
-    ## 5. Diagnostics + estimates + rel err
-    diag_t3   <- diagnose_fit_table3(fit, bounds_spec = bounds_spec)
-    diag_base <- diagnose_fit(fit)   # 7-field with convergence_code + cond src
-    final_est <- extract_params_long(fit)
-    rel_err   <- rel_err_one(final_est, true_params, scenario_id)
-    parFixed  <- tryCatch(as.data.frame(fit$parFixedDf),
-                          error = function(e) NULL)
-
-    list(
-      sample_N        = N,
-      scenario_id     = as.integer(scenario_id),
-      dataset_id      = as.integer(dataset_id),
-      estimator       = estimator,
-      outer_opt       = if (is.null(outer_opt)) NA_character_ else as.character(outer_opt),
-      refit_estimator = refit_estimator,
-      boundary        = boundary,
-      final_est       = final_est,
-      rel_err         = rel_err,
-      diag            = diag_base,
-      diag_t3         = diag_t3,
-      parFixed        = parFixed,
-      bounds_spec     = bounds_spec,
-      cont_params     = attr(true_mod, "estimated_cont_params"),
-      cat_params      = attr(true_mod, "categorical_params"),
-      fit_runtime_sec = t_fit,
-      refit_runtime_sec = t_refit,
-      timestamp       = Sys.time(),
-      status          = "ok"
+    ## 5. Diagnostics + estimates + rel err via the shared schema assembler.
+    ##    assemble_common() stamps schema_version + model_type and builds the
+    ##    estimator-agnostic core (objf, converged, cond_num_cor, diag,
+    ##    diag_t3, rel_err, parFixed, cov, *_params, fn_text) and the canonical
+    ##    fit_runtime_sec. Driver-specific identity keys and the refit runtime
+    ##    are layered on top here.
+    common <- assemble_common(
+      fit         = fit,
+      true_mod    = true_mod,
+      scenario_id = scenario_id,
+      true_params = true_params,
+      runtime_sec = t_fit,
+      status      = "ok",
+      estimator   = refit_estimator
     )
+
+    c(list(
+      sample_N          = N,
+      scenario_id       = as.integer(scenario_id),
+      dataset_id        = as.integer(dataset_id),
+      estimator         = estimator,
+      outer_opt         = if (is.null(outer_opt)) NA_character_ else as.character(outer_opt),
+      refit_estimator   = refit_estimator,
+      boundary          = boundary,
+      refit_runtime_sec = t_refit,
+      timestamp         = Sys.time()
+    ), common)
   }, error = function(e) {
     msg <- sprintf(
       "[FAIL] N=%d scn=%02d ds=%03d %s/%s boundary=%s\nerror: %s\ncalls:\n%s\n",
@@ -185,6 +194,8 @@ bench_refit_one <- function(N, scenario_id, dataset_id,
       paste(deparse(sys.calls()), collapse = "\n"))
     cat(msg, file = out_err)
     list(
+      schema_version = SCHEMA_VERSION,
+      model_type  = "ode",
       sample_N    = N,
       scenario_id = as.integer(scenario_id),
       dataset_id  = as.integer(dataset_id),
@@ -197,7 +208,9 @@ bench_refit_one <- function(N, scenario_id, dataset_id,
     )
   })
 
-  saveRDS(result, out_rds)
+  write_fit_sidecar(result, out_rds,
+                    fit = if (identical(result$status, "ok") &&
+                              exists("fit", inherits = FALSE)) fit else NULL)
   invisible(result)
 }
 

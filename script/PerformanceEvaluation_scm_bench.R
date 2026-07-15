@@ -253,21 +253,11 @@ run_bench_cell <- function(opts) {
       covarsVec  = scm_bench_covars,
       catvarsVec = scm_bench_cats,
       shapes     = scm_bench_shapes,
-      # 2026-07-13: non-zero SCM candidate inits (A) --------------------
-      # runSCM defaults every candidate slope to init=0. At theta=0 the
-      # log-additive covariate contribution is identically zero, so the
-      # finite-difference gradient of the outer OFV w.r.t. that theta is
-      # ~0 modulo FOCEi inner-ETA noise. Gradient optimizers (nlminb,
-      # lbfgsb3c) then quit with "false convergence (8)" before the LRT
-      # can see any real improvement -> real covariates get rejected ->
-      # Power collapses. Bobyqa is derivative-free and unaffected. Match
-      # PsN convention + our bench_refit setting: 0.5 for continuous,
-      # log(1.5) ~ 0.405 for categorical.
-      inits      = list(
-        power = list(est = 0.5,       lower = -5, upper = 5),
-        lin   = list(est = 0.5,       lower = -5, upper = 5),
-        cat   = list(est = log(1.5),  lower = -5, upper = 5)
-      ),
+      # 2026-07-13: reverted non-zero SCM candidate inits (A). Non-zero
+      # inits shift the LRT null: H0(theta=0) vs H1(theta=0.5) creates a
+      # large structural OFV drop at the init itself, so LRT selects
+      # every candidate without the optimizer moving. Keep runSCM's
+      # default init=0 so LRT reflects genuine slope evidence.
       searchType = "scm",
       control    = screen_bundle$ctrl,
       saveModels = FALSE,
