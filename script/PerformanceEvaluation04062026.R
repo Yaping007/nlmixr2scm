@@ -31,6 +31,24 @@ test_ds02_m02 <- readRDS("simulated_virtual_dataset_eta_filtered_N80/stage1_pilo
 test_ds02 <- readRDS("simulated_virtual_dataset_eta_filtered_N80/stage1_pilot_scn16_N80/test_full_fast_ds02.rds")
 test_ds03 <- readRDS("simulated_virtual_dataset_eta_filtered_N80/stage1_pilot_scn16_N80/test_full_fast_ds03.rds")
 test_ds13 <- readRDS("output_N80/test_ds13.rds")
+
+
+res_N80_scn16_focei_bobyba <- readRDS("scm_bench/N80/scn16/focei_bobyqa/res_ds01.rds")
+res_N80_scn16_focei_lbfgsb3c <- readRDS("output/scm_bench/N80/scn16/focei_lbfgsb3c/res_ds01.rds")
+res_N80_scn16_focei_nlminb <- readRDS("output/scm_bench/N80/scn16/focei_nlminb/res_ds01.rds")
+res_N80_scn16_foceif_lbfgsb3c <- readRDS("output/scm_bench/N80/scn16/foceif_lbfgsb3c/res_ds01.rds")
+res_N80_scn16_foceif_nlminb <- readRDS("scm_bench/N80/scn16/foceif_nlminb/res_ds01.rds")
+res_N80_scn16_saem <- readRDS("output/scm_bench/N80/scn16/saem_NA/res_ds01.rds")
+
+
+
+test__N80_scn16_foceif_bobyba  <- readRDS("output/output_N80/test_ds01.rds")
+
+scm_N80_scn16_foceif_lbfgsb3c <- readRDS("output/scm_bench/N80/scn16/foceif_lbfgsb3c/scm_ds01.rds")
+res_N80_scn16_foceif_bobyba <- readRDS("output/output_N80/res_ds01.rds")
+
+res <- readRDS("output/scm_bench_aggregated/bench_aggregated.rds")
+
 ##1.Virtual Patients_2021-2023 cycle NHANES covariate population for SCM simulation--------
 #Covariates:
 ##   BW   = body weight, kg

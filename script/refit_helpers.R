@@ -116,9 +116,52 @@ load_scenario_dataset <- function(master_rds, scenario_id, dataset_id) {
 }
 
 # ---- Base convergence diagnostics ------------------------------------------
-#   Copy of PerformanceEvaluation04062026.R:707 verbatim.  Returns a 5-field
-#   list.  For NONMEM Table-3 style diagnostics use diagnose_fit_table3().
+#   Two convergence flags returned:
+#     converged  (lenient / numerical): finite OFV + cov_ok + finite cond#
+#     cn_below_cutoff:                    cond_num_cor <= CN_STRICT_CUTOFF (1000)
+#   The aggregator combines these with est_bnd (from diagnose_fit_table3)
+#   to form `converged_strict`, matching NONMEM/Khandelwal Table 3 practice:
+#     converged_strict := converged & cn_below_cutoff & !est_bnd
+#   The 1000 cutoff matches NONMEM's default "CONDITION NUMBER > 1000" warning
+#   and Khandelwal 2019 Fig 7 reporting.
+CN_STRICT_CUTOFF <- 1000
+
+## Canonical diagnose_fit (2026-07 rewrite; see scm_bench_helpers.R for notes).
+## Kept as duplicate here to avoid a cross-script source dependency in HPCE.
 diagnose_fit <- function(fit) {
+  if (is.null(fit)) {
+    return(list(converged = NA, objf = NA_real_,
+                cond_num_cor = NA_real_, cond_num_cor_source = NA_character_,
+                cn_below_cutoff = NA,
+                cov_ok = NA, convergence_code = NA_integer_,
+                message = NA_character_))
+  }
+  conv_code <- if (!is.null(fit$convergence)) as.integer(fit$convergence) else NA_integer_
+  objf_val  <- if (!is.null(fit$objf)) as.numeric(fit$objf) else NA_real_
+  cov_ok    <- isTRUE(!is.null(fit$cov) && all(is.finite(diag(fit$cov))))
+  cn_native <- fit$conditionNumberCor
+  if (!is.null(cn_native) && is.finite(as.numeric(cn_native))) {
+    cn_val <- as.numeric(cn_native); cn_src <- "native"
+  } else if (cov_ok) {
+    cn_val <- tryCatch(kappa(stats::cov2cor(fit$cov), exact = TRUE),
+                       error = function(e) NA_real_)
+    cn_src <- if (is.finite(cn_val)) "fallback" else NA_character_
+  } else {
+    cn_val <- NA_real_; cn_src <- NA_character_
+  }
+  return(list(
+    converged           = isTRUE(is.finite(objf_val) && cov_ok && is.finite(cn_val)),
+    objf                = objf_val,
+    cond_num_cor        = cn_val,
+    cond_num_cor_source = cn_src,
+    cn_below_cutoff     = isTRUE(is.finite(cn_val) && cn_val <= CN_STRICT_CUTOFF),
+    cov_ok              = cov_ok,
+    convergence_code    = conv_code,
+    message             = if (!is.null(fit$message)) as.character(fit$message) else NA_character_
+  ))
+}
+
+.diagnose_fit_OLD <- function(fit) {
   if (is.null(fit)) {
     return(list(converged = NA, objf = NA_real_,
                 cond_num_cor = NA_real_,
@@ -153,8 +196,32 @@ diagnose_fit <- function(fit) {
 #     bounded (config = "none") or categorical/never-bounded parameter.
 #     The `boundary_hit_tol` is the absolute distance from the boundary to
 #     flag a hit -- 1e-3 matches PsN convention.
+#
+# 2026-07-14: estimator-aware. Several Table-3 flags are FOCEi-specific -- they
+# describe the behaviour of an OUTER OPTIMIZER (rounding/precision message,
+# zero-gradient exit) or an optimizer success code. SAEM is gradient-free and
+# has no outer optimizer, so those flags are structurally NOT APPLICABLE. The
+# old code returned rnd_err=FALSE for SAEM, which reads like "passed" when it
+# should read "N/A". We now detect the estimator (fit$est) and set the
+# FOCEi-only flags to NA for SAEM, recording a human note in `diag_note` and the
+# covariance provenance in `cov_source` (r,s vs linFim vs cov2se) so the
+# aggregator can footnote that SAEM condition numbers come from a linearized FIM
+# and are not strictly comparable to the FOCEi r/s sandwich.
+#
+#   estimator: optional override; when NULL it is read from fit$est. Values that
+#     start with "saem" take the SAEM branch; everything else (focei, foceif,
+#     ifoceif, ...) takes the FOCEi-family branch.
+
+# Identify the estimator family of a fit: "saem" | "focei" | NA.
+.fit_estimator <- function(fit, estimator = NULL) {
+  e <- estimator %||% tryCatch(fit$est, error = function(e) NULL)
+  if (is.null(e) || length(e) != 1L || is.na(e)) return(NA_character_)
+  tolower(as.character(e))
+}
+
 diagnose_fit_table3 <- function(fit, bounds_spec = list(),
-                                boundary_hit_tol = 1e-3) {
+                                boundary_hit_tol = 1e-3,
+                                estimator = NULL) {
   base <- diagnose_fit(fit)
 
   if (is.null(fit)) {
@@ -163,11 +230,29 @@ diagnose_fit_table3 <- function(fit, bounds_spec = list(),
       rnd_err       = NA, zero_grad    = NA,
       cov_step      = NA, phys_bnd     = NA,
       bound_hits    = NA_character_,
-      phys_hits     = NA_character_
+      phys_hits     = NA_character_,
+      est_family    = NA_character_,
+      cov_source    = NA_character_,
+      diag_note     = NA_character_
     )))
   }
 
-  # MinSuc = converged
+  est_fam <- .fit_estimator(fit, estimator)
+  is_saem <- !is.na(est_fam) && startsWith(est_fam, "saem")
+
+  # Covariance provenance (for the aggregator footnote). SAEM here uses linFim;
+  # FOCEi uses r,s (or our cov2se back-fill when covMethod is left empty).
+  cov_method <- tryCatch(fit$covMethod, error = function(e) NULL)
+  cov_source <- if (!is.null(cov_method) && nzchar(cov_method)) {
+    cov_method
+  } else if (isTRUE(base$cov_ok)) {
+    if (is_saem) "linFim" else "cov2se"
+  } else {
+    NA_character_
+  }
+
+  # MinSuc = converged (both families; converged is defined estimator-agnostically
+  # in diagnose_fit as finite OFV + cov_ok + finite cond#).
   min_suc <- base$converged
 
   # EstBnd: any bounded parameter within `boundary_hit_tol` of its lower/upper?
@@ -194,32 +279,40 @@ diagnose_fit_table3 <- function(fit, bounds_spec = list(),
   bound_hits_str <- if (length(bound_hits) > 0L)
     paste(bound_hits, collapse = ",") else NA_character_
 
-  # RndErr: search optimizer exit message for precision / rounding cues.
-  #   nlmixr2's focei doesn't emit a NONMEM-style "R MATRIX ALGORITHMICALLY
-  #   NON-POSITIVE-SEMIDEFINITE" flag, but its message field carries any
-  #   numerical-precision warnings from the underlying bobyqa/lbfgsb call.
-  rnd_err <- FALSE
-  msg <- base$message %||% NA_character_
-  if (!is.na(msg) && nzchar(msg)) {
-    rnd_err <- grepl("precision|rounding|numerical", msg,
-                     perl = TRUE, ignore.case = TRUE)
-  }
+  # RndErr / ZeroGrad are OUTER-OPTIMIZER concepts. SAEM has no outer optimizer
+  # and no FD/analytic gradient, so both are N/A (NA) for SAEM rather than a
+  # misleading FALSE. FOCEi family computes them as before.
+  if (is_saem) {
+    rnd_err   <- NA
+    zero_grad <- NA
+  } else {
+    # RndErr: search optimizer exit message for precision / rounding cues.
+    #   nlmixr2's focei doesn't emit a NONMEM-style "R MATRIX ALGORITHMICALLY
+    #   NON-POSITIVE-SEMIDEFINITE" flag, but its message field carries any
+    #   numerical-precision warnings from the underlying bobyqa/lbfgsb call.
+    rnd_err <- FALSE
+    msg <- base$message %||% NA_character_
+    if (!is.na(msg) && nzchar(msg)) {
+      rnd_err <- grepl("precision|rounding|numerical", msg,
+                       perl = TRUE, ignore.case = TRUE)
+    }
 
-  # ZeroGrad: nlmixr2 does not expose a stable gradient-norm field across
-  # versions.  Best-effort probe: look for common env slots.  Returns NA if
-  # unavailable so aggregation can footnote it.
-  zero_grad <- NA
-  grad_norm <- tryCatch({
-    env <- fit$env
-    if (!is.null(env)) {
-      if (!is.null(env$foceiInfo$grad_norm))            env$foceiInfo$grad_norm
-      else if (!is.null(env$grad_norm))                 env$grad_norm
-      else if (!is.null(env$.foceiEnv$grad_norm))       env$.foceiEnv$grad_norm
-      else NULL
-    } else NULL
-  }, error = function(e) NULL)
-  if (!is.null(grad_norm) && is.finite(grad_norm)) {
-    zero_grad <- grad_norm < 1e-6
+    # ZeroGrad: nlmixr2 does not expose a stable gradient-norm field across
+    # versions.  Best-effort probe: look for common env slots.  Returns NA if
+    # unavailable so aggregation can footnote it.
+    zero_grad <- NA
+    grad_norm <- tryCatch({
+      env <- fit$env
+      if (!is.null(env)) {
+        if (!is.null(env$foceiInfo$grad_norm))            env$foceiInfo$grad_norm
+        else if (!is.null(env$grad_norm))                 env$grad_norm
+        else if (!is.null(env$.foceiEnv$grad_norm))       env$.foceiEnv$grad_norm
+        else NULL
+      } else NULL
+    }, error = function(e) NULL)
+    if (!is.null(grad_norm) && is.finite(grad_norm)) {
+      zero_grad <- grad_norm < 1e-6
+    }
   }
 
   # CovStep: already computed as base$cov_ok.
@@ -249,6 +342,10 @@ diagnose_fit_table3 <- function(fit, bounds_spec = list(),
   phys_hits_str <- if (length(phys_hits) > 0L)
     paste(phys_hits, collapse = ",") else NA_character_
 
+  diag_note <- if (is_saem)
+    "saem: rnd_err/zero_grad N/A (gradient-free); cond_num_cor from linFim" else
+    NA_character_
+
   c(base, list(
     min_suc    = min_suc,
     est_bnd    = est_bnd,
@@ -257,7 +354,10 @@ diagnose_fit_table3 <- function(fit, bounds_spec = list(),
     cov_step   = cov_step,
     phys_bnd   = phys_bnd,
     bound_hits = bound_hits_str,
-    phys_hits  = phys_hits_str
+    phys_hits  = phys_hits_str,
+    est_family = if (is_saem) "saem" else "focei",
+    cov_source = cov_source,
+    diag_note  = diag_note
   ))
 }
 

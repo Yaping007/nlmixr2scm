@@ -33,8 +33,8 @@
 # faster than the ODE form, verified in scripts/PerformanceEvaluation04062026.R).
 # ==============================================================================
 
-PSN_INIT_CONT   <- 0.001                          # continuous cov init
-PSN_INIT_CAT    <- 0.001                          # categorical cov init
+PSN_INIT_CONT   <- 0.5                            # continuous cov init (2026-07-12: was 0.1; still plateau-trapped for nlminb/lbfgsb3c)
+PSN_INIT_CAT    <- log(1.5)                       # categorical cov init ~= 0.405 (matches truth for TH_SEX_VC scenarios)
 BOUNDARY_WIDE   <- c(-1e5, 1e5)                   # PsN default
 BOUNDARY_NARROW <- c(-10, 10)                     # paper's narrow tier
 BOUNDARY_TIGHT  <- c(-5, 5)                       # added 2026-07-09: tighter
@@ -54,8 +54,10 @@ BOUNDARY_TIGHT  <- c(-5, 5)                       # added 2026-07-09: tighter
 #         categorical_params    <- character vector of cat cov names
 #         fn_text               <- assembled source text (for debugging)
 make_true_model <- function(scenario_id, boundary = c("none", "wide", "narrow", "tight"),
-                            scenarios = PsN_scenarios) {
-  boundary <- match.arg(boundary)
+                            scenarios = PsN_scenarios,
+                            structure = c("linCmt", "ode")) {
+  boundary  <- match.arg(boundary)
+  structure <- match.arg(structure)
   scn <- scenarios[scenarios$scenario == scenario_id, , drop = FALSE]
   if (nrow(scn) != 1L) {
     stop("scenario_id = ", scenario_id, " not found in PsN_scenarios.")
@@ -117,12 +119,14 @@ make_true_model <- function(scenario_id, boundary = c("none", "wide", "narrow", 
     estimated_cont <- c(estimated_cont, "TH_BW_VC")
   }
 
-  # ---- Categorical covariate theta (always unbounded per spec) -------------
+  # ---- Categorical covariate theta ----------------------------------------
+  # 2026-07-12: previously always unbounded; that let lbfgsb3c/saem diverge to
+  # 1e13 on VcSEX. Now bounded by same tier as continuous covs.
   categorical <- character(0)
   if (scn$I_SEX_VC == 1L) {
-    ini_lines <- c(ini_lines,
-                   sprintf("TH_SEX_VC <- %.6g", PSN_INIT_CAT))
+    ini_lines <- c(ini_lines, emit_bounded("TH_SEX_VC", PSN_INIT_CAT, boundary))
     cov_body_terms_vc <- c(cov_body_terms_vc, "TH_SEX_VC * SEX")
+    if (boundary != "none") bounds_spec$TH_SEX_VC <- bounds_of(boundary)
     categorical <- "TH_SEX_VC"
   }
 
@@ -133,20 +137,36 @@ make_true_model <- function(scenario_id, boundary = c("none", "wide", "narrow", 
     "prop.err <- 0.1"
   )
 
-  # ---- model() lines: log-additive form + linCmt() ------------------------
+  # ---- model() lines: log-additive form + structural model ----------------
   cl_rhs <- paste(c("lTVCL", cov_body_terms_cl), collapse = " + ")
   vc_rhs <- paste(c("lTVVc", cov_body_terms_vc), collapse = " + ")
-  model_lines <- c(
+  param_lines <- c(
     sprintf("lTVCL_typ <- %s", cl_rhs),
     sprintf("lTVVc_typ <- %s", vc_rhs),
     "cl        <- exp(lTVCL_typ + eta.cl)",
     "vc        <- exp(lTVVc_typ + eta.vc)",
     "q         <- exp(lTVQ)",
     "vp        <- exp(lTVVp)",
-    "ka        <- exp(lTVKA)",
-    "cp        <- linCmt()",
-    "cp ~ prop(prop.err)"
+    "ka        <- exp(lTVKA)"
   )
+  # Structural tail: linCmt() analytic form, or explicit 2-cmt oral ODE.
+  # ODE unlocks foceiControl(fast=TRUE) analytic gradients and a well-behaved
+  # integrand for SAEM post-hoc quadrature / IS likelihoods.  Compartments are
+  # named depot / central / periph to match to_nm_dataset() CMT labels.
+  struct_lines <- switch(structure,
+    "linCmt" = c(
+      "cp        <- linCmt()",
+      "cp ~ prop(prop.err)"
+    ),
+    "ode" = c(
+      "d/dt(depot)   <- -ka * depot",
+      "d/dt(central) <-  ka * depot - (cl / vc) * central - (q / vc) * central + (q / vp) * periph",
+      "d/dt(periph)  <-  (q / vc) * central - (q / vp) * periph",
+      "cp        <- central / vc",
+      "cp ~ prop(prop.err)"
+    )
+  )
+  model_lines <- c(param_lines, struct_lines)
 
   # ---- Assemble function source text and eval() to build a real closure ---
   fn_text <- paste0(
@@ -159,9 +179,20 @@ make_true_model <- function(scenario_id, boundary = c("none", "wide", "narrow", 
 
   attr(fn, "scenario_id")           <- scenario_id
   attr(fn, "boundary")              <- boundary
+  attr(fn, "structure")             <- structure
   attr(fn, "bounds_spec")           <- bounds_spec
   attr(fn, "estimated_cont_params") <- estimated_cont
   attr(fn, "categorical_params")    <- categorical
   attr(fn, "fn_text")               <- fn_text
   fn
+}
+
+# ---- Convenience wrapper: ODE structural model -----------------------------
+# Thin alias so callers can request the ODE form explicitly without passing
+# structure = "ode".  Signature mirrors make_true_model().
+make_true_model_ode <- function(scenario_id,
+                                boundary  = c("none", "wide", "narrow", "tight"),
+                                scenarios = PsN_scenarios) {
+  make_true_model(scenario_id, boundary = boundary,
+                  scenarios = scenarios, structure = "ode")
 }
