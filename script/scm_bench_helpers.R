@@ -54,6 +54,8 @@ base_2cmt_oral_linCmt <- function() {
     cp ~ prop(prop.err)
   })
 }
+# stamp structure so fit_model_type()/assemble_common() resolve model_type
+attr(base_2cmt_oral_linCmt, "structure") <- "linCmt"
 
 ## ---- Base model (2-cmt oral, explicit ODE) --------------------------------
 ## Canonical estimation model (2026-07).  Replaces base_2cmt_oral_linCmt() in
@@ -108,6 +110,8 @@ base_2cmt_oral_ode <- function() {
     cp ~ prop(prop.err)
   })
 }
+# stamp structure so fit_model_type()/assemble_common() resolve model_type
+attr(base_2cmt_oral_ode, "structure") <- "ode"
 
 ## ---- to_nm_dataset --------------------------------------------------------
 to_nm_dataset <- function(sim_obs) {
@@ -254,10 +258,21 @@ rel_err_one <- function(est_long, true_long, scenario_id) {
 }
 
 ## ---- runSCM_traced --------------------------------------------------------
+# Records BOTH wall-clock (Sys.time) and CPU-seconds (proc.time). CPU includes
+# the user.child/sys.child columns, where runSCM's forked `workers` credit
+# their work once reaped -- so cpu_s captures the parallel candidate fits that
+# wall-clock hides.  hog = cpu_s / elapsed_s is the realised parallel speedup.
+cpu_secs <- function(pt) {
+  unname(sum(pt[c("user.self", "sys.self", "user.child", "sys.child")],
+             na.rm = TRUE))
+}
+
 runSCM_traced <- function(label, ...) {
   t0  <- Sys.time()
+  p0  <- proc.time()
   res <- nlmixr2scm::runSCM(...)
   attr(res, "elapsed_s") <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
+  attr(res, "cpu_s")     <- cpu_secs(proc.time() - p0)
   res
 }
 
@@ -383,8 +398,10 @@ package_scm_result <- function(label, scm_res, runtime_sec,
 #   refit_estimator : estimator label for the refit dispatch (defaults to the
 #                     cell's own `estimator`, i.e. refined settings of the same
 #                     method).
-#   runtimes        : list(base_sec=, scm_sec=) wall-clock inputs; refit_sec is
-#                     measured here and total_sec is their sum.
+#   runtimes        : list(base_sec=, scm_sec=, base_cpu=, scm_cpu=) timing
+#                     inputs. *_sec are wall-clock; *_cpu are CPU-seconds
+#                     (self + forked-child). refit_sec/refit_cpu are measured
+#                     here; total_sec/total_cpu are the phase sums.
 #   identity        : list(sample_N=, dataset_id=, boundary=) extra scalar keys
 #                     folded into the record + meta manifest.
 #   out_rds         : target .rds path; when non-NULL the three sidecars are
@@ -396,7 +413,7 @@ package_scm_schema21 <- function(scm_res, true_mod, scenario_id, true_params,
                                  estimator, outer_opt = NA_character_,
                                  refit_ctrl = NULL, refit_estimator = estimator,
                                  runtimes = list(), identity = list(),
-                                 out_rds = NULL) {
+                                 structure = NULL, out_rds = NULL) {
 
   .pickFit <- function(x) {
     if (is.null(x)) return(NULL)
@@ -427,10 +444,12 @@ package_scm_schema21 <- function(scm_res, true_mod, scenario_id, true_params,
 
   # 2. tight-tol covariance refit with the cell's own final settings.
   refit_sec <- NA_real_
+  refit_cpu <- NA_real_
   cov_done  <- FALSE
   if (!is.null(winner) && !is.null(refit_ctrl)) {
     est_dispatch <- nlmixr_est_name(refit_estimator)
     t0 <- Sys.time()
+    p0 <- proc.time()
     refit <- tryCatch(
       nlmixr2(winner$ui, nlme::getData(winner),
               est = est_dispatch, control = refit_ctrl),
@@ -441,6 +460,7 @@ package_scm_schema21 <- function(scm_res, true_mod, scenario_id, true_params,
       }
     )
     refit_sec <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
+    refit_cpu <- cpu_secs(proc.time() - p0)
     if (!is.null(refit)) {
       winner   <- refit
       cov_done <- !is.null(refit$cov) && all(is.finite(diag(refit$cov)))
@@ -459,14 +479,30 @@ package_scm_schema21 <- function(scm_res, true_mod, scenario_id, true_params,
   )
 
   # 4. runtime override (recommendation A): drop the scalar, attach a list.
+  #    Two parallel blocks are kept:
+  #      $runtime -> WALL-clock seconds per phase (what the user waits).
+  #      $cpu     -> CPU seconds per phase (self + forked-child), i.e. total
+  #                  work.  hog_factor = cpu_total / wall_total is the realised
+  #                  parallel speedup nlmixr2 delivered (1 = fully serial).
   base_sec <- as.numeric(runtimes$base_sec %||% NA_real_)
   scm_sec  <- as.numeric(runtimes$scm_sec  %||% NA_real_)
+  base_cpu <- as.numeric(runtimes$base_cpu %||% NA_real_)
+  scm_cpu  <- as.numeric(runtimes$scm_cpu  %||% NA_real_)
   rec$fit_runtime_sec <- NULL
+  wall_total <- sum(c(base_sec, scm_sec, refit_sec), na.rm = TRUE)
+  cpu_total  <- sum(c(base_cpu, scm_cpu, refit_cpu), na.rm = TRUE)
   rec$runtime <- list(
     base_sec  = base_sec,
     scm_sec   = scm_sec,
     refit_sec = refit_sec,
-    total_sec = sum(c(base_sec, scm_sec, refit_sec), na.rm = TRUE)
+    total_sec = wall_total
+  )
+  rec$cpu <- list(
+    base_sec   = base_cpu,
+    scm_sec    = scm_cpu,
+    refit_sec  = refit_cpu,
+    total_sec  = cpu_total,
+    hog_factor = if (wall_total > 0) cpu_total / wall_total else NA_real_
   )
 
   # 5. $scm block (subsumes the old standalone scm.rds).
@@ -489,7 +525,15 @@ package_scm_schema21 <- function(scm_res, true_mod, scenario_id, true_params,
   rec$outer_opt         <- outer_opt
   rec$refit_estimator   <- refit_estimator
   rec$boundary          <- identity$boundary  %||% NA_character_
+  rec$structure         <- structure %||% attr(true_mod, "structure") %||% rec$model_type
   rec$refit_runtime_sec <- refit_sec          # populate meta from runtime$refit_sec
+
+  # Flat scalar mirrors of the nested $runtime/$cpu blocks so the timing and
+  # the parallelism benefit are greppable from the tiny .meta.json manifest
+  # (which only carries flat scalars) without opening the .rds.
+  rec$wall_total_sec <- wall_total
+  rec$cpu_total_sec  <- cpu_total
+  rec$hog_factor     <- rec$cpu$hog_factor
 
   # 6. persist: res_ds*.rds + res_ds*.fit.rds + res_ds*.meta.json.
   if (!is.null(out_rds)) {
