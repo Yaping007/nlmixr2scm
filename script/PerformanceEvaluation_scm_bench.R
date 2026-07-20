@@ -69,7 +69,10 @@ parse_args <- function(argv) {
                force_rerun = FALSE, force_repackage = FALSE,
                out_root = "output/scm_bench",
                input_root = "Inputdataset",
-               true_params_path = "Inputdataset/true_params_long.rds")
+               true_params_path = "Inputdataset/true_params_long.rds",
+               screen_sigdig = NA_real_,
+               screen_atol   = NA_real_,
+               screen_rtol   = NA_real_)
   i <- 1L
   while (i <= length(argv)) {
     a <- argv[i]
@@ -88,6 +91,9 @@ parse_args <- function(argv) {
       "--out_root"         = { opts$out_root <- val() },
       "--input_root"       = { opts$input_root <- val() },
       "--true_params"      = { opts$true_params_path <- val() },
+      "--screen_sigdig"    = { v <- val(); opts$screen_sigdig <- if (v %in% c("NA","na","")) NA_real_ else as.numeric(v) },
+      "--screen_atol"      = { v <- val(); opts$screen_atol   <- if (v %in% c("NA","na","")) NA_real_ else as.numeric(v) },
+      "--screen_rtol"      = { v <- val(); opts$screen_rtol   <- if (v %in% c("NA","na","")) NA_real_ else as.numeric(v) },
       stop(sprintf("Unknown arg: %s", a))
     )
     i <- i + 1L
@@ -214,7 +220,10 @@ run_bench_cell <- function(opts) {
   # candidate LRT; final (r,s cov + tables) for the single post-SCM tight-tol
   # covariance refit (two-tier runSCM approach). Both tiers share the tuned
   # sigdig/derivEps/ODE tols per (est, outer_opt).
-  screen_bundle <- make_est_control(opts$estimator, opts$outer_opt, "screen")
+  screen_bundle <- make_est_control(opts$estimator, opts$outer_opt, "screen",
+                                    screen_sigdig = opts$screen_sigdig,
+                                    screen_atol   = opts$screen_atol,
+                                    screen_rtol   = opts$screen_rtol)
   final_bundle  <- make_est_control(opts$estimator, opts$outer_opt, "final")
 
   # Base (covariate-free) model matching the requested structure; carries

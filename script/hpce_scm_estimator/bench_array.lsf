@@ -62,6 +62,9 @@ Rscript "$SCRIPTS_DIR/PerformanceEvaluation_scm_bench.R" \
     --workers  "${WORKERS:-3}" \
     --rx_threads "${RX_THREADS:-1}" \
     --out_root "${OUT_ROOT:-output/scm_bench}" \
+    --screen_sigdig "${SCREEN_SIGDIG:-NA}" \
+    --screen_atol   "${SCREEN_ATOL:-NA}" \
+    --screen_rtol   "${SCREEN_RTOL:-NA}" \
     --dataset  "$LSB_JOBINDEX"
 
 exit_code=$?

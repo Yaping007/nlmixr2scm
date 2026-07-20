@@ -362,16 +362,71 @@ exclusive node, so the wall times are uncontended and the ratio isolates the
 fork benefit from the serial base/refit/covariance phases. `aggregate_lsf_cpu.R`
 provides the corroborating LSF CPU cross-check.
 
-## Aggregation (operating characteristics — deferred)
+## Aggregation (operating characteristics)
 
-To be drafted (mirrors `script/aggregate_vae_covsel.R`). It will discover files
-under `output/scm_bench/N*/scn*_*/*_*/res_ds*.rds`, parse the path coordinates
-(`scn<SS>_<structure>` → scenario + structure) as a backstop for missing in-RDS
-keys, and roll `rec$scm$*` / `rec$rel_err` / `rec$runtime$*` up into per-cell
-tables of Power, PowerCN, PowerMinSuc, RMRSE, and wall runtime. (Timing is
-already covered by `aggregate_scm_timing.R` + `aggregate_lsf_cpu.R`; the
-in-record `hog_factor` is **not** a valid benefit metric \u2014 see *Measuring the
-parallel benefit correctly* above.)
+Roll the per-dataset `res_ds*.rds` records up into operating characteristics
+with `script/aggregate_scm_estimator2.1.R` (sibling of
+`aggregate_vae_covsel.R`; the "2.1" suffix marks the schema-2.1 record format,
+distinct from the old-schema `aggregate_bench_refit_results.R`). It scans
+`output/scm_bench/N*/scn*_*/*_*/res_ds*.rds` (skipping the `.fit.rds`
+sidecars), parses the path coordinates (`scn<SS>_<structure>` plus the
+`<est>_<opt>` dir) as a backstop for in-RDS keys, **derives** the true
+covariate set per scenario from the `PsN_scenarios` indicators (SCM records do
+not store `true_set`), recomputes `converged` from numerical evidence, and
+writes 11 CSVs + 1 bundled `.rds` to `output/scm_bench_aggregated/`.
+
+### Command line (HPCE)
+
+```bash
+Rscript "script/aggregate_scm_estimator2.1.R" --root output --sub scm_bench
+# custom output dir:
+# Rscript "script/aggregate_scm_estimator2.1.R" --root output --sub scm_bench --out_dir output/scm_bench_aggregated
+```
+
+### Interactive R
+
+```r
+source("script/aggregate_scm_estimator2.1.R")
+res <- aggregate_scm_bench_run(root = "output", sub = "scm_bench")
+
+res$power           # Power / PowerCN / PowerMinSuc per cell
+res$diag_rates      # %converged, CN, WALL/CPU timing, hog per cell
+subset(res$estim_all, param_class == "covariate_beta")   # clean covariate-beta rel-err
+res$covsel_by_cov   # per-covariate detection rate
+res$relpower        # per-k fraction recovering >= k true covariates
+```
+
+Both approaches write to `output/scm_bench_aggregated/`:
+
+| file | contents |
+|------|----------|
+| `scm_file_index.csv`      | one row per discovered RDS (+ `has_error`) |
+| `scm_diag_long.csv`       | per fit: convergence, CN, WALL/CPU timing, selection tally |
+| `scm_rse_long.csv`        | per (fit, parameter): `rel_err` + `param_class` |
+| `scm_covsel_long.csv`     | per (fit, var, covar): `in_true`/`in_scm`/`verdict` (TP/FN/FP) |
+| `scm_diag_rates.csv`      | per cell: %Converged(Strict), CN, MedObjF, WALL phase timing, hog |
+| `scm_estim_all.csv`       | per (cell, parameter): MedRE / MARE / RMRSE (all fits) |
+| `scm_estim_success.csv`   | same, strict-converged fits only |
+| `scm_estim_cond.csv`      | same, exact-match fits only |
+| `scm_power.csv`           | per cell: Power / PowerCN / PowerMinSuc |
+| `scm_relpower.csv`        | per (cell, k): fraction recovering >= k true covariates |
+| `scm_covsel_by_covar.csv` | per (cell, var, covar): detection rate + TP/FP/FN |
+
+Grouping cell = `(sample_N, scenario, structure, estimator, outer_opt)`. The
+completed sweep is `focei_bobyqa` only, so estimator/outer_opt are effectively
+constant, but the keys generalise to additional cells.
+
+**Selection scoring** is on `(var, covar)` (not functional shape) for parity
+with the VAE pilot and the DGP truth. **Timing note:** `scm_diag_rates` reports
+the WALL phase split (`MedWallBase/Scm/Refit/Total_sec`) -- the usable timing.
+The `MedCpuTotal_sec` / `MedHogFactor` columns are carried through but
+UNDER-report (fork workers not captured by `proc.time()`); use
+`script/aggregate_lsf_cpu.R` for the honest CPU / parallelism story. See
+*Measuring the parallel benefit correctly* above.
+
+**Reference caveat** (estimation metrics only): `covariate_beta` rel-err is
+centring-invariant and clean; `structural_intercept` (TVCL/TVVc) is
+reference-dependent -- interpret with care.
 
 ## Manual smoke test (single fit, local Windows)
 
