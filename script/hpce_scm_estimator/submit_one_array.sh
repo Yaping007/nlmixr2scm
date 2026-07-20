@@ -60,9 +60,38 @@ echo "  REPO_ROOT   = $REPO_ROOT"
 echo "  SCRIPTS_DIR = $SCRIPTS_DIR"
 echo "  logs        = $LOGDIR/${JOBNAME}.<jobid>.<idx>.{out,err}"
 
-bsub \
-  -J "${JOBNAME}[${DS_START}-${DS_END}]%${MAXPAR}" \
-  -o "${LOGDIR}/${JOBNAME}.%J.%I.out" \
-  -e "${LOGDIR}/${JOBNAME}.%J.%I.err" \
-  -env "all, REPO_ROOT=${REPO_ROOT}, SCRIPTS_DIR=${SCRIPTS_DIR}, SAMPLE_N=${SAMPLE_N}, SCN=${SCN}, EST=${EST}, OPT=${OPT}, STRUCTURE=${STRUCTURE}" \
-  < "$HERE/bench_array.lsf"
+# --- optional knobs (set via env) ------------------------------------------
+#   DEPEND_JOBID : if set, this array waits until that job ENDS (done OR exit)
+#                  before starting -> serialize arrays to avoid host contention.
+#   EXCLUSIVE=1  : request the whole node (-x) so the 3 SCM fork workers are
+#                  never starved for cores -> trustworthy wall-time measurement.
+#   JOBID_FILE   : if set, the submitted array's job id is written here so a
+#                  caller (submit_all_arrays.sh CHAIN mode) can chain on it.
+EXTRA_BSUB=()
+if [ -n "${DEPEND_JOBID:-}" ]; then
+  EXTRA_BSUB+=( -w "ended(${DEPEND_JOBID})" )
+  echo "  depends on  = ended(${DEPEND_JOBID})"
+fi
+if [ "${EXCLUSIVE:-0}" = "1" ]; then
+  EXTRA_BSUB+=( -x )
+  echo "  exclusive   = -x (whole node)"
+fi
+
+# capture bsub stdout so we can extract the job id
+bsub_out="$(
+  bsub \
+    "${EXTRA_BSUB[@]}" \
+    -J "${JOBNAME}[${DS_START}-${DS_END}]%${MAXPAR}" \
+    -o "${LOGDIR}/${JOBNAME}.%J.%I.out" \
+    -e "${LOGDIR}/${JOBNAME}.%J.%I.err" \
+    -env "all, REPO_ROOT=${REPO_ROOT}, SCRIPTS_DIR=${SCRIPTS_DIR}, SAMPLE_N=${SAMPLE_N}, SCN=${SCN}, EST=${EST}, OPT=${OPT}, STRUCTURE=${STRUCTURE}" \
+    < "$HERE/bench_array.lsf"
+)"
+echo "$bsub_out"
+
+# bsub prints:  Job <261262> is submitted to queue <short>.
+JOBID="$(printf '%s\n' "$bsub_out" | sed -n 's/^Job <\([0-9]\+\)>.*/\1/p' | head -n1)"
+if [ -n "${JOBID_FILE:-}" ] && [ -n "$JOBID" ]; then
+  printf '%s\n' "$JOBID" > "$JOBID_FILE"
+fi
+echo "Submitted job id: ${JOBID:-<unparsed>}"

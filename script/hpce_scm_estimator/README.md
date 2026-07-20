@@ -74,12 +74,47 @@ comes from the fork (`workers`) and, across datasets, from the LSF array width.
 The pinned values are recorded in every record and `meta.json` as
 `scm_workers` (3) and `rx_threads` (1).
 
-**Both wall-time and CPU-time are recorded.** CPU is measured with
-`proc.time()` including the `user.child`/`sys.child` columns, so the forked
-workers' CPU (invisible to wall-clock) is captured. The ratio
-**`hog_factor = cpu_total / wall_total`** reflects the fork parallelism during
-the candidate-fit phase (CPU can exceed wall there); serial phases (outer
-optimizer, covariance, packaging) pull the overall factor back toward ~1.
+### Measuring the parallel benefit correctly (read this)
+
+Every record stores both a WALL-clock and a CPU timing block, but **the
+in-record CPU numbers do NOT prove the fork speedup** — for two reasons:
+
+1. **`proc.time()` cannot see the fork workers.** `runSCM(workers=3)` forks
+   child processes; `proc.time()`'s `user.child`/`sys.child` columns are only
+   populated for children reaped via `wait()`, which the fork pool does not do.
+   So the recorded `cpu$scm_sec` misses almost all of the parallel work.
+2. **The driver never passes `base_cpu`/`scm_cpu`** to `package_scm_schema21()`,
+   so `cpu$base_sec`/`cpu$scm_sec` are `NA` and `cpu_total_sec` is essentially
+   just the refit CPU.
+
+Consequently the in-record `hog_factor = cpu_total / wall_total` comes out
+**≈ 0.03–0.25** — an artefact of unmeasured CPU, *not* a slowdown. **Do not use
+it to claim (or deny) a parallelism benefit.**
+
+**The authoritative CPU measure is LSF.** LSF accounts CPU for the whole
+process tree (parent + all fork workers + OpenMP threads) and writes it into
+every task's `-o .out` log (`Resource usage summary → CPU time` / `Run time`);
+`bacct -l <jobid>` reports the same. Parse it with
+`script/aggregate_lsf_cpu.R`.
+
+**Why even the LSF whole-job `hog` is < 1.** An SCM task is
+`base fit (serial) → SCM search (3 forks, parallel) → refit (serial) →
+covariance (serial)`. The fork only accelerates the SCM-search phase, which is
+a minority of total wall time, so the *whole-job* CPU/wall averages below 1.
+The fork genuinely works — it is simply diluted by the serial phases and by
+non-compute wall time (model compilation, disk I/O, host contention).
+
+**The clean demonstration is a phase-isolated A/B:** run identical datasets with
+`workers=1` vs `workers=3` (both `rxThreads=1`) on **exclusive nodes** and
+compare the SCM-phase wall time directly:
+
+```
+SCM-phase speedup = scm_sec(workers=1) / scm_sec(workers=3)
+```
+
+Wall time is only trustworthy when cores are not shared, so run the A/B with
+`EXCLUSIVE=1` (and `CHAIN=1` / small `MAXPAR`) — see *Contention-free timing*
+below.
 
 ## Files
 
@@ -156,9 +191,14 @@ Each record carries the coordinate keys (`sample_N`, `scenario_id`,
 diagnostic blocks (`diag`, `diag_t3`), and **two parallel timing blocks**:
 
 - `$runtime` — WALL-clock seconds per phase: `base_sec`, `scm_sec`,
-  `refit_sec`, `total_sec`.
-- `$cpu` — CPU seconds (self + forked-child) per phase plus
-  `hog_factor = cpu$total_sec / runtime$total_sec` (the parallelism benefit).
+  `refit_sec`, `total_sec`. **These are the usable timing numbers**; `scm_sec`
+  is the phase to compare for the fork speedup.
+- `$cpu` — CPU seconds per phase plus
+  `hog_factor = cpu$total_sec / runtime$total_sec`. **Caveat:** `proc.time()`
+  does not capture the fork workers' CPU and the driver omits `base_cpu`/
+  `scm_cpu`, so `cpu$base_sec`/`cpu$scm_sec` are `NA` and `hog_factor` (≈0.03–
+  0.25) is a measurement artefact — use LSF CPU (`aggregate_lsf_cpu.R`) for the
+  real figure, not this.
 
 The flat scalars `wall_total_sec`, `cpu_total_sec`, `hog_factor` are also
 mirrored into `res_ds<DDD>.meta.json` so timing/benefit is greppable without
@@ -182,9 +222,14 @@ cd ~/nlmixr2scm && git pull
 sed -i 's/\r$//' script/hpce_scm_estimator/*.sh script/hpce_scm_estimator/*.lsf script/*.R
 
 STRUCTURES=ode NS=80 SCENARIOS=16 ESTIMATORS=focei FOCEI_OPTS=bobyqa \
-  bash script/hpce_scm_estimator/submit_all_arrays.sh 5 20 --force_rerun
+  bash script/hpce_scm_estimator/submit_all_arrays.sh 5 20
 # equivalently:
 # bash script/hpce_scm_estimator/submit_one_array.sh 80 16 focei bobyqa ode 5 20
+bkill 261294 261295 261296 261297 261298 261299 261300 261301 261302 261303 261304 261305 261306 261307 261308 261309
+
+bash script/hpce_scm_estimator/submit_one_array.sh 40  2 focei bobyqa linCmt 1 1 212 #retun failed runs
+bash script/hpce_scm_estimator/submit_one_array.sh 80  9 focei bobyqa linCmt 1 1  13
+
 ```
 
 Monitor and read actual resource usage:
@@ -253,14 +298,55 @@ Flags:
 - `--force_rerun` bypasses both caches;
 - `--force_repackage` ignores stale `res_*` but reuses cached `scm_*`.
 
-## Aggregation (next step — deferred)
+## Contention-free timing (fork-parallelism benefit)
+
+The bulk sweep runs many tasks per node (`%MAXPAR` shared hosts), so its wall
+times are **contaminated by host contention** and understate the fork speedup.
+To measure the benefit cleanly, run a small A/B on isolated nodes.
+
+`submit_all_arrays.sh` / `submit_one_array.sh` expose two isolation knobs:
+
+| env | effect |
+|-----|--------|
+| `EXCLUSIVE=1` | adds `-x` \u2014 each task owns its whole node, so the 3 fork workers are never starved for cores (trustworthy wall time). |
+| `CHAIN=1`     | submits arrays with an LSF `ended()` dependency chain \u2014 only one array runs at a time (no cross-array contention). |
+
+Strictest, cleanest configuration (single task per node, arrays serialized):
+
+```bash
+CHAIN=1 EXCLUSIVE=1 \
+  STRUCTURES='linCmt ode' NS='40 80 300' SCENARIOS=16 \
+  ESTIMATORS=focei FOCEI_OPTS=bobyqa \
+  bash script/hpce_scm_estimator/submit_all_arrays.sh 20 1
+```
+
+(`MAXPAR=1` \u2192 no intra-array concurrency either.) Use a small dataset count
+(20\u201330) \u2014 exclusive nodes are scarce and medians stabilise quickly.
+
+Then extract the honest numbers:
+
+```bash
+# LSF whole-tree CPU vs wall (authoritative CPU; parses the .out summaries)
+Rscript script/aggregate_lsf_cpu.R --logs logs --out_dir output/scm_timing
+# in-record WALL phase split (base/scm/refit) for the scm_sec speedup ratio
+Rscript script/aggregate_scm_timing.R --root output/scm_bench --out_dir output/scm_timing
+```
+
+The publishable metric is the **SCM-phase wall-time ratio**
+`scm_sec(workers=1) / scm_sec(workers=3)` from the exclusive-node A/B (the
+`workers=1` arm requires the `--workers` driver flag). `aggregate_lsf_cpu.R`
+provides the corroborating LSF CPU cross-check.
+
+## Aggregation (operating characteristics — deferred)
 
 To be drafted (mirrors `script/aggregate_vae_covsel.R`). It will discover files
 under `output/scm_bench/N*/scn*_*/*_*/res_ds*.rds`, parse the path coordinates
 (`scn<SS>_<structure>` → scenario + structure) as a backstop for missing in-RDS
-keys, and roll `rec$scm$*` / `rec$rel_err` / `rec$runtime$*` / `rec$cpu$*` up
-into per-cell tables of Power, PowerCN, PowerMinSuc, RMRSE, wall/CPU runtime,
-and the `hog_factor` parallelism benefit.
+keys, and roll `rec$scm$*` / `rec$rel_err` / `rec$runtime$*` up into per-cell
+tables of Power, PowerCN, PowerMinSuc, RMRSE, and wall runtime. (Timing is
+already covered by `aggregate_scm_timing.R` + `aggregate_lsf_cpu.R`; the
+in-record `hog_factor` is **not** a valid benefit metric \u2014 see *Measuring the
+parallel benefit correctly* above.)
 
 ## Manual smoke test (single fit, local Windows)
 
