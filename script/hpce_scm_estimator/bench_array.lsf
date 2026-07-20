@@ -18,9 +18,8 @@
 
 #BSUB -n 4
 #BSUB -R "span[hosts=1]"
-#BSUB -M 4000
-#BSUB -q testing
-#BSUB -W 60          # 1-hour cap for the testing queue
+#BSUB -M 3000
+#BSUB -W 03:00
 
 set -euo pipefail
 
@@ -60,6 +59,12 @@ Rscript "$SCRIPTS_DIR/PerformanceEvaluation_scm_bench.R" \
     --estimator "$EST" \
     --outer_opt "$OPT" \
     --structure "$STRUCTURE" \
+    --workers  "${WORKERS:-3}" \
+    --rx_threads "${RX_THREADS:-1}" \
+    --out_root "${OUT_ROOT:-output/scm_bench}" \
+    --screen_sigdig "${SCREEN_SIGDIG:-NA}" \
+    --screen_atol   "${SCREEN_ATOL:-NA}" \
+    --screen_rtol   "${SCREEN_RTOL:-NA}" \
     --dataset  "$LSB_JOBINDEX"
 
 exit_code=$?

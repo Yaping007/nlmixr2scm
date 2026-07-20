@@ -102,8 +102,11 @@ seed_all <- function(seed, estimator) {
 #   needs_post_refit = TRUE for saem final -> use foceif for the covariance
 #   step (the driver handles the refit; the estimator_factory just flags it).
 make_est_control <- function(est,
-                             outer_opt = NA_character_,
-                             tier      = c("final", "screen")) {
+                             outer_opt     = NA_character_,
+                             tier          = c("final", "screen"),
+                             screen_sigdig = NA_real_,
+                             screen_atol   = NA_real_,
+                             screen_rtol   = NA_real_) {
   tier <- match.arg(tier)
 
   # Optimizer class: gradient-based outer optimizers need tighter ODE
@@ -115,6 +118,18 @@ make_est_control <- function(est,
   sigdig    <- if (is_grad_opt) 5 else 4
   atol      <- if (is_grad_opt) 1e-10 else 1e-8
   rtol      <- if (is_grad_opt) 1e-8  else 1e-6
+
+  # A/B knob: on the SCREEN tier ONLY, optionally coarsen the candidate-LRT
+  # optimization precision to match the ORIGINAL pipeline (sigdig=3, atol=1e-6,
+  # rtol=1e-4). Tighter screening (the current default sigdig=4) realizes more
+  # of each spurious covariate's dOFV past the chi^2_1=3.84 forward-LRT
+  # threshold, inflating the null-scenario false-positive rate. The FINAL tier
+  # (covariance refit) is deliberately untouched so it stays tight.
+  if (tier == "screen") {
+    if (!is.na(screen_sigdig)) sigdig <- screen_sigdig
+    if (!is.na(screen_atol))   atol   <- screen_atol
+    if (!is.na(screen_rtol))   rtol   <- screen_rtol
+  }
   rxc       <- rxode2::rxControl(atol = atol, rtol = rtol)
 
   # Tier-specific: screen skips covariance and table build; final does both.

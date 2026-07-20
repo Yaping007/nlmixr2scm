@@ -65,10 +65,14 @@ parse_args <- function(argv) {
   opts <- list(N = 80L, scenario = 16L, dataset = 1L,
                estimator = "focei", outer_opt = NA_character_,
                structure = "linCmt",
+               workers = 3L, rx_threads = 1L,
                force_rerun = FALSE, force_repackage = FALSE,
                out_root = "output/scm_bench",
                input_root = "Inputdataset",
-               true_params_path = "Inputdataset/true_params_long.rds")
+               true_params_path = "Inputdataset/true_params_long.rds",
+               screen_sigdig = NA_real_,
+               screen_atol   = NA_real_,
+               screen_rtol   = NA_real_)
   i <- 1L
   while (i <= length(argv)) {
     a <- argv[i]
@@ -80,11 +84,16 @@ parse_args <- function(argv) {
       "--estimator"        = { opts$estimator<- val() },
       "--outer_opt"        = { v <- val(); opts$outer_opt <- if (v %in% c("NA","na","")) NA_character_ else v },
       "--structure"        = { opts$structure <- val() },
+      "--workers"          = { opts$workers    <- as.integer(val()) },
+      "--rx_threads"       = { opts$rx_threads <- as.integer(val()) },
       "--force_rerun"      = { opts$force_rerun     <- TRUE },
       "--force_repackage"  = { opts$force_repackage <- TRUE },
       "--out_root"         = { opts$out_root <- val() },
       "--input_root"       = { opts$input_root <- val() },
       "--true_params"      = { opts$true_params_path <- val() },
+      "--screen_sigdig"    = { v <- val(); opts$screen_sigdig <- if (v %in% c("NA","na","")) NA_real_ else as.numeric(v) },
+      "--screen_atol"      = { v <- val(); opts$screen_atol   <- if (v %in% c("NA","na","")) NA_real_ else as.numeric(v) },
+      "--screen_rtol"      = { v <- val(); opts$screen_rtol   <- if (v %in% c("NA","na","")) NA_real_ else as.numeric(v) },
       stop(sprintf("Unknown arg: %s", a))
     )
     i <- i + 1L
@@ -147,18 +156,26 @@ run_bench_cell <- function(opts) {
                  opts$estimator, opts$outer_opt))
   }
 
-  # Parallelism policy (fair + reproducible):
+  # Parallelism policy (CLI-driven; supports the workers=1 vs 3 timing A/B).
   #   runSCM forks `workers` child processes for SCM candidate LRTs. rxode2's
-  #   ODE solver uses OpenMP. fork() over a live OpenMP thread pool is UNDEFINED
-  #   behaviour -- it silently corrupts the ODE solve in the children, producing
-  #   non-deterministic, wrong fits (frozen-at-init OFVs, junk LRT deltas).
-  #   Therefore we PIN rxThreads=1: OpenMP off, so the SCM fork is clean and
-  #   every cell is bitwise reproducible. Parallelism comes from the fork
-  #   (workers) and, across datasets, the LSF array width.
-  scm_workers <- 3L
-  rx_threads  <- 1L
-  rxode2::setRxThreads(rx_threads)
-  Sys.setenv(OMP_NUM_THREADS = "1")   # also quiet BLAS/OpenMP in child procs
+  #   ODE solver uses OpenMP. workers>1 AND rxThreads>1 is fork()-over-OpenMP
+  #   = undefined behaviour that corrupts the ODE solve (runs 2 & 3). We
+  #   therefore ENFORCE rxThreads=1 whenever workers>1, and actually PIN the
+  #   resolved value (setRxThreads + OMP_NUM_THREADS) so it is deterministic
+  #   and the recorded number is the number really used.
+  scm_workers <- max(1L, opts$workers %||% 3L)
+  rx_threads  <- opts$rx_threads %||% 1L
+  if (scm_workers > 1L && (is.na(rx_threads) || rx_threads > 1L)) {
+    if (!is.na(rx_threads) && rx_threads > 1L)
+      warning(sprintf("workers=%d requires rxThreads=1 (fork-safety); forcing 1.",
+                      scm_workers))
+    rx_threads <- 1L
+  }
+  if (is.na(rx_threads)) rx_threads <- 1L
+  Sys.setenv(OMP_NUM_THREADS = rx_threads)
+  try(rxode2::setRxThreads(rx_threads), silent = TRUE)
+  message(sprintf(">>> parallelism: workers=%d, rxThreads=%d",
+                  scm_workers, rx_threads))
 
   # Paths
   save_dir  <- cell_dir(opts$out_root, opts$N, opts$scenario,
@@ -203,7 +220,10 @@ run_bench_cell <- function(opts) {
   # candidate LRT; final (r,s cov + tables) for the single post-SCM tight-tol
   # covariance refit (two-tier runSCM approach). Both tiers share the tuned
   # sigdig/derivEps/ODE tols per (est, outer_opt).
-  screen_bundle <- make_est_control(opts$estimator, opts$outer_opt, "screen")
+  screen_bundle <- make_est_control(opts$estimator, opts$outer_opt, "screen",
+                                    screen_sigdig = opts$screen_sigdig,
+                                    screen_atol   = opts$screen_atol,
+                                    screen_rtol   = opts$screen_rtol)
   final_bundle  <- make_est_control(opts$estimator, opts$outer_opt, "final")
 
   # Base (covariate-free) model matching the requested structure; carries
@@ -268,9 +288,6 @@ run_bench_cell <- function(opts) {
       vae_status <- NA_character_
     }
     t_base_sec <- as.numeric(t_base["elapsed"])
-    # CPU-seconds for the base fit (self + forked-child); cpu/wall = speedup.
-    t_base_cpu <- unname(sum(t_base[c("user.self", "sys.self",
-                                      "user.child", "sys.child")], na.rm = TRUE))
 
     # SCM screening
     scm_res <- runSCM_traced(
@@ -291,13 +308,12 @@ run_bench_cell <- function(opts) {
       searchType = "scm",
       control    = screen_bundle$ctrl,
       saveModels = FALSE,
-      workers    = 3L,
+      workers    = scm_workers,
       print      = 0,
       maxRetries = 0L,
       confirm    = FALSE
     )
     t_scm_sec <- as.numeric(attr(scm_res, "elapsed_s"))
-    t_scm_cpu <- suppressWarnings(as.numeric(attr(scm_res, "cpu_s")))
     saveRDS(scm_res, scm_path)
 
     # Tight-tol covariance refit strategy: VAE cov is in-fit (skip refit);
@@ -314,8 +330,7 @@ run_bench_cell <- function(opts) {
       outer_opt       = opts$outer_opt,
       refit_ctrl      = refit_ctrl_for_cell,
       refit_estimator = opts$estimator,
-      runtimes        = list(base_sec = t_base_sec, scm_sec = t_scm_sec,
-                             base_cpu = t_base_cpu, scm_cpu = t_scm_cpu),
+      runtimes        = list(base_sec = t_base_sec, scm_sec = t_scm_sec),
       identity        = list(sample_N = opts$N, dataset_id = opts$dataset,
                              scm_workers = scm_workers, rx_threads = rx_threads),
       structure       = opts$structure,
@@ -323,13 +338,11 @@ run_bench_cell <- function(opts) {
     )
     if (file.exists(err_path)) unlink(err_path)
 
-    message(sprintf("<<< [%s] DONE base=%.1fs scm=%.1fs refit=%.1fs cov=%s | wall=%.1fs cpu=%.1fs hog=%.2f",
+    message(sprintf("<<< [%s] DONE base=%.1fs scm=%.1fs refit=%.1fs cov=%s | wall=%.1fs",
                     ds_tag, t_base_sec, t_scm_sec,
                     rec$runtime$refit_sec %||% NA,
                     if (isTRUE(rec$scm$cov_done)) "ok" else "FAIL",
-                    rec$runtime$total_sec %||% NA,
-                    rec$cpu$total_sec %||% NA,
-                    rec$cpu$hog_factor %||% NA))
+                    rec$runtime$total_sec %||% NA))
     invisible(rec)
   }, error = function(e) {
     msg <- conditionMessage(e)

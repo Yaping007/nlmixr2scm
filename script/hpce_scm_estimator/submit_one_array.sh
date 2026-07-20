@@ -51,6 +51,22 @@ fi
 
 SCN_PAD=$(printf '%02d' "$SCN")
 JOBNAME="bench_N${SAMPLE_N}_scn${SCN_PAD}_${STRUCTURE}_${EST}_${OPT}"
+# Optional suffix (e.g. JOBTAG=w1) keeps A/B arms in separate logs & job names.
+if [ -n "${JOBTAG:-}" ]; then
+  JOBNAME="${JOBNAME}_${JOBTAG}"
+fi
+
+# Parallelism / output routing (env, defaults preserve the historical sweep).
+WORKERS=${WORKERS:-3}
+RX_THREADS=${RX_THREADS:-1}
+OUT_ROOT=${OUT_ROOT:-output/scm_bench}
+
+# Screen-tier precision A/B knobs (forwarded to the driver). Default NA keeps
+# the current sigdig=4 screening; set SCREEN_SIGDIG=3 (+ SCREEN_ATOL=1e-6,
+# SCREEN_RTOL=1e-4) to reproduce the ORIGINAL run's coarser screening.
+SCREEN_SIGDIG=${SCREEN_SIGDIG:-NA}
+SCREEN_ATOL=${SCREEN_ATOL:-NA}
+SCREEN_RTOL=${SCREEN_RTOL:-NA}
 
 LOGDIR="$REPO_ROOT/logs/bench_N${SAMPLE_N}"
 mkdir -p "$LOGDIR"
@@ -63,11 +79,23 @@ echo "  logs        = $LOGDIR/${JOBNAME}.<jobid>.<idx>.{out,err}"
 # --- optional knobs (set via env) ------------------------------------------
 #   DEPEND_JOBID : if set, this array waits until that job ENDS (done OR exit)
 #                  before starting -> serialize arrays to avoid host contention.
-#   EXCLUSIVE=1  : request the whole node (-x) so the 3 SCM fork workers are
-#                  never starved for cores -> trustworthy wall-time measurement.
+#   EXCLUSIVE=1  : request the whole node (-x). NOTE: the `short` queue REJECTS
+#                  exclusive jobs -- pair with QUEUE=<q> that allows it.
+#   QUEUE=<name> : override the LSF queue (default = template's, i.e. short).
+#   NCORES=<n>   : reserve a whole node by requesting n slots on one host
+#                  (contention-free WITHOUT -x; works on `short`). Overrides
+#                  the template's `-n 4`.
 #   JOBID_FILE   : if set, the submitted array's job id is written here so a
 #                  caller (submit_all_arrays.sh CHAIN mode) can chain on it.
 EXTRA_BSUB=()
+if [ -n "${QUEUE:-}" ]; then
+  EXTRA_BSUB+=( -q "${QUEUE}" )
+  echo "  queue       = ${QUEUE}"
+fi
+if [ -n "${NCORES:-}" ]; then
+  EXTRA_BSUB+=( -n "${NCORES}" -R "span[hosts=1]" )
+  echo "  whole-node  = -n ${NCORES} span[hosts=1] (reserves a full node)"
+fi
 if [ -n "${DEPEND_JOBID:-}" ]; then
   EXTRA_BSUB+=( -w "ended(${DEPEND_JOBID})" )
   echo "  depends on  = ended(${DEPEND_JOBID})"
@@ -84,7 +112,7 @@ bsub_out="$(
     -J "${JOBNAME}[${DS_START}-${DS_END}]%${MAXPAR}" \
     -o "${LOGDIR}/${JOBNAME}.%J.%I.out" \
     -e "${LOGDIR}/${JOBNAME}.%J.%I.err" \
-    -env "all, REPO_ROOT=${REPO_ROOT}, SCRIPTS_DIR=${SCRIPTS_DIR}, SAMPLE_N=${SAMPLE_N}, SCN=${SCN}, EST=${EST}, OPT=${OPT}, STRUCTURE=${STRUCTURE}" \
+    -env "all, REPO_ROOT=${REPO_ROOT}, SCRIPTS_DIR=${SCRIPTS_DIR}, SAMPLE_N=${SAMPLE_N}, SCN=${SCN}, EST=${EST}, OPT=${OPT}, STRUCTURE=${STRUCTURE}, WORKERS=${WORKERS}, RX_THREADS=${RX_THREADS}, OUT_ROOT=${OUT_ROOT}, SCREEN_SIGDIG=${SCREEN_SIGDIG}, SCREEN_ATOL=${SCREEN_ATOL}, SCREEN_RTOL=${SCREEN_RTOL}" \
     < "$HERE/bench_array.lsf"
 )"
 echo "$bsub_out"
