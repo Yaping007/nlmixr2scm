@@ -121,13 +121,16 @@
 #'   interactive, the user is prompted to confirm before the search begins.
 #'   Set to \code{FALSE} to skip the prompt (useful in scripts or tests).
 #' @param profileInit logical; if \code{TRUE}, each forward candidate's new
-#'   covariate coefficient is warm-started with a cheap 1-D Brent profile on a
-#'   frozen base (all structural thetas fixed at their parent estimates and
-#'   between-subject variability zeroed) before the real estimator runs.  This
-#'   supplies gradient optimisers (\code{nlminb}, \code{lbfgsb3c}) with a
-#'   nonzero, gradient-informative starting value so they do not stall at the
-#'   flat zero-effect point.  bobyqa is never involved; the profiled value is
-#'   handed back to the fit's own estimator.  Default \code{FALSE}.
+#'   covariate coefficient is warm-started with a cheap 1-D FOCEi profile on a
+#'   frozen base (all structural thetas fixed at their parent estimates and the
+#'   between-subject variability FIXED -- not zeroed -- at its parent values)
+#'   before the real estimator runs.  Keeping the random effects intact matters:
+#'   profiling a covariate on a fixed-effect-only model is misspecified and can
+#'   return the wrong sign.  This supplies gradient optimisers (\code{nlminb},
+#'   \code{lbfgsb3c}) with a nonzero, gradient-informative starting value so
+#'   they do not stall at the flat zero-effect point.  bobyqa is never involved
+#'   in the caller; the profiled value is handed back to the fit's own
+#'   estimator.  Default \code{FALSE}.
 #' @param maxRetries integer; maximum number of retry attempts per candidate
 #'   when the OFV is deemed unrealistic.  Default \code{3L}.  Set to \code{0}
 #'   to disable the retry mechanism entirely.
@@ -1600,14 +1603,22 @@ buildPairs <- function(varsVec = NULL, covarsVec = NULL, pairsVec = NULL) {
 #'
 #' Fixes every population theta except \code{freeTheta} at its current
 #' estimate (inherited from the parent fit via \code{base_ui$iniDf}) and
-#' zeroes all between-subject variability, yielding a fast fixed-effect model
-#' whose only free parameter is the new covariate coefficient.  This is the
-#' "frozen base" on which the 1-D Brent profile runs.
+#' \emph{fixes} (does not remove) all between-subject variability at the parent
+#' values, yielding a model whose only free parameter is the new covariate
+#' coefficient.  This is the "frozen base" on which the 1-D profile runs.
+#'
+#' Between-subject variability is deliberately KEPT (fixed, not zeroed).  An
+#' earlier version zeroed omega via \code{zeroRe()} to get a fast fixed-effect
+#' fit, but that is misspecified: with the random effects removed the lone free
+#' covariate theta absorbs the missing BSV and can converge to the WRONG SIGN
+#' (empirically: a true +0.75 effect profiled to -0.68 with omega zeroed, vs
+#' +0.92 with omega fixed).  A wrong-sign warm start is worse than none, so the
+#' BSV structure is preserved and only the outer covariate theta is freed.
 #'
 #' @param ui        candidate rxode2 UI (base + context + new covariate)
 #' @param freeTheta name of the single theta left free (e.g. "cov_BW_cl")
-#' @return a decompressed rxode2 UI with etas removed and all but one theta
-#'   fixed
+#' @return a decompressed rxode2 UI with all thetas except \code{freeTheta}
+#'   fixed and all omega (BSV) entries fixed at their parent values
 #' @noRd
 .freezeUiForProfile <- function(ui, freeTheta) {
   ui <- rxode2::rxUiDecompress(ui)
@@ -1615,31 +1626,42 @@ buildPairs <- function(varsVec = NULL, covarsVec = NULL, pairsVec = NULL) {
   isTheta <- !is.na(ini$ntheta)
   ini$fix[isTheta] <- TRUE
   ini$fix[isTheta & ini$name == freeTheta] <- FALSE
+  # Fix (NOT zero) the between-subject variability: keep the BSV structure so
+  # the covariate is profiled in the presence of random effects (correct sign
+  # and magnitude), while leaving only the covariate theta free in the outer
+  # optimisation.  Zeroing omega misspecifies the model and can flip the sign.
+  isOmega <- !is.na(ini$neta1)
+  if (any(isOmega)) ini$fix[isOmega] <- TRUE
   ui$iniDf <- ini
-  # Drop omega (between-subject variability) so the profile is a fast
-  # fixed-effect fit; residual error stays fixed at the parent value.
-  ui <- rxode2::zeroRe(ui, which = "omega")
   ui
 }
 
-#' Profile a single new covariate theta with a 1-D Brent search
+#' Profile a single new covariate theta with a 1-D FOCEi profile
 #'
 #' Builds the candidate UI (base + accepted context + the one new covariate),
-#' freezes it via \code{.freezeUiForProfile()}, and runs a derivative-free 1-D
-#' Brent optimisation (\code{est = "optim"}) over the single free covariate
-#' coefficient.  Used to seed gradient optimisers (nlminb / lbfgsb3c) with a
-#' nonzero, gradient-informative starting value so they do not stall at the
-#' flat zero-effect point.  bobyqa is never involved: the profiled value is
-#' handed back to the fit's own estimator by the caller.
+#' freezes it via \code{.freezeUiForProfile()} (every population theta except
+#' the new covariate fixed at the parent estimate, and the between-subject
+#' variability FIXED -- not zeroed -- at the parent values), and runs a FOCEi
+#' fit whose only free outer parameter is the new covariate coefficient.  Used
+#' to seed gradient optimisers (nlminb / lbfgsb3c) with a nonzero,
+#' gradient-informative starting value so they do not stall at the flat
+#' zero-effect point.  bobyqa is never involved: the profiled value is handed
+#' back to the fit's own estimator by the caller.
+#'
+#' The random effects are integrated over (FOCEi), NOT dropped: profiling a
+#' single covariate on a fixed-effect-only model is misspecified and can return
+#' the wrong sign (see \code{.freezeUiForProfile}).  With everything but the
+#' one covariate theta fixed, the outer optimisation is effectively 1-D and
+#' cheap relative to the full candidate fit.
 #'
 #' @param base_ui   clean base UI (\code{fit$finalUiEnv})
 #' @param ctx_df    accepted-covariate context pairs (or \code{NULL})
 #' @param nam_var   parameter name (e.g. "cl")
 #' @param nam_covar covariate name (e.g. "BW")
 #' @param cov_expr  covariate model expression string (or \code{NULL})
-#' @param cov_init  fallback initial value for the new theta (Brent start)
-#' @param cov_lower lower bound (Brent bracket)
-#' @param cov_upper upper bound (Brent bracket)
+#' @param cov_init  fallback initial value for the new theta (profile start)
+#' @param cov_lower lower bound (parameter bracket)
+#' @param cov_upper upper bound (parameter bracket)
 #' @param covNames  theta name of the new covariate (e.g. "cov_BW_cl")
 #' @param data      modelling data frame
 #' @return profiled estimate (finite numeric strictly inside the bracket) or
@@ -1660,29 +1682,43 @@ buildPairs <- function(varsVec = NULL, covarsVec = NULL, pairsVec = NULL) {
   ui        <- .rebuildUiFromPairs(base_ui, all_pairs)
   frozen    <- .freezeUiForProfile(ui, covNames)
 
-  # est = "optim" with a single free parameter dispatches to stats::optim
-  # method = "Brent", a safe derivative-free 1-D search over [lower, upper].
-  # calcTables = FALSE skips the (unneeded) output tables; the profiled theta
-  # is read from the fit core's fixed-effect vector regardless.  Fall back to
-  # a bare Brent control if the installed nlmixr2est rejects an argument.
+  # FOCEi with a single free outer theta (everything else fixed, BSV fixed but
+  # PRESENT) integrates over the random effects, so the covariate coefficient
+  # is estimated under the correct mixed-effects likelihood (right sign and
+  # magnitude).  The outer optimisation is effectively 1-D and cheap.  We use
+  # bobyqa for the outer search: derivative-free, robust for a single bounded
+  # parameter, and never stalls at the flat zero-effect point the way a
+  # gradient optimiser can.  calcTables = FALSE skips the unneeded output
+  # tables; the profiled theta is read from the fit core's theta vector.
   ctrl <- tryCatch(
-    nlmixr2est::optimControl(
-      method     = "Brent",
+    nlmixr2est::foceiControl(
+      outerOpt   = "bobyqa",
       calcTables = FALSE,
       print      = 0L
     ),
-    error = function(e) nlmixr2est::optimControl(method = "Brent")
+    error = function(e) nlmixr2est::foceiControl(print = 0L)
+  )
+  cli::cli_inform(
+    "warm-start: focei/bobyqa 1-D profile for {covNames} ({nam_covar} ~ {nam_var})"
   )
   pf <- suppressWarnings(
-    nlmixr2est::nlmixr2(frozen, data, "optim", control = ctrl)
+    nlmixr2est::nlmixr2(frozen, data, "focei", control = ctrl)
   )
   val <- tryCatch(unname(pf$theta[[covNames]]), error = function(e) NA_real_)
   if (is.null(val) || length(val) != 1L || !is.finite(val)) {
     return(NA_real_)
   }
-  # Reject boundary solutions: a theta pinned to the bracket edge is not a
-  # trustworthy warm start (caller falls back to the default init).
-  if (val <= cov_lower || val >= cov_upper) {
+  # Reject boundary solutions: a theta pinned to (or a hair from) the bracket
+  # edge is not a trustworthy warm start -- the 1-D search has simply run into
+  # the bound, which carries no gradient information for the real estimator.
+  # A strict >=/<= test is too weak: bounded optimisers routinely stop a tiny
+  # step short (e.g. 1.9999997 for an upper bound of 2), which would sneak an
+  # effectively-pinned value through. Use an absolute margin scaled by the
+  # bracket width so "essentially on the bound" is also rejected. The caller
+  # then falls back to the default init.
+  edge_tol <- .Machine$double.eps^0.5 +
+    1e-3 * max(1e-8, cov_upper - cov_lower)
+  if (val <= cov_lower + edge_tol || val >= cov_upper - edge_tol) {
     return(NA_real_)
   }
   val
@@ -1883,10 +1919,11 @@ buildPairs <- function(varsVec = NULL, covarsVec = NULL, pairsVec = NULL) {
         NULL
       }
 
-      # Optional 1-D Brent warm-start: profile the single new covariate theta
+      # Optional 1-D FOCEi warm-start: profile the single new covariate theta
       # on a frozen base (all other thetas fixed at their parent estimates,
-      # between-subject variability zeroed) to obtain a gradient-informative
-      # starting value before the real estimator runs.  Forward path only.
+      # between-subject variability fixed -- not zeroed) to obtain a
+      # gradient-informative starting value before the real estimator runs.
+      # Forward path only.
       if (isTRUE(profileInit) && add) {
         prof_init <- tryCatch(
           .profileCovInit(
@@ -1905,7 +1942,7 @@ buildPairs <- function(varsVec = NULL, covarsVec = NULL, pairsVec = NULL) {
         )
         if (is.finite(prof_init)) {
           cli::cli_inform(c(
-            "i" = "Brent warm-start {covNames}: {round(orig_cov_init, 4)} -> {round(prof_init, 4)}"
+            "i" = "profile warm-start {covNames}: {round(orig_cov_init, 4)} -> {round(prof_init, 4)}"
           ))
           orig_cov_init <- prof_init
         }

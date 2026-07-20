@@ -49,6 +49,7 @@
 .script_dir <- .this_script_dir()
 source(file.path(.script_dir, "refit_helpers.R"), chdir = FALSE)
 source(file.path(.script_dir, "true_model_factory.R"), chdir = FALSE)
+source(file.path(.script_dir, "output_schema.R"), chdir = FALSE)
 
 suppressPackageStartupMessages({
   library(nlmixr2)
@@ -74,18 +75,18 @@ refit_focei_control <- function() {
   )
 }
 
-## ---- Cohort -> (master RDS, out_dir) defaults ----------------------------
-##   The three sim cohorts share a canonical directory naming convention.
-##   Note: N=300 lives in the un-suffixed *_eta_filtered/ dir (historical).
-.cohort_defaults <- function(cohort) {
+## ---- Cohort -> (per-scenario RDS resolver, out_dir) defaults --------------
+##   New layout (2026-07): one RDS per scenario, under
+##   Inputdataset/sim_obs_N{NN}/sim_obs_scenario_{SS}.rds
+.cohort_defaults <- function(cohort, scenario_id = NULL,
+                             input_root = "Inputdataset") {
   stopifnot(cohort %in% c("N40", "N80", "N300"))
-  master_dir <- switch(cohort,
-    N40  = "simulated_virtual_dataset_eta_filtered_N40",
-    N80  = "simulated_virtual_dataset_eta_filtered_N80",
-    N300 = "simulated_virtual_dataset_eta_filtered"
-  )
+  N <- as.integer(sub("^N", "", cohort))
+  master_rds <- if (is.null(scenario_id)) NA_character_ else
+    file.path(input_root, sprintf("sim_obs_N%d", N),
+              sprintf("sim_obs_scenario_%02d.rds", as.integer(scenario_id)))
   list(
-    master_rds = file.path(master_dir, "sim_obs_all_scenarios.rds"),
+    master_rds = master_rds,
     out_root   = file.path("outputs", paste0("refit_true_", cohort))
   )
 }
@@ -106,7 +107,7 @@ refit_one_dataset <- function(scenario_id,
             is.character(cohort),    length(cohort) == 1L,
             cohort %in% c("N40", "N80", "N300"))
 
-  defaults <- .cohort_defaults(cohort)
+  defaults <- .cohort_defaults(cohort, scenario_id = scenario_id)
   if (is.null(master_rds)) master_rds <- defaults$master_rds
   if (is.null(out_dir)) {
     out_dir <- file.path(defaults$out_root,
@@ -153,8 +154,9 @@ refit_one_dataset <- function(scenario_id,
         RACE = as.integer(RACE)
       )
 
-    ## 2. Build the scenario-and-boundary-aware true model
-    true_mod <- make_true_model(scenario_id, boundary = boundary)
+    ## 2. Build the scenario-and-boundary-aware true model (ODE is canonical)
+    true_mod <- make_true_model(scenario_id, boundary = boundary,
+                                structure = "ode")
 
     ## 3. Fit
     t0  <- Sys.time()
@@ -163,33 +165,26 @@ refit_one_dataset <- function(scenario_id,
                    control = refit_focei_control())
     runtime_sec <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
 
-    ## 4. Extract Table-3 diagnostics + estimates + relative errors
-    bounds_spec <- attr(true_mod, "bounds_spec")
-    diag_t3     <- diagnose_fit_table3(fit, bounds_spec = bounds_spec)
-    final_est   <- extract_params_long(fit)
-    rel_err     <- rel_err_one(final_est, true_params, scenario_id)
+    ## 4. Assemble the shared, versioned record (schema_version + model_type,
+    ##    diag/diag_t3/final_est/rel_err/parFixed/*_params/fn_text). Driver
+    ##    identity keys are layered on top.
+    common <- assemble_common(
+      fit         = fit,
+      true_mod    = true_mod,
+      scenario_id = scenario_id,
+      true_params = true_params,
+      runtime_sec = runtime_sec,
+      status      = "ok",
+      estimator   = "focei"
+    )
 
-    ## parFixedDf (only populated when covMethod completed).
-    parFixed <- tryCatch(as.data.frame(fit$parFixedDf),
-                         error = function(e) NULL)
-
-    list(
+    c(list(
       cohort       = cohort,
       scenario_id  = as.integer(scenario_id),
       dataset_id   = as.integer(dataset_id),
       boundary     = boundary,
-      final_est    = final_est,
-      rel_err      = rel_err,
-      diag         = diag_t3,
-      parFixed     = parFixed,
-      bounds_spec  = bounds_spec,
-      cont_params  = attr(true_mod, "estimated_cont_params"),
-      cat_params   = attr(true_mod, "categorical_params"),
-      fn_text      = attr(true_mod, "fn_text"),
-      runtime_sec  = runtime_sec,
-      timestamp    = Sys.time(),
-      status       = "ok"
-    )
+      timestamp    = Sys.time()
+    ), common)
   }, error = function(e) {
     msg <- sprintf(
       "[FAIL] cohort=%s scenario=%02d boundary=%s dataset=%03d\nerror: %s\ncalltrace:\n%s\n",
@@ -198,6 +193,8 @@ refit_one_dataset <- function(scenario_id,
     )
     cat(msg, file = out_err)
     list(
+      schema_version = SCHEMA_VERSION,
+      model_type  = "ode",
       cohort      = cohort,
       scenario_id = as.integer(scenario_id),
       dataset_id  = as.integer(dataset_id),
@@ -208,7 +205,9 @@ refit_one_dataset <- function(scenario_id,
     )
   })
 
-  saveRDS(result, out_rds)
+  write_fit_sidecar(result, out_rds,
+                    fit = if (identical(result$status, "ok") &&
+                              exists("fit", inherits = FALSE)) fit else NULL)
   invisible(result)
 }
 

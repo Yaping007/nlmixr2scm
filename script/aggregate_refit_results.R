@@ -69,27 +69,33 @@ suppressPackageStartupMessages({
 # For error results, only the meta keys + $status + $error_msg are present.
 
 .unpack_diag <- function(r) {
-  d <- r$diag %||% list()
+  # Schema 2.0 splits diagnostics into $diag (base) + $diag_t3 (extended
+  # Table-3 flags). Schema 1.x stored the extended flags directly in $diag.
+  # Merge so either layout resolves: base from $diag, extended flags prefer
+  # $diag_t3 and fall back to $diag.
+  d  <- r$diag    %||% list()
+  d3 <- r$diag_t3 %||% list()
+  pick <- function(key) d3[[key]] %||% d[[key]]
   tibble::tibble(
     cohort       = r$cohort      %||% NA_character_,
     scenario     = r$scenario_id %||% NA_integer_,
     boundary     = r$boundary    %||% NA_character_,
     dataset_id   = r$dataset_id  %||% NA_integer_,
     status       = r$status      %||% NA_character_,
-    converged    = as.logical(d$converged    %||% NA),
-    min_suc      = as.logical(d$min_suc      %||% NA),
-    cov_step     = as.logical(d$cov_step     %||% NA),
-    rnd_err      = as.logical(d$rnd_err      %||% NA),
-    zero_grad    = as.logical(d$zero_grad    %||% NA),
-    est_bnd      = as.logical(d$est_bnd      %||% NA),
-    phys_bnd     = as.logical(d$phys_bnd     %||% NA),
-    objf         = as.numeric(d$objf         %||% NA_real_),
-    cond_num_cor = as.numeric(d$cond_num_cor %||% NA_real_),
-    bound_hits   = as.character(d$bound_hits %||% NA_character_),
-    phys_hits    = as.character(d$phys_hits  %||% NA_character_),
-    message      = as.character(d$message    %||% NA_character_),
-    runtime_sec  = as.numeric(r$runtime_sec  %||% NA_real_),
-    error_msg    = as.character(r$error_msg  %||% NA_character_)
+    converged    = as.logical(d$converged     %||% NA),
+    min_suc      = as.logical(pick("min_suc")  %||% NA),
+    cov_step     = as.logical(pick("cov_step") %||% NA),
+    rnd_err      = as.logical(pick("rnd_err")  %||% NA),
+    zero_grad    = as.logical(pick("zero_grad")%||% NA),
+    est_bnd      = as.logical(pick("est_bnd")  %||% NA),
+    phys_bnd     = as.logical(pick("phys_bnd") %||% NA),
+    objf         = as.numeric(d$objf          %||% NA_real_),
+    cond_num_cor = as.numeric(d$cond_num_cor  %||% NA_real_),
+    bound_hits   = as.character(pick("bound_hits") %||% NA_character_),
+    phys_hits    = as.character(pick("phys_hits")  %||% NA_character_),
+    message      = as.character(d$message     %||% NA_character_),
+    runtime_sec  = as.numeric(r$fit_runtime_sec %||% r$runtime_sec %||% NA_real_),
+    error_msg    = as.character(r$error_msg   %||% NA_character_)
   )
 }
 

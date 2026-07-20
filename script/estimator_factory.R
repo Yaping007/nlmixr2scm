@@ -44,8 +44,7 @@ valid_combos <- function() {
     "focei",        "lbfgsb3c",
     "foceif",       "nlminb",
     "foceif",       "lbfgsb3c",
-    "irlsfoceif",   "lbfgsb3c",  # 2026-07-14: re-enabled; dispatches est="ifoceif"
-    "saem",         NA_character_
+    "irlsfoceif",   "lbfgsb3c"   # 2026-07-14: re-enabled; dispatches est="ifoceif"
   )
 }
 

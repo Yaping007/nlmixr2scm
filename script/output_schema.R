@@ -189,6 +189,7 @@ write_fit_sidecar <- function(result, out_rds, fit = NULL) {
   meta_keys <- c("schema_version", "model_type", "sample_N", "scenario_id",
                  "dataset_id", "estimator", "outer_opt", "refit_estimator",
                  "boundary", "fit_runtime_sec", "refit_runtime_sec",
+                 "wall_total_sec", "scm_workers", "rx_threads",
                  "objf", "converged", "cond_num_cor", "status")
   meta <- result[intersect(meta_keys, names(result))]
 

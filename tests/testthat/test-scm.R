@@ -867,7 +867,7 @@ test_that(".rebuildUiFromPairs: two covariates on different parameters both adde
 })
 
 # =============================================================================
-# .freezeUiForProfile  (1-D Brent warm-start: frozen base)
+# .freezeUiForProfile  (1-D FOCEi warm-start: frozen base)
 # =============================================================================
 
 .make_cov_ui <- function() {
@@ -912,16 +912,18 @@ test_that(".freezeUiForProfile: preserves parent theta estimates", {
   }
 })
 
-test_that(".freezeUiForProfile: zeroes between-subject variability (omega)", {
+test_that(".freezeUiForProfile: fixes (does not zero) between-subject variability", {
   ui <- .make_cov_ui()
   frozen <- .cur$.freezeUiForProfile(ui, "cov_wt_power_cl")
   ini <- frozen$iniDf
-  # no free eta rows should remain after zeroRe(which = "omega")
   eta_rows <- ini[!is.na(ini$neta1), , drop = FALSE]
   if (nrow(eta_rows) > 0) {
-    expect_true(all(eta_rows$fix | eta_rows$est == 0))
+    # BSV must be KEPT and FIXED (not removed / not zeroed). Zeroing omega
+    # misspecifies the profile and can flip the covariate's sign.
+    expect_true(all(eta_rows$fix))
+    expect_true(all(eta_rows$est != 0))
   } else {
-    expect_equal(nrow(eta_rows), 0L)
+    skip("model has no omega entries to fix")
   }
 })
 
@@ -960,6 +962,99 @@ skip_if_not_installed("nlmixr2data")
   )
 }
 
+# =============================================================================
+# .profileCovInit  (1-D FOCEi warm-start): correctness + boundary rejection
+# -----------------------------------------------------------------------------
+# Simulate a dataset with a KNOWN, moderate covariate effect so we can assert
+# the warm-start recovers the correct SIGN and rough magnitude.  This guards
+# against the two bugs found when the feature was first exercised:
+#   (1) zeroRe(omega) misspecified the profile -> wrong sign (+0.75 -> -0.68);
+#   (2) a near-boundary value (1.9999997 for upper = 2) slipped past the strict
+#       boundary check and was returned as a "valid" interior warm-start.
+# =============================================================================
+
+.sim_wt_effect_data <- function(seed = 42L, nsub = 40L, true_cov = 0.75) {
+  set.seed(seed)
+  sim_mod <- function() {
+    ini({
+      tka <- log(1.5); tcl <- log(0.04); tv <- log(0.5)
+      eta.cl ~ 0.09
+      prop.err <- 0.1
+    })
+    model({
+      ka <- exp(tka)
+      cl <- exp(tcl + 0.75 * log(WT / 70) + eta.cl) # nolint
+      v  <- exp(tv)
+      linCmt() ~ prop(prop.err)
+    })
+  }
+  wt <- runif(nsub, 50, 95)
+  ev <- rxode2::et(amt = 320, cmt = 1) |>
+    rxode2::et(seq(0.25, 24, length.out = 8)) |>
+    rxode2::et(id = seq_len(nsub))
+  ev$WT <- wt[ev$id]
+  sim <- rxode2::rxSolve(sim_mod, ev, addDosing = FALSE)
+  simdf <- as.data.frame(sim)
+  obs <- data.frame(ID = simdf$id, TIME = simdf$time, DV = simdf$sim,
+                    AMT = 0, EVID = 0, WT = simdf$WT)
+  obs <- obs[obs$TIME > 0 & is.finite(obs$DV) & obs$DV > 0, ]
+  dose <- data.frame(ID = seq_len(nsub), TIME = 0, DV = 0, AMT = 320,
+                    EVID = 1, WT = wt)
+  rbind(dose, obs)[order(c(dose$ID, obs$ID)), ]
+}
+
+.base_no_cov_model <- function() {
+  ini({
+    tka <- log(1.5); tcl <- log(0.04); tv <- log(0.5)
+    eta.cl ~ 0.09
+    prop.err <- 0.1
+  })
+  model({
+    ka <- exp(tka); cl <- exp(tcl + eta.cl); v <- exp(tv) # nolint
+    linCmt() ~ prop(prop.err)
+  })
+}
+
+test_that(".profileCovInit: recovers correct-sign warm-start for a known effect", {
+  skip_on_ci()
+  dat <- .sim_wt_effect_data()
+  base_fit <- nlmixr2(
+    .base_no_cov_model, dat, est = "focei",
+    control = nlmixr2est::foceiControl(print = 0, calcTables = TRUE)
+  )
+  prof <- .cur$.profileCovInit(
+    base_ui = base_fit$finalUiEnv, ctx_df = NULL,
+    nam_var = "cl", nam_covar = "WT", cov_expr = "log(WT/70)",
+    cov_init = 0.0, cov_lower = -2, cov_upper = 2,
+    covNames = "cov_WT_cl", data = dat
+  )
+  # true coefficient is +0.75; the warm-start must be a finite, interior,
+  # POSITIVE value in the right ballpark -- never the wrong sign.
+  expect_true(is.finite(prof))
+  expect_gt(prof, 0)              # correct sign (the zeroRe bug gave -0.68)
+  expect_gt(prof, -2); expect_lt(prof, 2)
+  expect_lt(abs(prof - 0.75), 0.6)  # rough magnitude
+})
+
+test_that(".profileCovInit: rejects a near-boundary solution as NA", {
+  skip_on_ci()
+  dat <- .sim_wt_effect_data()
+  base_fit <- nlmixr2(
+    .base_no_cov_model, dat, est = "focei",
+    control = nlmixr2est::foceiControl(print = 0, calcTables = TRUE)
+  )
+  # A deliberately tight bracket forces the optimum onto the upper edge; the
+  # epsilon-margin boundary check must reject it (return NA), not hand back a
+  # value pinned to the bound.
+  prof <- .cur$.profileCovInit(
+    base_ui = base_fit$finalUiEnv, ctx_df = NULL,
+    nam_var = "cl", nam_covar = "WT", cov_expr = "log(WT/70)",
+    cov_init = 0.0, cov_lower = 0.70, cov_upper = 0.72,
+    covNames = "cov_WT_cl", data = dat
+  )
+  expect_true(is.na(prof))
+})
+
 test_that("runSCM: forward-only returns expected list structure", {
   withr::local_tempdir(clean = TRUE)
   base_fit <- .fit_base()
@@ -973,6 +1068,26 @@ test_that("runSCM: forward-only returns expected list structure", {
   expect_type(res, "list")
   expect_named(res, c("summaryTable", "resFwd", "resBck"))
   expect_null(res$resBck)
+  expect_type(res$resFwd, "list")
+})
+
+test_that("runSCM: profileInit=TRUE forward search runs and returns structure", {
+  withr::local_tempdir(clean = TRUE)
+  base_fit <- .fit_base()
+  # The 1-D FOCEi warm-start path (profileInit) must run end-to-end without
+  # error and still return the standard forward-search structure. This
+  # exercises .profileCovInit / .freezeUiForProfile inside the real loop.
+  expect_no_error(
+    res <- runSCM(
+      fit = base_fit,
+      pairsVec = list(list(var = "cl", covar = "WT", shapes = "power")),
+      searchType = "forward",
+      profileInit = TRUE,
+      saveModels = FALSE,
+      workers = 1L
+    )
+  )
+  expect_named(res, c("summaryTable", "resFwd", "resBck"))
   expect_type(res$resFwd, "list")
 })
 

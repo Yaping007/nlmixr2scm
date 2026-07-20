@@ -76,3 +76,6 @@ virtual_population_*.rds
 renv/library/
 renv/local/
 renv/staging/
+
+output/
+share/

@@ -1,18 +1,23 @@
 # ============================================================================
 # PerformanceEvaluation_scm_bench.R
 # ----------------------------------------------------------------------------
-# Per-dataset SCM driver for the estimator x optimizer benchmark.
-# Mirrors PerformanceEvaluation_sc_n_ds_HPCE.R but is parameterised over
-#   --N, --scenario, --dataset, --estimator, --outer_opt
-# and writes to a unified output tree:
-#   output/scm_bench/N{NN}/scn{SS}/{est}_{opt}/res_ds{DDD}.rds
+# Per-dataset SCM driver for the estimator x optimizer x structure benchmark.
+# Parameterised over
+#   --N, --scenario, --dataset, --estimator, --outer_opt, --structure
+# and writes SCHEMA-2.1 records (via package_scm_schema21) to:
+#   output/scm_bench/N{NN}/scn{SS}_{structure}/{est}_{opt}/res_ds{DDD}.rds
+#   (+ .fit.rds refit winner, + .meta.json manifest)
 #
-# Estimator handling:
-#   * focei/foceif/irlsfoceif : screening + tight-tol refit both use the
-#                                selected (est, outer_opt) from the factory.
-#   * saem                    : screening uses saemControl; the tight-tol
-#                                covariance refit uses foceif+lbfgsb3c
-#                                (refit_estimator="foceif" logged).
+# Model structure (--structure):
+#   * linCmt : analytic 2-cmt oral (base_2cmt_oral_linCmt). foceif/irlsfoceif
+#              degrade to focei here (no ODE to interaction-linearise) but are
+#              still run to demonstrate 'prefer linCmt when possible'.
+#   * ode    : explicit 2-cmt oral ODE (base_2cmt_oral_ode); unlocks analytic
+#              gradients for foceif/irlsfoceif.
+#
+# Estimator handling (runSCM-based two-tier: screen search + tight-tol refit):
+#   * focei/foceif/irlsfoceif : screening + tight-tol covariance refit both use
+#                                the selected (est, outer_opt) from the factory.
 #   * vae                     : screening uses vaeControl; final refit is
 #                                skipped (VAE covariance is computed in-fit
 #                                via vaeControl(covMethod="r,s")).  If the
@@ -21,7 +26,7 @@
 # CLI:
 #   Rscript script/PerformanceEvaluation_scm_bench.R \
 #       --N 80 --scenario 16 --dataset 1 \
-#       --estimator foceif --outer_opt lbfgsb3c \
+#       --estimator foceif --outer_opt lbfgsb3c --structure ode \
 #       [--force_rerun] [--force_repackage]
 #
 # Input data layout (unchanged from PerformanceEvaluation_sc_n_ds_HPCE.R):
@@ -52,11 +57,15 @@ suppressPackageStartupMessages({
 
 source(file.path(.script_dir, "scm_bench_helpers.R"))
 source(file.path(.script_dir, "estimator_factory.R"))
+source(file.path(.script_dir, "refit_helpers.R"))    # diagnose_fit_table3, %||%
+source(file.path(.script_dir, "output_schema.R"))    # assemble_common, write_fit_sidecar, SCHEMA_VERSION
 
 # ---- CLI parser ------------------------------------------------------------
 parse_args <- function(argv) {
   opts <- list(N = 80L, scenario = 16L, dataset = 1L,
                estimator = "focei", outer_opt = NA_character_,
+               structure = "linCmt",
+               workers = 3L, rx_threads = 1L,
                force_rerun = FALSE, force_repackage = FALSE,
                out_root = "output/scm_bench",
                input_root = "Inputdataset",
@@ -71,6 +80,9 @@ parse_args <- function(argv) {
       "--dataset"          = { opts$dataset  <- as.integer(val()) },
       "--estimator"        = { opts$estimator<- val() },
       "--outer_opt"        = { v <- val(); opts$outer_opt <- if (v %in% c("NA","na","")) NA_character_ else v },
+      "--structure"        = { opts$structure <- val() },
+      "--workers"          = { opts$workers    <- as.integer(val()) },
+      "--rx_threads"       = { opts$rx_threads <- as.integer(val()) },
       "--force_rerun"      = { opts$force_rerun     <- TRUE },
       "--force_repackage"  = { opts$force_repackage <- TRUE },
       "--out_root"         = { opts$out_root <- val() },
@@ -80,14 +92,16 @@ parse_args <- function(argv) {
     )
     i <- i + 1L
   }
+  if (!opts$structure %in% c("linCmt", "ode"))
+    stop(sprintf("--structure must be 'linCmt' or 'ode', got '%s'", opts$structure))
   opts
 }
 
 # ---- Cell path helper ------------------------------------------------------
-cell_dir <- function(out_root, N, scenario, estimator, outer_opt) {
+cell_dir <- function(out_root, N, scenario, structure, estimator, outer_opt) {
   opt_tag <- if (is.na(outer_opt) || nchar(outer_opt) == 0L) "NA" else outer_opt
   file.path(out_root, sprintf("N%d", N),
-            sprintf("scn%02d", scenario),
+            sprintf("scn%02d_%s", scenario, structure),
             paste(estimator, opt_tag, sep = "_"))
 }
 
@@ -136,12 +150,33 @@ run_bench_cell <- function(opts) {
                  opts$estimator, opts$outer_opt))
   }
 
+  # Parallelism policy (CLI-driven; supports the workers=1 vs 3 timing A/B).
+  #   runSCM forks `workers` child processes for SCM candidate LRTs. rxode2's
+  #   ODE solver uses OpenMP. workers>1 AND rxThreads>1 is fork()-over-OpenMP
+  #   = undefined behaviour that corrupts the ODE solve (runs 2 & 3). We
+  #   therefore ENFORCE rxThreads=1 whenever workers>1, and actually PIN the
+  #   resolved value (setRxThreads + OMP_NUM_THREADS) so it is deterministic
+  #   and the recorded number is the number really used.
+  scm_workers <- max(1L, opts$workers %||% 3L)
+  rx_threads  <- opts$rx_threads %||% 1L
+  if (scm_workers > 1L && (is.na(rx_threads) || rx_threads > 1L)) {
+    if (!is.na(rx_threads) && rx_threads > 1L)
+      warning(sprintf("workers=%d requires rxThreads=1 (fork-safety); forcing 1.",
+                      scm_workers))
+    rx_threads <- 1L
+  }
+  if (is.na(rx_threads)) rx_threads <- 1L
+  Sys.setenv(OMP_NUM_THREADS = rx_threads)
+  try(rxode2::setRxThreads(rx_threads), silent = TRUE)
+  message(sprintf(">>> parallelism: workers=%d, rxThreads=%d",
+                  scm_workers, rx_threads))
+
   # Paths
   save_dir  <- cell_dir(opts$out_root, opts$N, opts$scenario,
-                        opts$estimator, opts$outer_opt)
+                        opts$structure, opts$estimator, opts$outer_opt)
   dir.create(save_dir, showWarnings = FALSE, recursive = TRUE)
 
-  ds_tag    <- sprintf("ds%02d", opts$dataset)
+  ds_tag    <- sprintf("ds%03d", opts$dataset)
   res_path  <- file.path(save_dir, sprintf("res_%s.rds", ds_tag))
   scm_path  <- file.path(save_dir, sprintf("scm_%s.rds", ds_tag))
   err_path  <- file.path(save_dir, sprintf("%s_ERROR.txt", ds_tag))
@@ -176,11 +211,18 @@ run_bench_cell <- function(opts) {
   seed_all(seed, opts$estimator)
 
   # Build controls: screen (no cov, no tables) for base fit + every SCM
-  # candidate LRT; final (r,s cov + tables) for the single post-SCM refit
-  # (see package_scm_result()). Both tiers share the tuned sigdig/derivEps/
-  # ODE tols per (est, outer_opt).
+  # candidate LRT; final (r,s cov + tables) for the single post-SCM tight-tol
+  # covariance refit (two-tier runSCM approach). Both tiers share the tuned
+  # sigdig/derivEps/ODE tols per (est, outer_opt).
   screen_bundle <- make_est_control(opts$estimator, opts$outer_opt, "screen")
   final_bundle  <- make_est_control(opts$estimator, opts$outer_opt, "final")
+
+  # Base (covariate-free) model matching the requested structure; carries
+  # attr(,"structure") so assemble_common()->fit_model_type() sets model_type.
+  base_mod <- switch(opts$structure,
+    "linCmt" = base_2cmt_oral_linCmt,
+    "ode"    = base_2cmt_oral_ode,
+    stop("Unknown structure: ", opts$structure))
 
   # Tier 2: cached SCM result -> repackage only
   if (!opts$force_rerun && file.exists(scm_path)) {
@@ -188,30 +230,26 @@ run_bench_cell <- function(opts) {
     return(invisible(tryCatch({
       scm_res     <- readRDS(scm_path)
       t_scm_sec   <- suppressWarnings(as.numeric(attr(scm_res, "elapsed_s")))
-      final_ctrl_for_refit <- if (opts$estimator == "saem") {
-        make_saem_refit_control()
-      } else if (opts$estimator == "vae") {
-        NULL  # VAE cov done in-fit; no separate refit
-      } else {
-        final_bundle$ctrl
-      }
-      refit_est <- if (opts$estimator == "saem") "foceif" else opts$estimator
-      test_i <- package_scm_result(
-        label       = sprintf("N%d_scn%02d_%s_%s_%s",
-                              opts$N, opts$scenario, opts$estimator,
-                              opts$outer_opt %||% "NA", ds_tag),
-        scm_res     = scm_res,
-        runtime_sec = t_scm_sec,
-        true_long   = true_params,
-        scenario_id = opts$scenario,
-        final_ctrl  = final_ctrl_for_refit,
-        final_est   = refit_est
+      # VAE covariance is done in-fit (no separate refit); classical estimators
+      # get the tight-tol final refit inside package_scm_schema21.
+      refit_ctrl_for_cell <- if (opts$estimator == "vae") NULL else final_bundle$ctrl
+      package_scm_schema21(
+        scm_res         = scm_res,
+        true_mod        = base_mod,
+        scenario_id     = opts$scenario,
+        true_params     = true_params,
+        estimator       = opts$estimator,
+        outer_opt       = opts$outer_opt,
+        refit_ctrl      = refit_ctrl_for_cell,
+        refit_estimator = opts$estimator,
+        runtimes        = list(base_sec = NA_real_, scm_sec = t_scm_sec),
+        identity        = list(sample_N = opts$N, dataset_id = opts$dataset,
+                               scm_workers = scm_workers, rx_threads = rx_threads),
+        structure       = opts$structure,
+        out_rds         = res_path
       )
-      out <- assemble_output(opts, test_i, seed, t_base_sec = NA_real_,
-                             t_scm_sec = t_scm_sec, resumed = TRUE)
-      saveRDS(out, res_path)
       if (file.exists(err_path)) unlink(err_path)
-      out
+      readRDS(res_path)
     }, error = function(e) {
       msg <- conditionMessage(e)
       writeLines(c(format(Sys.time()), "tier-2 repackage failed:", msg), err_path)
@@ -228,14 +266,14 @@ run_bench_cell <- function(opts) {
   tryCatch({
     # Base fit (uses screening control for the selected estimator)
     if (opts$estimator == "vae") {
-      t_base <- system.time(vae_res <- fit_vae_screen(base_2cmt_oral_linCmt,
+      t_base <- system.time(vae_res <- fit_vae_screen(base_mod,
                                                       ds_i, screen_bundle$ctrl))
       fit_base_i <- vae_res$fit
       vae_status <- vae_res$status
       if (is.null(fit_base_i)) stop("VAE base fit failed after fallback: ", vae_status)
     } else {
       t_base <- system.time(
-        fit_base_i <- nlmixr2(base_2cmt_oral_linCmt, ds_i,
+        fit_base_i <- nlmixr2(base_mod, ds_i,
                               est = opts$estimator, control = screen_bundle$ctrl)
       )
       vae_status <- NA_character_
@@ -261,7 +299,7 @@ run_bench_cell <- function(opts) {
       searchType = "scm",
       control    = screen_bundle$ctrl,
       saveModels = FALSE,
-      workers    = 3L,
+      workers    = scm_workers,
       print      = 0,
       maxRetries = 0L,
       confirm    = FALSE
@@ -269,39 +307,34 @@ run_bench_cell <- function(opts) {
     t_scm_sec <- as.numeric(attr(scm_res, "elapsed_s"))
     saveRDS(scm_res, scm_path)
 
-    # Tight-tol covariance refit strategy
-    final_ctrl_for_refit <- if (opts$estimator == "saem") {
-      make_saem_refit_control()
-    } else if (opts$estimator == "vae") {
-      NULL
-    } else {
-      final_bundle$ctrl
-    }
-    refit_est <- if (opts$estimator == "saem") "foceif" else opts$estimator
+    # Tight-tol covariance refit strategy: VAE cov is in-fit (skip refit);
+    # classical estimators refit with the cell's own final settings inside
+    # package_scm_schema21.
+    refit_ctrl_for_cell <- if (opts$estimator == "vae") NULL else final_bundle$ctrl
 
-    test_i <- package_scm_result(
-      label       = sprintf("N%d_scn%02d_%s_%s_%s",
-                            opts$N, opts$scenario, opts$estimator,
-                            opts$outer_opt %||% "NA", ds_tag),
-      scm_res     = scm_res,
-      runtime_sec = t_scm_sec,
-      true_long   = true_params,
-      scenario_id = opts$scenario,
-      final_ctrl  = final_ctrl_for_refit,
-      final_est   = refit_est
+    rec <- package_scm_schema21(
+      scm_res         = scm_res,
+      true_mod        = base_mod,
+      scenario_id     = opts$scenario,
+      true_params     = true_params,
+      estimator       = opts$estimator,
+      outer_opt       = opts$outer_opt,
+      refit_ctrl      = refit_ctrl_for_cell,
+      refit_estimator = opts$estimator,
+      runtimes        = list(base_sec = t_base_sec, scm_sec = t_scm_sec),
+      identity        = list(sample_N = opts$N, dataset_id = opts$dataset,
+                             scm_workers = scm_workers, rx_threads = rx_threads),
+      structure       = opts$structure,
+      out_rds         = res_path
     )
-    test_i$vae_status <- vae_status
-
-    out <- assemble_output(opts, test_i, seed, t_base_sec, t_scm_sec,
-                           resumed = FALSE)
-    saveRDS(out, res_path)
     if (file.exists(err_path)) unlink(err_path)
 
-    message(sprintf("<<< [%s] DONE base=%.1fs scm=%.1fs refit=%.1fs cov=%s",
+    message(sprintf("<<< [%s] DONE base=%.1fs scm=%.1fs refit=%.1fs cov=%s | wall=%.1fs",
                     ds_tag, t_base_sec, t_scm_sec,
-                    test_i$refit_runtime_sec %||% NA,
-                    if (isTRUE(test_i$cov_done)) "ok" else "FAIL"))
-    invisible(out)
+                    rec$runtime$refit_sec %||% NA,
+                    if (isTRUE(rec$scm$cov_done)) "ok" else "FAIL",
+                    rec$runtime$total_sec %||% NA))
+    invisible(rec)
   }, error = function(e) {
     msg <- conditionMessage(e)
     writeLines(c(format(Sys.time()), msg), err_path)
@@ -311,39 +344,16 @@ run_bench_cell <- function(opts) {
   })
 }
 
-# ---- Output assembly (uniform 5-key schema) --------------------------------
-`%||%` <- function(x, y) if (is.null(x)) y else x
-
-assemble_output <- function(opts, test_i, seed, t_base_sec, t_scm_sec, resumed) {
-  list(
-    # 5 coordinate keys
-    sample_N    = opts$N,
-    scenario_id = opts$scenario,
-    dataset_id  = opts$dataset,
-    estimator   = opts$estimator,
-    outer_opt   = opts$outer_opt,
-    # Provenance
-    seed        = seed,
-    resumed     = resumed,
-    timestamp   = Sys.time(),
-    # Timings
-    t_base_sec        = t_base_sec,
-    t_scm_sec         = t_scm_sec,
-    t_refit_sec       = test_i$refit_runtime_sec,
-    t_total_sec       = sum(c(t_base_sec, t_scm_sec, test_i$refit_runtime_sec),
-                            na.rm = TRUE),
-    # Packaged SCM result
-    test        = test_i
-  )
-}
+# ---- fallback operator (also defined in refit_helpers.R; kept for safety) --
+if (!exists("%||%")) `%||%` <- function(x, y) if (is.null(x)) y else x
 
 # ---- CLI entry -------------------------------------------------------------
 if (!interactive()) {
   argv <- commandArgs(trailingOnly = TRUE)
   opts <- parse_args(argv)
-  message(sprintf("[scm_bench] N=%d scn=%d ds=%d est=%s opt=%s",
+  message(sprintf("[scm_bench] N=%d scn=%d ds=%d est=%s opt=%s struct=%s",
                   opts$N, opts$scenario, opts$dataset,
-                  opts$estimator, opts$outer_opt %||% "NA"))
+                  opts$estimator, opts$outer_opt %||% "NA", opts$structure))
   t_run <- system.time(res <- run_bench_cell(opts))
   message(sprintf("[scm_bench] finished in %.1f min",
                   t_run["elapsed"] / 60))
