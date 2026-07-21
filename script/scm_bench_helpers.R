@@ -1,40 +1,23 @@
-# ============================================================================
+# ==============================================================================
 # scm_bench_helpers.R
-# ----------------------------------------------------------------------------
-# Helpers shared by PerformanceEvaluation_scm_bench.R and the aggregator.
-# Extracted verbatim (minor comment edits) from
-# PerformanceEvaluation_sc_n_ds_HPCE.R so the bench driver can source these
-# without triggering the CLI dispatch block at the bottom of that file.
-#
-# Exports:
-#   to_nm_dataset(sim_obs)
-#   diagnose_fit(fit)
-#   extract_params_long(fit, includeCov = TRUE)
-#   rel_err_one(est_long, true_long, scenario_id)
-#   runSCM_traced(label, ...)
-#   package_scm_result(label, scm_res, runtime_sec, true_long, scenario_id,
-#                      final_ctrl = NULL, final_est = "focei")
-#
-# Base model:
-#   base_2cmt_oral_linCmt()
-# ============================================================================
+# ------------------------------------------------------------------------------
+# Helper functions for the SCM estimator x optimizer benchmark: base structural
+# models, NONMEM-format data conversion, fit diagnostics, parameter extraction,
+# runSCM tracing, and the schema-2.1 packaging bridge.
+# ==============================================================================
 
-suppressPackageStartupMessages({
-  library(dplyr)
-  library(tibble)
-  library(nlmixr2)
-  library(nlmixr2est)
-  library(rxode2)
-})
+`%||%` <- function(a, b) if (is.null(a)) b else a
 
-## ---- Base model (2-cmt oral, linCmt) --------------------------------------
+## ---- base_2cmt_oral_linCmt ------------------------------------------------
+## Analytic 2-cmt oral base model (linCmt()). This is the structural base fit
+## for the linCmt cells; SCM adds covariate relations on top of cl/vc.
 base_2cmt_oral_linCmt <- function() {
   ini({
     lTVCL <- log(0.6)
     lTVQ  <- log(1.8)
     lTVVc <- log(20)
     lTVVp <- log(80)
-    lTVKA <- fix(log(0.7))
+    lTVKA <- fix(log(0.7))      # KA unidentifiable from this sparse design
 
     eta.cl + eta.vc ~ c(
       0.1,
@@ -57,10 +40,8 @@ base_2cmt_oral_linCmt <- function() {
 # stamp structure so fit_model_type()/assemble_common() resolve model_type
 attr(base_2cmt_oral_linCmt, "structure") <- "linCmt"
 
-## ---- Base model (2-cmt oral, explicit ODE) --------------------------------
-## Canonical estimation model (2026-07).  Replaces base_2cmt_oral_linCmt() in
-## every production path.  linCmt() is retained above ONLY for the one-time
-## linCmt-vs-ODE equivalence benchmark.
+## ---- base_2cmt_oral_ode ---------------------------------------------------
+## Explicit 2-cmt oral ODE surrogate for the linCmt() base model.
 ##
 ## Rationale: nlmixr2 structurally forces fast=FALSE (finite-difference outer
 ## gradient) for any linCmt() model, so the Almquist-2015 analytic gradient
@@ -438,9 +419,16 @@ package_scm_schema21 <- function(scm_res, true_mod, scenario_id, true_params,
     )
   }
 
-  # 1. SCM winner: forward-only -> resFwd[[1]]; else resBck[[1]].
-  winner <- .pickFit(scm_res$resFwd)
-  if (is.null(winner)) winner <- .pickFit(scm_res$resBck)
+  # 1. SCM winner: for a bidirectional "scm" search the FINAL model is the
+  #    backward-eliminated one (resBck) -- forward-selected covariates that
+  #    backward drops must NOT appear in `selected`. Prefer resBck; fall back
+  #    to resFwd only for a forward-only search (resBck NULL).
+  #    2026-07-20: this precedence was previously REVERSED (resFwd first),
+  #    which retained backward-dropped covariates and inflated the null-
+  #    scenario false-positive rate (Power ~0.9 -> ~0.6). Matches the original
+  #    package_scm_result() ordering.
+  winner <- .pickFit(scm_res$resBck)
+  if (is.null(winner)) winner <- .pickFit(scm_res$resFwd)
 
   # 2. tight-tol covariance refit with the cell's own final settings.
   refit_sec <- NA_real_
@@ -527,6 +515,12 @@ package_scm_schema21 <- function(scm_res, true_mod, scenario_id, true_params,
   rec$boundary          <- identity$boundary  %||% NA_character_
   rec$structure         <- structure %||% attr(true_mod, "structure") %||% rec$model_type
   rec$refit_runtime_sec <- refit_sec          # populate meta from runtime$refit_sec
+
+  # Parallelism setup actually in effect (recorded, NOT set here): scm_workers
+  # is the runSCM fork width; rx_threads is rxode2::getRxThreads() as observed
+  # on the compute node.  hog_factor above is the realised speedup.
+  rec$scm_workers <- identity$scm_workers %||% NA_integer_
+  rec$rx_threads  <- identity$rx_threads  %||% NA_integer_
 
   # Flat scalar mirrors of the nested $runtime/$cpu blocks so the timing and
   # the parallelism benefit are greppable from the tiny .meta.json manifest

@@ -68,6 +68,11 @@ SCREEN_SIGDIG=${SCREEN_SIGDIG:-NA}
 SCREEN_ATOL=${SCREEN_ATOL:-NA}
 SCREEN_RTOL=${SCREEN_RTOL:-NA}
 
+# Inner-Hessian warm-start seeding forwarded to foceiControl(warm=). Default
+# "calc" is nlmixr2est 6.2.0's new default; WARM=save reproduces the ORIGINAL
+# run's classic self-initialized Hessian.
+WARM=${WARM:-calc}
+
 LOGDIR="$REPO_ROOT/logs/bench_N${SAMPLE_N}"
 mkdir -p "$LOGDIR"
 
@@ -112,7 +117,7 @@ bsub_out="$(
     -J "${JOBNAME}[${DS_START}-${DS_END}]%${MAXPAR}" \
     -o "${LOGDIR}/${JOBNAME}.%J.%I.out" \
     -e "${LOGDIR}/${JOBNAME}.%J.%I.err" \
-    -env "all, REPO_ROOT=${REPO_ROOT}, SCRIPTS_DIR=${SCRIPTS_DIR}, SAMPLE_N=${SAMPLE_N}, SCN=${SCN}, EST=${EST}, OPT=${OPT}, STRUCTURE=${STRUCTURE}, WORKERS=${WORKERS}, RX_THREADS=${RX_THREADS}, OUT_ROOT=${OUT_ROOT}, SCREEN_SIGDIG=${SCREEN_SIGDIG}, SCREEN_ATOL=${SCREEN_ATOL}, SCREEN_RTOL=${SCREEN_RTOL}" \
+    -env "all, REPO_ROOT=${REPO_ROOT}, SCRIPTS_DIR=${SCRIPTS_DIR}, SAMPLE_N=${SAMPLE_N}, SCN=${SCN}, EST=${EST}, OPT=${OPT}, STRUCTURE=${STRUCTURE}, WORKERS=${WORKERS}, RX_THREADS=${RX_THREADS}, OUT_ROOT=${OUT_ROOT}, SCREEN_SIGDIG=${SCREEN_SIGDIG}, SCREEN_ATOL=${SCREEN_ATOL}, SCREEN_RTOL=${SCREEN_RTOL}, WARM=${WARM}" \
     < "$HERE/bench_array.lsf"
 )"
 echo "$bsub_out"
