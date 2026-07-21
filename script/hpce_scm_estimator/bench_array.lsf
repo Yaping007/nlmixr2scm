@@ -53,6 +53,25 @@ fi
 
 cd "$REPO_ROOT"
 
+# Ensure the personal library (with the required rxode2 >= 5.1.3 / nlmixr2 dev
+# stack) is searched FIRST. `module load R` can prepend a site library that
+# carries an older rxode2 (5.0.2), which loads before nlmixr2 can pull the new
+# one and aborts with "namespace 'rxode2' 5.0.2 is already loaded, but >= 5.1.3
+# is required". Setting R_LIBS_USER puts your lib ahead of the site lib.
+if [ -n "${R_LIBS_USER_OVERRIDE:-}" ]; then
+  export R_LIBS_USER="${R_LIBS_USER_OVERRIDE}"
+fi
+echo "R rxode2 check:"
+Rscript -e 'cat("  libPaths:", paste(.libPaths(), collapse=" | "), "\n"); cat("  rxode2 =", as.character(packageVersion("rxode2")), "\n")' || true
+
+# Optional repackage-only mode: REPACKAGE=1 reuses cached scm_ds*.rds and only
+# rebuilds the schema-2.1 record (fast, no re-fitting) -- used to re-derive
+# $scm$selected after the resFwd/resBck winner-precedence fix.
+REPACK_FLAG=""
+if [ "${REPACKAGE:-0}" = "1" ]; then
+  REPACK_FLAG="--force_repackage"
+fi
+
 Rscript "$SCRIPTS_DIR/PerformanceEvaluation_scm_bench.R" \
     --N        "$SAMPLE_N" \
     --scenario "$SCN" \
@@ -66,6 +85,7 @@ Rscript "$SCRIPTS_DIR/PerformanceEvaluation_scm_bench.R" \
     --screen_atol   "${SCREEN_ATOL:-NA}" \
     --screen_rtol   "${SCREEN_RTOL:-NA}" \
     --warm          "${WARM:-calc}" \
+    ${REPACK_FLAG} \
     --dataset  "$LSB_JOBINDEX"
 
 exit_code=$?
