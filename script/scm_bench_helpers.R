@@ -1,11 +1,47 @@
-  # Parallelism setup actually in effect (recorded, NOT set here): scm_workers
-  # is the runSCM fork width; rx_threads is rxode2::getRxThreads() as observed
-  # on the compute node.
-  rec$scm_workers <- identity$scm_workers %||% NA_integer_
-  rec$rx_threads  <- identity$rx_threads  %||% NA_integer_
+# ==============================================================================
+# scm_bench_helpers.R
+# ------------------------------------------------------------------------------
+# Helper functions for the SCM estimator x optimizer benchmark: base structural
+# models, NONMEM-format data conversion, fit diagnostics, parameter extraction,
+# runSCM tracing, and the schema-2.1 packaging bridge.
+# ==============================================================================
 
-  # Flat scalar mirror of runtime total for the tiny .meta.json manifest.
-  rec$wall_total_sec <- wall_totalchmark.
+`%||%` <- function(a, b) if (is.null(a)) b else a
+
+## ---- base_2cmt_oral_linCmt ------------------------------------------------
+## Analytic 2-cmt oral base model (linCmt()). This is the structural base fit
+## for the linCmt cells; SCM adds covariate relations on top of cl/vc.
+base_2cmt_oral_linCmt <- function() {
+  ini({
+    lTVCL <- log(0.6)
+    lTVQ  <- log(1.8)
+    lTVVc <- log(20)
+    lTVVp <- log(80)
+    lTVKA <- fix(log(0.7))      # KA unidentifiable from this sparse design
+
+    eta.cl + eta.vc ~ c(
+      0.1,
+      0.02,
+      0.1
+    )
+
+    prop.err <- 0.1
+  })
+  model({
+    cl <- exp(lTVCL + eta.cl)
+    vc <- exp(lTVVc + eta.vc)
+    q  <- exp(lTVQ)
+    vp <- exp(lTVVp)
+    ka <- exp(lTVKA)
+    cp <- linCmt()
+    cp ~ prop(prop.err)
+  })
+}
+# stamp structure so fit_model_type()/assemble_common() resolve model_type
+attr(base_2cmt_oral_linCmt, "structure") <- "linCmt"
+
+## ---- base_2cmt_oral_ode ---------------------------------------------------
+## Explicit 2-cmt oral ODE surrogate for the linCmt() base model.
 ##
 ## Rationale: nlmixr2 structurally forces fast=FALSE (finite-difference outer
 ## gradient) for any linCmt() model, so the Almquist-2015 analytic gradient
@@ -383,9 +419,16 @@ package_scm_schema21 <- function(scm_res, true_mod, scenario_id, true_params,
     )
   }
 
-  # 1. SCM winner: forward-only -> resFwd[[1]]; else resBck[[1]].
-  winner <- .pickFit(scm_res$resFwd)
-  if (is.null(winner)) winner <- .pickFit(scm_res$resBck)
+  # 1. SCM winner: for a bidirectional "scm" search the FINAL model is the
+  #    backward-eliminated one (resBck) -- forward-selected covariates that
+  #    backward drops must NOT appear in `selected`. Prefer resBck; fall back
+  #    to resFwd only for a forward-only search (resBck NULL).
+  #    2026-07-20: this precedence was previously REVERSED (resFwd first),
+  #    which retained backward-dropped covariates and inflated the null-
+  #    scenario false-positive rate (Power ~0.9 -> ~0.6). Matches the original
+  #    package_scm_result() ordering.
+  winner <- .pickFit(scm_res$resBck)
+  if (is.null(winner)) winner <- .pickFit(scm_res$resFwd)
 
   # 2. tight-tol covariance refit with the cell's own final settings.
   refit_sec <- NA_real_
@@ -494,60 +537,3 @@ package_scm_schema21 <- function(scm_res, true_mod, scenario_id, true_params,
 
   invisible(rec)
 }
-# ...existing code...
-## ---- runSCM_traced --------------------------------------------------------
-# Records wall-clock runtime for the SCM screening phase.
-runSCM_traced <- function(label, ...) {
-  t0  <- Sys.time()
-  res <- nlmixr2scm::runSCM(...)
-  attr(res, "elapsed_s") <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
-  res
-}
-# ...existing code...
-#   runtimes        : list(base_sec=, scm_sec=) wall-clock timing inputs.
-#                     refit_sec is measured here; total_sec is the phase sum.
-# ...existing code...
-  # 2. tight-tol covariance refit with the cell's own final settings.
-  refit_sec <- NA_real_
-  cov_done  <- FALSE
-  if (!is.null(winner) && !is.null(refit_ctrl)) {
-    est_dispatch <- nlmixr_est_name(refit_estimator)
-    t0 <- Sys.time()
-    refit <- tryCatch(
-      nlmixr2(winner$ui, nlme::getData(winner),
-              est = est_dispatch, control = refit_ctrl),
-      error = function(e) {
-        warning("package_scm_schema21(): refit failed: ",
-                conditionMessage(e), call. = FALSE)
-        NULL
-      }
-    )
-    refit_sec <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
-    if (!is.null(refit)) {
-      winner   <- refit
-      cov_done <- !is.null(refit$cov) && all(is.finite(diag(refit$cov)))
-    }
-  }
-# ...existing code...
-  # 4. runtime override (recommendation A): drop the scalar, attach a list.
-  #    $runtime holds phase-level wall-clock seconds.
-  base_sec <- as.numeric(runtimes$base_sec %||% NA_real_)
-  scm_sec  <- as.numeric(runtimes$scm_sec  %||% NA_real_)
-  rec$fit_runtime_sec <- NULL
-  wall_total <- sum(c(base_sec, scm_sec, refit_sec), na.rm = TRUE)
-  rec$runtime <- list(
-    base_sec  = base_sec,
-    scm_sec   = scm_sec,
-    refit_sec = refit_sec,
-    total_sec = wall_total
-  )
-# ...existing code...
-  # Parallelism setup actually in effect (recorded, NOT set here): scm_workers
-  # is the runSCM fork width; rx_threads is rxode2::getRxThreads() as observed
-  # on the compute node.
-  rec$scm_workers <- identity$scm_workers %||% NA_integer_
-  rec$rx_threads  <- identity$rx_threads  %||% NA_integer_
-
-  # Flat scalar mirror of runtime total for the tiny .meta.json manifest.
-  rec$wall_total_sec <- wall_total
-# ...existing code...

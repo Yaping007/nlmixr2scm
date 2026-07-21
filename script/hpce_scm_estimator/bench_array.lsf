@@ -65,6 +65,7 @@ Rscript "$SCRIPTS_DIR/PerformanceEvaluation_scm_bench.R" \
     --screen_sigdig "${SCREEN_SIGDIG:-NA}" \
     --screen_atol   "${SCREEN_ATOL:-NA}" \
     --screen_rtol   "${SCREEN_RTOL:-NA}" \
+    --warm          "${WARM:-calc}" \
     --dataset  "$LSB_JOBINDEX"
 
 exit_code=$?

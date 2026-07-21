@@ -72,7 +72,8 @@ parse_args <- function(argv) {
                true_params_path = "Inputdataset/true_params_long.rds",
                screen_sigdig = NA_real_,
                screen_atol   = NA_real_,
-               screen_rtol   = NA_real_)
+               screen_rtol   = NA_real_,
+               warm          = "calc")
   i <- 1L
   while (i <= length(argv)) {
     a <- argv[i]
@@ -94,6 +95,7 @@ parse_args <- function(argv) {
       "--screen_sigdig"    = { v <- val(); opts$screen_sigdig <- if (v %in% c("NA","na","")) NA_real_ else as.numeric(v) },
       "--screen_atol"      = { v <- val(); opts$screen_atol   <- if (v %in% c("NA","na","")) NA_real_ else as.numeric(v) },
       "--screen_rtol"      = { v <- val(); opts$screen_rtol   <- if (v %in% c("NA","na","")) NA_real_ else as.numeric(v) },
+      "--warm"             = { opts$warm <- val() },
       stop(sprintf("Unknown arg: %s", a))
     )
     i <- i + 1L
@@ -223,8 +225,10 @@ run_bench_cell <- function(opts) {
   screen_bundle <- make_est_control(opts$estimator, opts$outer_opt, "screen",
                                     screen_sigdig = opts$screen_sigdig,
                                     screen_atol   = opts$screen_atol,
-                                    screen_rtol   = opts$screen_rtol)
-  final_bundle  <- make_est_control(opts$estimator, opts$outer_opt, "final")
+                                    screen_rtol   = opts$screen_rtol,
+                                    warm          = opts$warm)
+  final_bundle  <- make_est_control(opts$estimator, opts$outer_opt, "final",
+                                    warm          = opts$warm)
 
   # Base (covariate-free) model matching the requested structure; carries
   # attr(,"structure") so assemble_common()->fit_model_type() sets model_type.

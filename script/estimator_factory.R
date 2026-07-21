@@ -106,8 +106,17 @@ make_est_control <- function(est,
                              tier          = c("final", "screen"),
                              screen_sigdig = NA_real_,
                              screen_atol   = NA_real_,
-                             screen_rtol   = NA_real_) {
+                             screen_rtol   = NA_real_,
+                             warm          = "calc") {
   tier <- match.arg(tier)
+  # Inner-Hessian seeding for the n1qn1 inner problem. nlmixr2est 6.2.0 changed
+  # the DEFAULT from the classic self-initialized Hessian ("save", used by the
+  # ORIGINAL SCM run) to a recomputed Hessian ("calc"). "calc" perturbs each
+  # candidate fit's OFV at the ~1e-2 level, which flips near-threshold SCM
+  # selections and inflates the null-scenario false-positive rate. warm="save"
+  # reproduces the original behaviour. Applied to BOTH tiers so the whole
+  # search is consistent.
+  warm <- match.arg(warm, c("calc", "save"))
 
   # Optimizer class: gradient-based outer optimizers need tighter ODE
   # tolerances so that FD gradients are not corrupted by ODE noise, plus a
@@ -161,6 +170,7 @@ make_est_control <- function(est,
       maxOuterIterations = 2000,
       maxInnerIterations = 2000,
       derivEps           = derivEps,
+      warm               = warm,
       rxControl          = rxc
     ),
 
@@ -188,6 +198,7 @@ make_est_control <- function(est,
       # the sensitivity equations fail to solve.
       optExpression      = TRUE,
       fallbackFD         = TRUE,
+      warm               = warm,
       rxControl          = rxc
     ),
 
@@ -211,6 +222,7 @@ make_est_control <- function(est,
       # analytic-gradient algorithm with native r,s covariance.
       optExpression      = TRUE,
       fallbackFD         = TRUE,
+      warm               = warm,
       rxControl          = rxc
     ),
 
