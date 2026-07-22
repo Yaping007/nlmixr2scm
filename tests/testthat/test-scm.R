@@ -1712,3 +1712,40 @@ test_that("retry tracking: regression -- last attempt with smaller dObjf does no
   expect_equal(b$dObjf, -1)
   expect_equal(b$attempt_num, 2L)
 })
+
+# =============================================================================
+# profileInitOnStall / stallTol — profile-on-stall rescue parameters
+# -----------------------------------------------------------------------------
+# The forward search can stall when the derivative-free outer optimiser
+# (bobyqa) never steps a new covariate coefficient off its init, leaving the
+# nested model with a WORSE OFV than its parent (dObjf <= 0) -- mathematically
+# impossible at a true optimum.  Observed for ODE models whose FOCEi objective
+# carries solver noise; the true per-step subproblem is unimodal, so a single
+# 1-D FOCEi profile init rescues it.
+#
+# The rescue lives at the END of the .fitCandidatePairs() retry loop so it
+# fires INDEPENDENTLY of maxRetries -- in particular it must still fire when
+# maxRetries = 0 (the benchmark config).  It keeps the profile-init refit ONLY
+# when it STRICTLY improves dObjf, so it can never make a candidate worse.
+# =============================================================================
+
+test_that("runSCM: profileInitOnStall / stallTol parameters exist with expected defaults", {
+  # Formals-only smoke check -- no fitting needed.
+  fmls <- formals(.cur$runSCM)
+  expect_true("profileInitOnStall" %in% names(fmls))
+  expect_true("stallTol"           %in% names(fmls))
+  expect_true(isTRUE(eval(fmls$profileInitOnStall)))
+  expect_equal(eval(fmls$stallTol), 0)
+})
+
+test_that(".fitCandidatePairs / forwardSearch: profile-on-stall parameters threaded through", {
+  # The rescue must be reachable from every layer that .fitCandidatePairs is
+  # called from, so the args have to appear in each formals list.
+  for (fn in c("runSCM", "forwardSearch", ".fitCandidatePairs")) {
+    fmls <- formals(.cur[[fn]])
+    expect_true("profileInitOnStall" %in% names(fmls),
+                info = paste0(fn, " lacks profileInitOnStall"))
+    expect_true("stallTol" %in% names(fmls),
+                info = paste0(fn, " lacks stallTol"))
+  }
+})
