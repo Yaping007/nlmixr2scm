@@ -94,6 +94,94 @@ suppressPackageStartupMessages({
     dplyr::distinct()
 }
 
+# ---- Backward-compat recovery of $covsel$selected -------------------------
+# The updated nlmixr2est (>= 7.0.0) makes `fit$theta` return NULL, so the driver
+# stored `covsel$selected = NULL` even though VAE DID promote covariates.  The
+# promoted beta_<PARAM>_<COV> coefficients survive in the record's parFixed
+# table (rownames = parameter, column "Estimate").  When `covsel$selected` is
+# missing/empty we rebuild it from parFixed so old runs re-score correctly --
+# no re-fit needed.  Mirrors the driver's own parser.
+.recover_selected_from_parfixed <- function(r) {
+  pf <- r$parFixed
+  if (!is.data.frame(pf) || !nrow(pf) || is.null(rownames(pf))) return(NULL)
+  nms  <- rownames(pf)
+  hits <- grep("^beta_", nms, value = TRUE)
+  if (!length(hits)) return(NULL)
+  m     <- regmatches(hits, regexec("^beta_(lTV[[:alnum:]]+)_(.+)$", hits))
+  param <- vapply(m, function(x) if (length(x) == 3L) x[2] else NA_character_, character(1))
+  covar <- vapply(m, function(x) if (length(x) == 3L) x[3] else NA_character_, character(1))
+  var   <- unname(c(lTVCL = "cl", lTVVc = "vc")[param])
+  covar <- ifelse(toupper(covar) == "CRCL", "CrCL", covar)
+  est   <- if ("Estimate" %in% colnames(pf)) {
+    suppressWarnings(as.numeric(pf[hits, "Estimate"]))
+  } else rep(NA_real_, length(hits))
+  keep <- !is.na(var)
+  if (!any(keep)) return(NULL)
+  tibble::tibble(var = var[keep], covar = covar[keep],
+                 theta_name = hits[keep], estimate = est[keep])
+}
+
+# Ensure r$covsel$selected is populated: keep an existing non-empty value,
+# otherwise reconstruct from parFixed.  Returns the (possibly patched) record.
+.ensure_selected <- function(r) {
+  sel <- r$covsel$selected
+  if (is.null(sel) || (is.data.frame(sel) && !nrow(sel))) {
+    rec <- .recover_selected_from_parfixed(r)
+    if (!is.null(rec)) {
+      if (is.null(r$covsel)) r$covsel <- list()
+      r$covsel$selected <- rec
+    }
+  }
+  r
+}
+
+# ---- Backward-compat backfill of covariate-beta rel_err -------------------
+# The broken driver (fit$theta -> NULL) also left the covariate_beta rows of
+# rel_err with NA estimate/rel_err, because that backfill was keyed off the
+# NULL `selected`.  Given a recovered `selected` (var/covar/estimate) we map to
+# the FOCEi-style rel_err labels and fill estimate + abs_err + rel_err, exactly
+# as the driver does.  Only rows with a non-NA true_value and currently-NA
+# estimate are touched; structural rows are never altered.
+.vae_true_param <- function(var, covar) {
+  key <- paste(var, toupper(covar), sep = "|")
+  unname(c(
+    "cl|BW"   = "CLBW",
+    "cl|CRCL" = "CLcrCL",
+    "vc|BW"   = "VcBW",
+    "vc|SEX"  = "VcSEX"
+  )[key])
+}
+
+.ensure_relerr_backfill <- function(r) {
+  rel <- r$rel_err
+  sel <- r$covsel$selected
+  if (is.null(rel) || !nrow(rel) || is.null(sel) || !nrow(sel)) return(r)
+  # nothing to do if no covariate_beta rows are missing an estimate
+  needs <- rel$parameter %in% c("CLBW", "CLcrCL", "VcBW", "VcSEX") &
+           is.na(rel$estimate) & !is.na(rel$true_value)
+  if (!any(needs)) return(r)
+
+  sel_named <- sel |>
+    dplyr::mutate(parameter = .vae_true_param(var, covar)) |>
+    dplyr::filter(!is.na(parameter)) |>
+    dplyr::select(parameter, vae_estimate = estimate) |>
+    dplyr::distinct(parameter, .keep_all = TRUE)
+  if (!nrow(sel_named)) return(r)
+
+  r$rel_err <- rel |>
+    dplyr::left_join(sel_named, by = "parameter") |>
+    dplyr::mutate(
+      estimate    = dplyr::coalesce(estimate, vae_estimate),
+      abs_err     = ifelse(is.na(estimate) | is.na(true_value),
+                           NA_real_, estimate - true_value),
+      rel_err     = ifelse(is.na(estimate) | is.na(true_value) | true_value == 0,
+                           NA_real_, (estimate - true_value) / true_value),
+      rel_err_pct = rel_err * 100
+    ) |>
+    dplyr::select(-vae_estimate)
+  r
+}
+
 match_selected_to_truth <- function(selected, true_set) {
   sel <- .canon_pairs(selected)
   tru <- .canon_pairs(true_set)
@@ -245,6 +333,11 @@ load_one_vae_rds <- function(path, meta) {
     return(list(diag = tibble::tibble(), rse = tibble::tibble(),
                 covsel = tibble::tibble()))
   }
+  # backfill covsel$selected from parFixed for records written by drivers that
+  # hit the fit$theta -> NULL regression (nlmixr2est >= 7.0.0).
+  r <- .ensure_selected(r)
+  # then backfill the covariate_beta rel_err rows from that recovered selection.
+  r <- .ensure_relerr_backfill(r)
   hit <- match_selected_to_truth(r$covsel$selected, r$covsel$true_set)
   list(diag   = .unpack_diag(r, meta, hit),
        rse    = .unpack_rse(r, meta),
