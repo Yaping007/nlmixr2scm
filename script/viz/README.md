@@ -56,6 +56,29 @@ fig_power(agg_dir   = "output/vae_covsel_aggregated",
           structure = NULL,     # NULL = all (linCmt, ode);  or subset e.g. "linCmt"
           save      = FALSE,    # TRUE also writes PNG + PDF
           out_dir   = "output/figures/vae_covsel")
+
+
+source("script/viz/fig_power.R")
+
+fig_power(
+  agg_dir  = "output/vae_covsel_aggregated0722",   # note: no leading space
+  metric   = c("Power", "PowerCN", "PowerMinSuc"),
+  sample_N = NULL,     # all N
+  structure = NULL,    # both structures
+  save     = TRUE      # writes PNG + PDF
+)
+
+# ---- Covariate-selection error pattern (FP / FN heatmap) -------------------
+source("script/viz/fig_covsel_heatmap.R")
+fig_covsel_heatmap(
+  agg_dir   = "output/vae_covsel_aggregated0722",
+  sample_N  = NULL,        # all N
+  structure = "linCmt",    # one structure per figure; use "ode" to swap
+  save      = TRUE
+)
+fig_covsel_heatmap(agg_dir = "output/vae_covsel_aggregated0722",
+                   structure = "ode", save = TRUE)
+
 ```
 
 ### Knobs
@@ -100,10 +123,93 @@ for (m in c("Power","PowerCN","PowerMinSuc")) fig_power(metric = m, save = TRUE)
 
 ---
 
+## `fig_covsel_heatmap.R` — where FP / FN errors concentrate
+
+Per-effect error-rate heatmap answering *"under each scenario, which covariate
+effects tend to become false positive (FP) or false negative (FN)?"* Designed
+around the **BW↔BMI collinearity story**: correlated covariates steal each
+other's signal, so a true `~BW` effect leaks into `~BMI` (and vice versa).
+
+**Data source:** `output/vae_covsel_aggregated/vae_covsel_by_covar.csv`
+(plus `vae_diag_rates.csv` for the per-cell dataset total `n_total`).
+Columns used: `sample_N, scenario, structure, var, covar, is_true, n_FN, n_FP`.
+
+**Two error regimes per (scenario × effect) cell:**
+
+| regime | when | error shown | denominator |
+|---|---|---|---|
+| **FN** (false negative) | `is_true = TRUE` — a real effect | `n_FN / N_cell` | cell dataset total |
+| **FP** (false positive) | `is_true = FALSE` — a null effect | `n_FP / N_cell` | cell dataset total |
+
+> **Denominator gotcha.** `n_datasets` in the by-covar CSV is the number of
+> datasets in which that `(var, covar)` pair *appeared*, **not** the cell size.
+> A distractor only appears when it is falsely selected, so `n_datasets == n_FP`
+> and `n_FP / n_datasets` is always ≈100 %. The figure therefore divides by
+> `N_cell` (= `n_total` from `vae_diag_rates.csv`, equivalently `N` in
+> `vae_power.csv`) for **both** regimes.
+
+**Layout:**
+
+- **x** = scenario (1–16); **y** = effect label `PARAM~COVAR`.
+- y-order = CL block then VC block; **within each block `~BW` and `~BMI` are
+  adjacent**, so a true `~BW` (bold outline = FN) sits directly above its
+  `~BMI` thief (plain tile = FP) — leakage reads vertically.
+- **fill** = error rate 0–100 % (white → dark red = worse).
+- **bold black outline** = TRUE effect (its shading is the FN rate); plain tiles
+  are null effects (shading = FP rate).
+- **facet** = `sample_N` (columns). One `structure` per figure (linCmt ≈ ode).
+
+### Signature
+
+```r
+fig_covsel_heatmap(agg_dir   = "output/vae_covsel_aggregated",
+                   sample_N  = NULL,       # NULL = all (40, 80, 300); or subset
+                   structure = "linCmt",   # ONE structure per figure ("linCmt" | "ode")
+                   labels    = TRUE,       # print error % inside each tile
+                   min_fp    = 0,          # blank FP cells below this rate (de-clutter)
+                   save      = FALSE,      # TRUE also writes PNG + PDF
+                   out_dir   = "output/figures/vae_covsel")
+```
+
+### Knobs
+
+- **`sample_N`** — `NULL` shows all three N; pass e.g. `300` for the large cohort.
+- **`structure`** — one structure per figure (default `"linCmt"`; `"ode"` to swap).
+- **`labels`** — `TRUE` prints the rounded error % in each tile; `FALSE` for a
+  cleaner fill-only grid.
+- **`min_fp`** — FP cells below this rate are greyed out to hide near-zero noise
+  (e.g. `0.05`).
+- **`save`** — writes `fig_covsel_heatmap_<Ntag>_<structure>.{png,pdf}`.
+
+Tune the effect row order via the module constant `.COVAR_ORD` (keeps BW/BMI
+adjacent by default).
+
+### Usage
+
+```r
+source("script/viz/fig_covsel_heatmap.R")
+
+fig_covsel_heatmap()                                 # linCmt, all N
+fig_covsel_heatmap(structure = "ode")                # swap structure
+fig_covsel_heatmap(sample_N = 300)                   # large-cohort only
+fig_covsel_heatmap(labels = FALSE)                   # fill-only grid
+fig_covsel_heatmap(min_fp = 0.05)                    # hide trivial FP noise
+fig_covsel_heatmap(save = TRUE)                      # write PNG + PDF
+```
+
+### Reading notes (current VAE run)
+
+- FP rates are modest (median ≈ 3 %, max ≈ 31 %), consistent with the ~90 %
+  power seen in `fig_power.R` — an early version that divided by `n_datasets`
+  wrongly showed ~100 % FP everywhere.
+- The headline pattern is the **`~BW` / `~BMI` pair**: scenarios where `~BW` is
+  the true effect show elevated `~BMI` FP directly below (and some `~BW` FN),
+  i.e. the two continuous covariates trade the signal.
+
+---
+
 ## Planned figures (to be added)
 
-- `fig_sc16_selection.R` — SC16 per-covariate TP / FP / FN
-  (source: `vae_covsel_by_covar.csv`).
 - `fig_error_metrics.R` — `RMRSE_pct` and `MARE_pct` by scenario / N / structure,
   faceted by `param_class` (source: `vae_estim_{all,success,cond}.csv`).
 - `viz_common.R` — promote the shared theme / palette / labellers / `save_fig()`

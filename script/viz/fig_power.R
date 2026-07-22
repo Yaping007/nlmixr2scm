@@ -70,7 +70,9 @@ fig_power <- function(agg_dir   = "output/vae_covsel_aggregated",
                       sample_N  = NULL,   # NULL = all
                       structure = NULL,   # NULL = all
                       save      = FALSE,
-                      out_dir   = "output/figures/vae_covsel") {
+                      out_dir   = "output/figures/vae_covsel",
+                      csv_name     = "vae_power.csv",  # "scm_power.csv" for SCM
+                      title_prefix = "VAE covariate selection") {
 
   # metric may be ONE (default "Power") or SEVERAL. Do NOT use match.arg here so
   # that a length>1 vector is allowed; validate manually instead.
@@ -82,7 +84,7 @@ fig_power <- function(agg_dir   = "output/vae_covsel_aggregated",
                         " -- choose from ", paste(valid_metrics, collapse = ", "))
   multi <- length(metric) > 1L
 
-  csv    <- file.path(agg_dir, "vae_power.csv")
+  csv    <- file.path(trimws(agg_dir), csv_name)
   if (!file.exists(csv)) stop("power CSV not found: ", csv)
 
   dat <- readr::read_csv(csv, show_col_types = FALSE)
@@ -128,8 +130,8 @@ fig_power <- function(agg_dir   = "output/vae_covsel_aggregated",
                                 breaks = seq(0, 100, 20),
                                 labels = function(x) paste0(x, "%")) +
     ggplot2::labs(
-      title    = sprintf("VAE covariate selection: %s by scenario and sample size",
-                         title_m),
+      title    = sprintf("%s: %s by scenario and sample size",
+                         title_prefix, title_m),
       subtitle = "Dashed line = 80% power threshold",
       x = "Simulation scenario", y = y_lab
     ) +

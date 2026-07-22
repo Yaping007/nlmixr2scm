@@ -211,3 +211,59 @@ compare with care.
   pipeline is unaffected.
 - The **CRCL uppercase alias** (`CRCL = CrCL`) is added in the driver because
   VAE uppercases covariate names when building `beta_lTVCL_CRCL`.
+
+## ⚠️ Known regression: `nlmixr2est ≥ 7.0.0` and `fit$theta`
+
+**Symptom.** After a manager-side `nlmixr2est` update (≥ 7.0.0), a fresh full
+re-run scored **`Power = 0` / all-FN** for every cell — even scenarios where the
+raw fit clearly promoted the correct covariates (verified by hand for
+`N300 × scn16 × ode`).
+
+**Root cause.** The updated `nlmixr2est` makes **`fit$theta` return `NULL`**.
+The old driver derived `covsel$selected` by grepping `names(fit$theta)` for
+`^beta_<PARAM>_<COV>`, so it silently produced `selected = NULL` — no covariate
+was ever counted as selected. A `tryCatch` masked it as "nothing selected"
+rather than an error, so **no `_ERROR.txt` was written** (a loud failure became
+a silent one). The promoted coefficients were never lost — they still live in
+the record's **`parFixed`** table (rownames `beta_lTVCL_BW`, `beta_lTVCL_CRCL`,
+`beta_lTVVc_BW`, `beta_lTVVc_SEX`; column `Estimate`).
+
+**Fixes (both applied).**
+
+1. **Driver (`vae_covsel_driver.R`) — prevents recurrence.**
+   `selected` is now read via a version-robust accessor
+   `.named_theta_estimates()` that prefers `parFixed` (→ `fit$parFixedDf` →
+   `fit$parFixed` → legacy `fit$theta`). It also emits a **loud `warning()`**
+   when 0 `beta_*` terms are extracted for a scenario that *has* true
+   covariates, so a future API change cannot silently zero the results again.
+
+2. **Aggregation (`aggregate_vae_covsel.R`) — salvages existing runs.**
+   `.ensure_selected()` rebuilds `covsel$selected` from `parFixed` whenever the
+   stored value is `NULL`/empty, and `.ensure_relerr_backfill()` then fills the
+   NA covariate-β rows of `rel_err` (`CLBW`, `CLcrCL`, `VcBW`, `VcSEX`) from the
+   same recovered estimates — so **power, FP/FN, detection, AND per-β relative
+   error / RMRSE / MARE all come back**. **No re-fit needed** — just
+   re-aggregate the affected tree, e.g.:
+
+   ```bash
+   Rscript script/aggregate_vae_covsel.R --root output --sub vae_covsel_full0722
+   ```
+
+   Validation on the hand-checked cell: `N300 × scn16 × ode` went from
+   `Power = 0` to **`Power = 0.90`** (27/30 exact), all four true effects at
+   `detection_rate = 1.0`, and covariate-β `rel_err` fully populated
+   (e.g. `CLBW` −17 %, `CLcrCL` +10 %, `VcBW` −27 %, `VcSEX` −26 %).
+
+**Scope.** The `diag` / `diag_t3` blocks and all scalars (convergence, CN,
+`cov_ok`, `min_suc`, objf, runtime) were **unaffected** by the update, so
+convergence / CN gating and the estimation-metric denominators never broke.
+The only two casualties — `selected` and the covariate-β `rel_err` — are both
+recovered from `parFixed` at aggregation time. **The VAE aggregation is now
+fully compatible with `nlmixr2est ≥ 7.0.0`; every output (Power/PowerCN/
+PowerMinSuc, FP/FN/detection, MedRE/MARE/RMRSE, relpower) populates correctly.**
+Only the distractor-β rows (`CLBMI`, `VcBMI`, `VcCrCL`, `VcRACE`) remain `NA` —
+by design, since they have no `true_value` to compare against.
+
+> **Note.** This regression and its recovery are specific to the **VAE**
+> covariate-selection workflow. The FOCEi / `runSCM` benchmark is a separate
+> pipeline and is not addressed here.

@@ -228,17 +228,62 @@ rec <- assemble_common(
                  covar = .norm_covar(covar))
 }
 
-selected <- if (!is.null(fit)) {
+# Version-robust source of the promoted beta_* coefficients.  The updated
+# nlmixr2est (>= 7.0.0) returns NULL for `fit$theta`, but the estimated fixed
+# effects -- INCLUDING the beta_<PARAM>_<COV> covariate terms -- are still in
+# the parFixed table (rownames = parameter, column "Estimate").  We therefore
+# read a NAMED estimate vector from, in order of preference:
+#   1. rec$parFixed  (already assembled, carries the beta_ rows)   [preferred]
+#   2. fit$parFixedDf / fit$parFixed  (same table off the fit)
+#   3. fit$theta     (legacy path; NULL on the new est, hence the fallback)
+# Returns a named numeric vector (names = parameter) or NULL.
+.named_theta_estimates <- function(rec, fit) {
+  # 1/2: any parFixed-style data.frame with an Estimate column + rownames
+  for (pf in list(rec$parFixed,
+                  tryCatch(fit$parFixedDf, error = function(e) NULL),
+                  tryCatch(fit$parFixed,   error = function(e) NULL))) {
+    if (is.data.frame(pf) && nrow(pf) &&
+        "Estimate" %in% colnames(pf) && !is.null(rownames(pf))) {
+      v <- suppressWarnings(as.numeric(pf[["Estimate"]]))
+      names(v) <- rownames(pf)
+      return(v)
+    }
+  }
+  # 3: legacy named theta vector
   th <- tryCatch(fit$theta, error = function(e) NULL)
-  bt <- .parse_beta_theta(names(th))
+  if (!is.null(th) && length(th)) return(th)
+  NULL
+}
+
+th_est   <- .named_theta_estimates(rec, fit)
+selected <- if (!is.null(fit) && !is.null(th_est)) {
+  bt <- .parse_beta_theta(names(th_est))
   if (nrow(bt)) {
     bt |>
-      dplyr::mutate(estimate = unname(th[theta_name])) |>
+      dplyr::mutate(estimate = unname(th_est[theta_name])) |>
       dplyr::filter(!is.na(var)) |>
       dplyr::select(var, covar, theta_name, estimate) |>
       dplyr::arrange(dplyr::desc(abs(estimate)))
   } else NULL
 } else NULL
+
+# Loud diagnostic: a converged VAE that promoted NOTHING is plausible only for
+# the null scenario (scn 1).  If beta_ terms are absent for a scenario that HAS
+# true covariates, the extraction path is broken -- warn so it is not silently
+# scored as all-FN (the exact failure mode of the fit$theta -> NULL regression).
+if (!is.null(fit)) {
+  n_true_here <- if (!is.null(true_set)) nrow(true_set) else 0L
+  n_sel_here  <- if (!is.null(selected)) nrow(selected) else 0L
+  if (n_sel_here == 0L && n_true_here > 0L) {
+    warning(sprintf(
+      paste0("[vae|covsel] extracted 0 promoted beta_* terms but scenario %s ",
+             "has %d true covariate(s). parFixed rownames = {%s}. ",
+             "Selection scoring will be all-FN -- check the nlmixr2est parameter API."),
+      opts$scenario, n_true_here,
+      paste(utils::head(rownames(rec$parFixed), 20L), collapse = ", ")),
+      call. = FALSE)
+  }
+}
 
 rec$covsel <- list(selected = selected, true_set = true_set)
 
