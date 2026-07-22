@@ -24,9 +24,10 @@
 #   r$diag / r$diag_t3 : convergence + stability flags (same as VAE / refit)
 #   r$rel_err          : tibble(parameter, true_value, estimate, rel_err, ...)
 #   r$scm$selected     : tibble(var, covar, shape, theta_name, estimate)
-#                        -- NOTE: SCM DOES search shape (unlike VAE); we still
-#                           score selection on (var, covar) for comparability
-#                           with the DGP truth and the VAE pilot.
+#                           -- NOTE: SCM DOES search shape; selection is scored
+#                              on (var, covar, shape) to match the linCmt
+#                              HPCE_OC_Aggreation.r definition, so an ODE fit
+#                              that substitutes lin-for-power is a miss.
 #   r$scm$step_hist    : runSCM summaryTable (not aggregated here)
 #   r$scm$cov_done     : logical, covariance of the refit winner succeeded
 #   r$runtime          : list(base_sec, scm_sec, refit_sec, total_sec)  WALL
@@ -62,14 +63,14 @@
 #   scm_file_index.csv      one row per discovered RDS
 #   scm_diag_long.csv       per fit: convergence, stability, timing, selection
 #   scm_rse_long.csv        per (fit, parameter): rel_err + param_class
-#   scm_covsel_long.csv     per (fit, var, covar): in_true / in_scm / verdict
+#   scm_covsel_long.csv     per (fit, var, covar, shape): in_true / in_scm / verdict
 #   scm_diag_rates.csv      per cell: %converged, CN, WALL/CPU timing, hog
 #   scm_estim_all.csv       per (cell, parameter): MedRE / MARE / RMRSE (all)
 #   scm_estim_success.csv   same, strict-converged fits only
 #   scm_estim_cond.csv      same, exact-match fits only
 #   scm_power.csv           per cell: Power / PowerCN / PowerMinSuc
 #   scm_relpower.csv        per (cell, k): fraction recovering >= k true covs
-#   scm_covsel_by_covar.csv per (cell, var, covar): detection rate / TP-FP-FN
+#   scm_covsel_by_covar.csv per (cell, var, covar, shape): detection rate / TP-FP-FN
 #   scm_bench_aggregated.rds  bundle of every tibble + params + created_at
 #
 # Usage:
@@ -101,14 +102,17 @@ suppressPackageStartupMessages({
 .true_set_for <- function(scenario_id) {
   scn <- .PsN_scenarios[.PsN_scenarios$scenario == scenario_id, , drop = FALSE]
   if (nrow(scn) != 1L)
-    return(tibble::tibble(var = character(), covar = character()))
+    return(tibble::tibble(var = character(), covar = character(), shape = character()))
+  # True functional shapes from the DGP (PerformanceEvaluation04062026.R):
+  #   CL/Vc covariate effects enter as allometric POWER, (cov/ref)^theta;
+  #   SEX on Vc is categorical (exp(theta * SEX)), scored as "cat".
   rows <- list()
-  if (isTRUE(scn$I_BW_CL   == 1)) rows[[length(rows)+1L]] <- tibble::tibble(var="cl", covar="BW")
-  if (isTRUE(scn$I_CRCL_CL == 1)) rows[[length(rows)+1L]] <- tibble::tibble(var="cl", covar="CrCL")
-  if (isTRUE(scn$I_BW_VC   == 1)) rows[[length(rows)+1L]] <- tibble::tibble(var="vc", covar="BW")
-  if (isTRUE(scn$I_SEX_VC  == 1)) rows[[length(rows)+1L]] <- tibble::tibble(var="vc", covar="SEX")
+  if (isTRUE(scn$I_BW_CL   == 1)) rows[[length(rows)+1L]] <- tibble::tibble(var="cl", covar="BW",   shape="power")
+  if (isTRUE(scn$I_CRCL_CL == 1)) rows[[length(rows)+1L]] <- tibble::tibble(var="cl", covar="CrCL", shape="power")
+  if (isTRUE(scn$I_BW_VC   == 1)) rows[[length(rows)+1L]] <- tibble::tibble(var="vc", covar="BW",   shape="power")
+  if (isTRUE(scn$I_SEX_VC  == 1)) rows[[length(rows)+1L]] <- tibble::tibble(var="vc", covar="SEX",  shape="cat")
   if (length(rows) == 0L)
-    return(tibble::tibble(var = character(), covar = character()))
+    return(tibble::tibble(var = character(), covar = character(), shape = character()))
   dplyr::bind_rows(rows)
 }
 
@@ -122,12 +126,24 @@ suppressPackageStartupMessages({
   )
 }
 
-# ---- Selection scoring on (var, covar) ------------------------------------
+# ---- Selection scoring on (var, covar, shape) -----------------------------
+# Shape-aware exact match, matching the linCmt HPCE_OC_Aggreation.r definition
+# (match_selected_to_truth joins by c("var","covar","shape")). runSCM emits
+# per-LEVEL theta names for categorical covariates (e.g. cov_SEX_1_vc), leaving
+# the level digit in `shape`; we fold any all-digit shape to "cat" so a
+# multi-level cat collapses to ONE relation row. A selection therefore counts
+# as a true positive only when variable, covariate AND functional shape match
+# the truth -- so an ODE fit that substitutes lin-for-power on cl~CrCL is
+# correctly scored as a miss + false positive, not a hit.
 .canon_pairs <- function(tbl) {
   if (is.null(tbl) || !nrow(tbl))
-    return(tibble::tibble(var = character(), covar = character()))
-  tbl |>
-    dplyr::transmute(var = as.character(var), covar = as.character(covar)) |>
+    return(tibble::tibble(var = character(), covar = character(), shape = character()))
+  sh <- if ("shape" %in% names(tbl)) as.character(tbl$shape) else NA_character_
+  tibble::tibble(
+    var   = as.character(tbl$var),
+    covar = as.character(tbl$covar),
+    shape = dplyr::if_else(grepl("^[0-9]+$", sh), "cat", sh)
+  ) |>
     dplyr::distinct()
 }
 
@@ -138,9 +154,9 @@ match_selected_to_truth <- function(selected, true_set) {
     return(list(n_true_hit = 0L, n_false_pos = 0L,
                 exact_match = (nrow(tru) == 0L)))
   }
-  true_hit  <- dplyr::inner_join(sel, tru, by = c("var", "covar"))
-  false_pos <- dplyr::anti_join(sel, tru, by = c("var", "covar"))
-  miss      <- dplyr::anti_join(tru, sel, by = c("var", "covar"))
+  true_hit  <- dplyr::inner_join(sel, tru, by = c("var", "covar", "shape"))
+  false_pos <- dplyr::anti_join(sel, tru, by = c("var", "covar", "shape"))
+  miss      <- dplyr::anti_join(tru, sel, by = c("var", "covar", "shape"))
   list(n_true_hit  = nrow(true_hit),
        n_false_pos = nrow(false_pos),
        exact_match = (nrow(false_pos) == 0L) && (nrow(miss) == 0L))
@@ -270,7 +286,7 @@ discover_scm_files <- function(root = "output", sub = "scm_bench") {
   cmp <- dplyr::full_join(
     dplyr::mutate(true_set, in_true = TRUE),
     dplyr::mutate(selected, in_scm  = TRUE),
-    by = c("var", "covar")
+    by = c("var", "covar", "shape")
   ) |>
     dplyr::mutate(
       in_true = tidyr::replace_na(in_true, FALSE),
@@ -290,6 +306,7 @@ discover_scm_files <- function(root = "output", sub = "scm_bench") {
     dataset_id = r$dataset_id  %||% meta$dataset_id,
     var        = cmp$var,
     covar      = cmp$covar,
+    shape      = cmp$shape,
     in_true    = cmp$in_true,
     in_scm     = cmp$in_scm,
     verdict    = cmp$verdict
@@ -484,7 +501,7 @@ compute_scm_covsel_by_covar <- function(covsel_long) {
   if (!nrow(covsel_long)) return(tibble::tibble())
   covsel_long |>
     dplyr::group_by(sample_N, scenario, structure, estimator, outer_opt,
-                    var, covar) |>
+                    var, covar, shape) |>
     dplyr::summarise(
       n_datasets     = dplyr::n(),
       is_true        = any(in_true %in% TRUE),
@@ -496,7 +513,7 @@ compute_scm_covsel_by_covar <- function(covsel_long) {
       .groups        = "drop"
     ) |>
     dplyr::arrange(sample_N, scenario, structure, estimator, outer_opt,
-                   dplyr::desc(is_true), var, covar)
+                   dplyr::desc(is_true), var, covar, shape)
 }
 
 # ---- Top-level driver -----------------------------------------------------

@@ -315,6 +315,16 @@ run_bench_cell <- function(opts) {
       workers    = scm_workers,
       print      = 0,
       maxRetries = 0L,
+      # 2026-07-21: profile-on-stall rescue. When a forward candidate stalls
+      # (dObjf <= stallTol, i.e. the derivative-free outer optimiser never
+      # steps the new covariate coef off its init -> nested OFV worse than
+      # parent, seen for ODE cells whose FOCEi objective carries solver noise),
+      # run a 1-D FOCEi profile to get a basin-correct init and refit. Kept
+      # only if it STRICTLY improves dObjf, so it can never make a candidate
+      # worse; a no-op for healthy (analytic linCmt) candidates. Fires
+      # independently of maxRetries, so it is active even at maxRetries = 0L.
+      profileInitOnStall = TRUE,
+      stallTol   = 0,
       confirm    = FALSE
     )
     t_scm_sec <- as.numeric(attr(scm_res, "elapsed_s"))

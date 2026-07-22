@@ -157,6 +157,10 @@ remotes::install_github("nlmixr2/rxode2",      upgrade = "never")
 remotes::install_github("nlmixr2/nlmixr2data", upgrade = "never")
 remotes::install_github("nlmixr2/nlmixr2est",  upgrade = "never")
 remotes::install_github("nlmixr2/nlmixr2",     upgrade = "never")
+module load R          # same module the jobs use
+Rscript -e 'install.packages(".", repos = NULL, type = "source", lib = Sys.getenv("R_LIBS_USER"))' #reinstall nlmixr2scm
+
+
 ```
 
 Verify the extra estimator methods are present:
@@ -230,6 +234,21 @@ bkill 261294 261295 261296 261297 261298 261299 261300 261301 261302 261303 2613
 bash script/hpce_scm_estimator/submit_one_array.sh 40  2 focei bobyqa linCmt 1 1 212 #retun failed runs
 bash script/hpce_scm_estimator/submit_one_array.sh 80  9 focei bobyqa linCmt 1 1  13
 
+
+bash script/hpce_scm_estimator/submit_one_array.sh 300  16 focei bobyqa ode 1 1 
+
+OUT_ROOT=output/scm_bench_rescue FORCE_RERUN=1 JOBTAG=rescue   bash script/hpce_scm_estimator/submit_one_array.sh 300 16 focei bobyqa ode 1 1
+
+
+R CMD INSTALL --no-multiarch --with-keep.source .
+sed -i 's/\r$//' script/hpce_scm_estimator/*.sh script/hpce_scm_estimator/*.lsf
+
+FORCE_RERUN=1 \
+OUT_ROOT=output/scm_bench_rescue_winner \
+STRUCTURES=ode \
+NS=300 \
+SCENARIOS="1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16" \
+  bash script/hpce_scm_estimator/submit_all_arrays.sh 5 30
 ```
 
 Monitor and read actual resource usage:
@@ -282,6 +301,8 @@ Runtime budget (rough, from N=80 ds01 smoke test on linCmt):
 - `focei_{nlminb,lbfgsb3c}`: ~20–30 min / fit
 - `foceif_{nlminb,lbfgsb3c}`: ~20–25 min / fit
 - `irlsfoceif_lbfgsb3c`: ~10–15 min / fit (fastest)
+bash script/hpce_scm_estimator/submit_one_array.sh 300  16 focei nlminb ode 5 5 
+bash script/hpce_scm_estimator/submit_one_array.sh 300  16 focei lbfgsb3c ode 5 5 
 
 ODE cells run longer than the linCmt equivalents.
 
@@ -297,6 +318,63 @@ The driver has a 2-tier cache:
 Flags:
 - `--force_rerun` bypasses both caches;
 - `--force_repackage` ignores stale `res_*` but reuses cached `scm_*`.
+
+## Known bugs & fixes
+
+### SCM Power collapse ~0.9 → ~0.6 — FIXED 2026-07-20 (`7007b17`)
+
+`package_scm_schema21()` picked the SCM winner from the **forward** model
+(`resFwd` first) instead of the **backward-eliminated** model (`resBck` first).
+For a bidirectional `"scm"` search the final model is the backward one, so any
+forward false-positive that backward elimination correctly *dropped* was still
+counted in `$scm$selected`. In null/easy scenarios this inflated the
+false-positive rate and collapsed Power from ~0.9 to ~0.6.
+
+The search itself was never wrong — the `step_hist` showed the covariate as
+`included = "dropped"` in both the old and new runs; only the winner-extraction
+differed. Fix: `resBck` first, `resFwd` fallback (forward-only searches), matching
+the original `package_scm_result()`. See
+`docs/ESTIMATOR_JOURNEY.md` §3.10 for the full diagnosis (and the four
+hypotheses that were disproven by controlled A/B first: fork corruption, screen
+precision, `warm`, base-fit quality).
+
+**Action required**: any `res_ds*.rds` produced before this commit has a wrong
+`$scm$selected`. Re-derive them with `--force_repackage` (reuses cached
+`scm_ds*.rds`, no re-fitting), then re-aggregate:
+
+```bash
+# repackage every cell that has a cached SCM object
+for f in output/scm_bench/N*/scn*_*/*_*/scm_ds*.rds; do
+  d=$(basename "$f"); ds=$(echo "$d" | sed 's/[^0-9]//g' | sed 's/^0*//')
+  cell=$(dirname "$f"); IFS='_' read -r est opt <<< "$(basename "$cell")"
+  scn_struct=$(basename "$(dirname "$cell")"); scn=$(echo "$scn_struct" | sed 's/scn0*\([0-9]*\)_.*/\1/'); struct=${scn_struct#*_}
+  N=$(basename "$(dirname "$(dirname "$cell")")" | tr -d 'N')
+  Rscript script/PerformanceEvaluation_scm_bench.R \
+    --N "$N" --scenario "$scn" --estimator "$est" --outer_opt "$opt" \
+    --structure "$struct" --out_root output/scm_bench --dataset "$ds" --force_repackage
+done
+Rscript script/aggregate_scm_estimator2.1.R --root output --sub scm_bench
+```
+
+## Diagnostic A/B knobs (screen precision & warm-start)
+
+These were added while hunting the Power collapse and are kept as diagnostics.
+**Defaults reproduce prior behaviour**, so they are inert unless set.
+
+| driver flag | env (submit_one_array) | default | effect |
+|-------------|------------------------|---------|--------|
+| `--screen_sigdig` | `SCREEN_SIGDIG` | `NA` (→ 4) | screen-tier `foceiControl(sigdig=)` override |
+| `--screen_atol`   | `SCREEN_ATOL`   | `NA` | screen-tier ODE `atol` override |
+| `--screen_rtol`   | `SCREEN_RTOL`   | `NA` | screen-tier ODE `rtol` override |
+| `--warm`          | `WARM`          | `calc` | `foceiControl(warm=)` — `save` = classic self-initialized inner Hessian |
+
+Example A/B (original coarse screening vs current):
+
+```bash
+SCREEN_SIGDIG=3 SCREEN_ATOL=1e-6 SCREEN_RTOL=1e-4 \
+  OUT_ROOT=output/scm_pilot_sd3 JOBTAG=sd3 \
+  bash script/hpce_scm_estimator/submit_one_array.sh 300 1 focei bobyqa linCmt 10 10
+```
 
 ## Contention-free timing (fork-parallelism benefit)
 
