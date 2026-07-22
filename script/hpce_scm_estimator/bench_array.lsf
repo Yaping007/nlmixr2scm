@@ -72,6 +72,15 @@ if [ "${REPACKAGE:-0}" = "1" ]; then
   REPACK_FLAG="--force_repackage"
 fi
 
+# Optional full-rerun mode: FORCE_RERUN=1 bypasses BOTH caches (tier-1 res_*
+# AND tier-2 scm_*) and re-runs the whole SCM pipeline. Required when the SCM
+# search logic itself changed (e.g. the profile-on-stall rescue) so the cached
+# scm_ds*.rds must be regenerated, not merely repackaged.
+RERUN_FLAG=""
+if [ "${FORCE_RERUN:-0}" = "1" ]; then
+  RERUN_FLAG="--force_rerun"
+fi
+
 Rscript "$SCRIPTS_DIR/PerformanceEvaluation_scm_bench.R" \
     --N        "$SAMPLE_N" \
     --scenario "$SCN" \
@@ -86,6 +95,7 @@ Rscript "$SCRIPTS_DIR/PerformanceEvaluation_scm_bench.R" \
     --screen_rtol   "${SCREEN_RTOL:-NA}" \
     --warm          "${WARM:-calc}" \
     ${REPACK_FLAG} \
+    ${RERUN_FLAG} \
     --dataset  "$LSB_JOBINDEX"
 
 exit_code=$?
