@@ -281,6 +281,26 @@ bash script/hpce_scm_estimator/submit_all_arrays.sh 100 50
 # or slice it — env filters are space-separated lists:
 STRUCTURES=linCmt NS="80 300" SCENARIOS=16 \
   bash script/hpce_scm_estimator/submit_all_arrays.sh 100 50
+
+
+FORCE_RERUN=1 \
+OUT_ROOT=output/scm_bench \
+STRUCTURES=ode \
+NS="40 80 300" \
+SCENARIOS="1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16" \
+ESTIMATORS=focei \
+FOCEI_OPTS="bobyqa lbfgsb3c" \
+  bash script/hpce_scm_estimator/submit_all_arrays.sh 100 50
+
+
+OUT_ROOT=output/scm_bench \
+STRUCTURES=ode \
+NS=300 \
+SCENARIOS="1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16" \
+ESTIMATORS=focei \
+FOCEI_OPTS=bobyqa \
+DS_START=6 \
+  bash script/hpce_scm_estimator/submit_all_arrays.sh 100 50
 ```
 
 `submit_all_arrays.sh` env knobs (all optional):
@@ -355,6 +375,72 @@ for f in output/scm_bench/N*/scn*_*/*_*/scm_ds*.rds; do
 done
 Rscript script/aggregate_scm_estimator2.1.R --root output --sub scm_bench
 ```
+
+### `irlsfoceif`/`foceif` analytic outer gradient never engages on ODE (`fast=TRUE` is inert) — INVESTIGATED 2026-07-23
+
+**Symptom.** Every `foceif`/`irlsfoceif` ODE fit prints `grad: fd` and carries
+the run-info note *"fast=TRUE: the analytic outer gradient could not be solved
+at this point; using the finite-difference gradient for the affected
+iteration(s)"*. The Almquist analytic outer gradient (the whole point of
+`fast=TRUE`) therefore provides **no speedup** — `foceif`/`irlsfoceif` run as
+finite-difference `focei` (with the IRLS inner step for `irlsfoceif`) plus a
+wasted ~100 s symbolic augmented-gradient build.
+
+**Not a corruption.** The selection is *correct*: on N300/scn16/ds002
+`irlsfoceif_lbfgsb3c` recovers all four true covariates
+(`CrCL_power_cl`, `SEX_vc`, `BW_power_cl`, `BW_power_vc`) with Cond#(Cor)=11,
+while `focei_nlminb` on the same dataset mis-selects (`BW_lin`, `CrCL_lin`, the
+`BMI` decoy), Cond#(Cor)=2218, `false convergence (8)`. The FD fallback is a
+benign, *informational* note; the fit is sound.
+
+**Root cause (traced in nlmixr2est 7.0.0 source, live).** The analytic core
+`.foceiAnalyticGradCore()` returns `NULL` (→ FD fallback) on **every**
+iteration. Instrumenting the `return(NULL)` gates pinned it to the `canVanish`
+check:
+
+```r
+if (isTRUE(ef$canVanish)) {              # TRUE for a pure proportional error model
+  .fa <- abs(E$f)
+  if (any(!is.finite(.fa)) || min(.fa) < 1e-06 * max(.fa))
+    return(NULL)                          # rejects -> finite-difference gradient
+}
+```
+
+The 2-cmt **oral** model predicts concentration ≈ 0 during early absorption, and
+every subject has a `TIME=0, DV=0` observation where the central compartment is
+structurally 0 → `min|f| = 0`. With proportional error the residual variance at
+`f=0` is `(prop·0)² = 0` (degenerate, infinite weight), so nlmixr2est
+**refuses** the analytic gradient. This is a property of the *design*
+(oral + proportional error + a t=0 record), not a tolerance or `sensMethod`
+issue.
+
+**What does NOT fix it (all tested live):**
+- `sigdig` 5 → 6, or matching `atolSens/rtolSens` to the tight state tols
+  ("Fix 1"): 0 % analytic either way; `fd_switch` stays `TRUE`. Fix 1's only
+  proven benefit is on *warm, fully-specified* refits (≈5× faster, no switch),
+  not on the ODE cells here.
+- `sensMethod = forward|adjoint`, `covSolveTol`: the rejection happens in the
+  `canVanish` gate *before* the sensitivity solve, so these knobs are inert.
+- **Dropping the `TIME=0, DV=0` rows**: a short 15-iteration probe showed no
+  gate firing, but a *full* run still ends `grad: fd` (the gate re-fires at
+  later θ where oral troughs dip near zero), and deleting 300/1800 observations
+  shifts the OBJF (−16868 → −6067) and the likelihood/LRT — so it changes the
+  science and is **not** a valid fix.
+
+**Conclusion / action.** On this proportional-error oral-ODE design the analytic
+outer gradient cannot engage in nlmixr2est 7.0.0. Practical options:
+1. **Report as a limitation** — `foceif`/`irlsfoceif` give no gradient speedup
+   here and are numerically equivalent to FD `focei` (IRLS inner for
+   `irlsfoceif`). No code change; honest and defensible.
+2. **Set `fast=FALSE`** explicitly for the ODE cells to skip the wasted
+   augmented-model build (byte-identical result, faster, honest `grad: fd`
+   header).
+3. **Upstream reprex** to nlmixr2est: the `canVanish` gate rejects on every
+   iteration for oral + proportional-error models because early-absorption /
+   t=0 predictions vanish — the only route to a genuine fix.
+
+Diagnostic harnesses: `script/_test_fix1_irlsfoceif_scn16.R` (Fix 1 A/B) and
+`script/diagnose_scm_gradient_trace.R` (candidate-level gradient trace).
 
 ## Diagnostic A/B knobs (screen precision & warm-start)
 

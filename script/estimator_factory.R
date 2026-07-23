@@ -81,6 +81,14 @@ is_valid_combo <- function(est, outer_opt) {
 # optExpression=FALSE yet still reported grad: analytic).
 #
 # saem/focei pass through unchanged. Requires nlmixr2est >= 6.2.0.
+#
+# 2026-07-22 (nlmixr2est 7.0.0): the ifoceif/foceif aliases are STILL present
+# (nlmixr2Est.ifoceif, getValidNlmixrCtl.ifoceif verified live), so this map is
+# unchanged. The 7.0.0 "est=irlsfoceif not supported" errors came from callers
+# passing the RAW grid label to nlmixr2() instead of routing through this
+# function -- the base fit in PerformanceEvaluation_scm_bench.R. foceif slipped
+# through only because "foceif" happens to be a valid est string; "irlsfoceif"
+# is not. Every nlmixr2()/base-fit call site MUST use nlmixr_est_name().
 nlmixr_est_name <- function(estimator) {
   switch(estimator,
     foceif     = "foceif",    # FOCEi + interaction, analytic gradient (fast=TRUE)
@@ -107,8 +115,14 @@ make_est_control <- function(est,
                              screen_sigdig = NA_real_,
                              screen_atol   = NA_real_,
                              screen_rtol   = NA_real_,
-                             warm          = "calc") {
+                             warm          = "calc",
+                             fix1          = TRUE) {
   tier <- match.arg(tier)
+  # fix1 toggle (2026-07-22): when TRUE, the analytic-gradient branches
+  # (foceif/irlsfoceif) use sensitivity-matched ODE tolerances (rxc_sens);
+  # when FALSE they use the default rxControl (rxc), whose sensitivity tols are
+  # loosened 10x. Exposed as an argument so a diagnostic can A/B the effect of
+  # Fix 1 on a single (est, opt) cell. Has no effect on focei/saem.
   # Inner-Hessian seeding for the n1qn1 inner problem. nlmixr2est 6.2.0 changed
   # the DEFAULT from the classic self-initialized Hessian ("save", used by the
   # ORIGINAL SCM run) to a recomputed Hessian ("calc"). "calc" perturbs each
@@ -140,6 +154,33 @@ make_est_control <- function(est,
     if (!is.na(screen_rtol))   rtol   <- screen_rtol
   }
   rxc       <- rxode2::rxControl(atol = atol, rtol = rtol)
+
+  # FIX 1 (2026-07-22): sensitivity-matched rxControl for the ANALYTIC-gradient
+  # estimators (foceif, irlsfoceif; est aliases set fast=TRUE).
+  #
+  # By default rxControl loosens the forward-sensitivity tolerances 10x relative
+  # to the state solve (maxAtolRtolFactor=0.1): with atol=1e-10/rtol=1e-8 the
+  # sensitivity ODEs are actually solved at atolSens=1e-9/rtolSens=1e-7. That
+  # looser sensitivity solve is what trips the Almquist analytic OUTER gradient
+  # into "could not be solved at this point" -> fallbackFD swaps in an FD
+  # gradient for the affected iterations. A quasi-Newton outer optimizer then
+  # sees a gradient that flips between the analytic and FD scales, poisoning its
+  # inverse-Hessian (Hessian resets, "last objf not at minimum", near-threshold
+  # SCM selection flips).
+  #
+  # Matching atolSens/rtolSens (and their steady-state counterparts) to the
+  # tight STATE tols keeps the sensitivity solve accurate enough that the
+  # analytic gradient stays solvable, so fallbackFD stops firing. Verified live
+  # (scn16 ODE, ds001, cold-start candidate): identical OBJF to the loose-sens
+  # run and ~5x faster (17.6 s vs 87.6 s), with NO analytic->FD switch.
+  # Applies only to the analytic-gradient branches; focei (fast=FALSE) and saem
+  # are unaffected and keep the default rxc.
+  rxc_sens  <- rxode2::rxControl(atol = atol, rtol = rtol,
+                                 atolSens = atol, rtolSens = rtol,
+                                 ssAtolSens = atol, ssRtolSens = rtol)
+
+  # fix1 selects which rxControl the analytic-gradient branches receive.
+  rxc_analytic <- if (isTRUE(fix1)) rxc_sens else rxc
 
   # Tier-specific: screen skips covariance and table build; final does both.
   covMethod  <- if (tier == "screen") "" else "r,s"
@@ -199,7 +240,7 @@ make_est_control <- function(est,
       optExpression      = TRUE,
       fallbackFD         = TRUE,
       warm               = warm,
-      rxControl          = rxc
+      rxControl          = rxc_analytic   # FIX 1 (toggled): sens-matched tols
     ),
 
     irlsfoceif = nlmixr2est::foceiControl(
@@ -223,7 +264,7 @@ make_est_control <- function(est,
       optExpression      = TRUE,
       fallbackFD         = TRUE,
       warm               = warm,
-      rxControl          = rxc
+      rxControl          = rxc_analytic   # FIX 1 (toggled): sens-matched tols
     ),
 
     saem = {
