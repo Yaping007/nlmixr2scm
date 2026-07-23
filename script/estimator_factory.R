@@ -81,6 +81,14 @@ is_valid_combo <- function(est, outer_opt) {
 # optExpression=FALSE yet still reported grad: analytic).
 #
 # saem/focei pass through unchanged. Requires nlmixr2est >= 6.2.0.
+#
+# 2026-07-22 (nlmixr2est 7.0.0): the ifoceif/foceif aliases are STILL present
+# (nlmixr2Est.ifoceif, getValidNlmixrCtl.ifoceif verified live), so this map is
+# unchanged. The 7.0.0 "est=irlsfoceif not supported" errors came from callers
+# passing the RAW grid label to nlmixr2() instead of routing through this
+# function -- the base fit in PerformanceEvaluation_scm_bench.R. foceif slipped
+# through only because "foceif" happens to be a valid est string; "irlsfoceif"
+# is not. Every nlmixr2()/base-fit call site MUST use nlmixr_est_name().
 nlmixr_est_name <- function(estimator) {
   switch(estimator,
     foceif     = "foceif",    # FOCEi + interaction, analytic gradient (fast=TRUE)
