@@ -208,9 +208,77 @@ fig_covsel_heatmap(save = TRUE)                      # write PNG + PDF
 
 ---
 
+## `fig_error_metrics.R` — estimation accuracy, conditioned on correct selection
+
+Per-parameter **RMRSE** / **MARE** dot-plot answering *"how accurately is each
+population parameter and covariate effect estimated, and does restricting to
+datasets where the covariate model was selected **correctly** change that
+accuracy?"* Currently focused on **scenario 16** (all four covariate effects
+active).
+
+**Data source:** `output/vae_covsel_aggregated0722/vae_estim_all.csv`
+(unconditioned) and `vae_estim_cond.csv` (conditioned on `exact_match == TRUE`,
+i.e. the selected covariate set equals truth — no FP, no FN). Both share the
+schema-2.1 columns: `sample_N, scenario, structure, parameter, param_class,
+true_value, n_used, MedRE_pct, MeanRE_pct, MARE_pct, RMRSE_pct, P90AbsRE_pct`.
+
+**Metrics** (both %, lower = better), from `rel_err = (θ̂ − θ_true)/θ_true`:
+
+| metric | formula | character |
+|---|---|---|
+| `RMRSE` | `100·√mean(rel_err²)` | outlier-sensitive accuracy |
+| `MARE`  | `100·median\|rel_err\|` | robust central accuracy (the repo's "MASE") |
+
+> There is **no metric literally named "MASE"** in the codebase; `MARE_pct` is
+> the robust median-relative-error metric and is what "MASE" maps to.
+
+**Parameter groups (`param_class`):**
+
+- `covariate_beta` — `CLBW, CLcrCL, VcBW, VcSEX` (headline; centering-invariant).
+- `structural_intercept` — `TVCL, TVVc` (**caveat**: absorb the covariate
+  centering shift, so their relative error is *not* pure bias — footnoted).
+- `structural_other` — `TVQ, TVVp, var_CL, var_Vc, cov_VcCL, ResErr` (clean
+  baseline; fixed `TVKA` is dropped by default since its error is always 0).
+
+**Layout:**
+
+- **y** = parameter, grouped into `param_class` blocks down the rows.
+- **x** = metric value (%); **colour** = conditioning (grey = *Unconditioned*,
+  blue = *True selection*), dodged as a lollipop (linerange 0→value + point).
+- **facet** = `param_class` (rows, free/space y) × `metric` (cols). Extra
+  `sample_N` / `structure` facet columns are added automatically when more than
+  one is present (the 0722 run is scn16 / N=300 / ODE only, so those collapse).
+
+### Signature
+
+```r
+fig_error_metrics(agg_dir    = "output/vae_covsel_aggregated0722",
+                  scenario   = 16,
+                  sample_N   = NULL,                # NULL = all present
+                  structure  = NULL,                # NULL = all present
+                  metrics    = c("RMRSE", "MARE"),
+                  drop_fixed = TRUE,                # drop TVKA (fixed → 0)
+                  labels     = FALSE,               # print value at each point
+                  save       = FALSE,               # TRUE also writes PNG + PDF
+                  out_dir    = "output/figures/vae_covsel")
+```
+
+### Usage
+
+```r
+source("script/viz/fig_error_metrics.R")
+
+fig_error_metrics()                         # scn16, both metrics
+fig_error_metrics(metrics = "MARE")         # robust metric only
+fig_error_metrics(labels = TRUE, save = TRUE)
+```
+
+Saves `fig_error_metrics_scn<scn>_<Ntag>_<Struct>_<metrics>.{png,pdf}`.
+
+---
+
 ## Planned figures (to be added)
 
-- `fig_error_metrics.R` — `RMRSE_pct` and `MARE_pct` by scenario / N / structure,
-  faceted by `param_class` (source: `vae_estim_{all,success,cond}.csv`).
 - `viz_common.R` — promote the shared theme / palette / labellers / `save_fig()`
   helper once ≥ 2 figures reuse them.
+

@@ -78,15 +78,15 @@ suppressPackageStartupMessages({
 # categoricals SEX / RACE.
 .COVAR_ORD <- c("BW", "BMI", "CrCL", "SEX", "RACE")
 
-theme_scm <- function(base_size = 12) {
+theme_scm <- function(base_size = 15) {
   ggplot2::theme_minimal(base_size = base_size) +
     ggplot2::theme(
       panel.grid       = ggplot2::element_blank(),
       legend.position  = "top",
       strip.text       = ggplot2::element_text(face = "bold"),
       plot.title       = ggplot2::element_text(face = "bold"),
-      axis.text.x      = ggplot2::element_text(size = base_size - 3),
-      axis.text.y      = ggplot2::element_text(size = base_size - 3)
+      axis.text.x      = ggplot2::element_text(size = base_size - 1),
+      axis.text.y      = ggplot2::element_text(size = base_size - 1)
     )
 }
 
@@ -97,6 +97,7 @@ fig_covsel_heatmap <- function(
     structure    = "linCmt",   # ONE structure per figure ("linCmt" | "ode")
     labels       = TRUE,
     min_fp       = 0,      # blank FP cells below this rate
+    layout       = c("slide", "wide"),  # "slide" = N stacked (16:9-friendly)
     save         = FALSE,
     out_dir      = "output/figures/vae_covsel",
     csv_name     = "vae_covsel_by_covar.csv",
@@ -108,9 +109,11 @@ fig_covsel_heatmap <- function(
   dat <- readr::read_csv(csv, show_col_types = FALSE)
 
   if (!is.null(sample_N))  dat <- dplyr::filter(dat, sample_N  %in% !!sample_N)
-  # one structure per figure (default "linCmt"); keep first if several passed
+  # one structure per figure (default "linCmt"); "both" keeps ode + linCmt as
+  # side-by-side facet columns so they share one slide.
   structure <- structure[1]
-  dat <- dplyr::filter(dat, structure == !!structure)
+  both_struct <- identical(structure, "both")
+  if (!both_struct) dat <- dplyr::filter(dat, structure == !!structure)
   if (nrow(dat) == 0L) stop("no rows after filtering (check sample_N / structure)")
 
   # per-cell dataset total N_cell -- the correct FP/FN denominator (see header).
@@ -132,15 +135,40 @@ fig_covsel_heatmap <- function(
       # blank trivial FP noise if requested
       err_show = dplyr::if_else(!is_true & err_rate < min_fp,
                                 NA_real_, err_rate),
+      # signed severity: FP -> positive (red), FN -> negative (blue).
+      # magnitude is the error rate in %, sign encodes the regime so the two
+      # error kinds get contrasting colours on ONE diverging scale.
+      err_signed = dplyr::if_else(is_true, -err_show * 100, err_show * 100),
       param    = dplyr::coalesce(.VAR_LAB[var], toupper(var)),
       effect   = paste0(param, "~", covar),
       v_ord    = match(var, names(.VAR_LAB)),
       c_ord    = match(covar, .COVAR_ORD),
       scenario = factor(scenario, levels = sort(unique(scenario))),
+      struct_f = dplyr::recode(structure,
+                               linCmt = "linCmt (analytic)", ode = "ODE"),
       sample_N = factor(paste0("N = ", sample_N),
                         levels = paste0("N = ", c(40, 80, 300)))
     ) |>
-    dplyr::filter(!is.na(v_ord), !is.na(c_ord))
+    dplyr::filter(!is.na(v_ord), !is.na(c_ord)) |>
+    dplyr::mutate(
+      struct_f = factor(struct_f,
+        levels = intersect(c("linCmt (analytic)", "ODE"), unique(struct_f)))
+    )
+
+  # Complete the (sample_N x scenario x effect) grid.  A FALSE-effect distractor
+  # only gets a by-covar row when it was falsely selected in >=1 dataset, so
+  # never-selected distractors (genuine 0% FP, common at large N) are simply
+  # absent and would leave holes in the heatmap.  Fill those as explicit white
+  # zeros.  NOTE: `is_true` varies BY SCENARIO for a given (var, covar), so it
+  # must NOT be part of the nesting key (that would fabricate a duplicate TRUE
+  # + FALSE tile per cell).  Any cell we have to fill is by definition one that
+  # was never selected -> a distractor -> is_true = FALSE, FP = 0.
+  plot_df <- plot_df |>
+    tidyr::complete(
+      struct_f, sample_N, scenario,
+      tidyr::nesting(effect, param, var, covar, v_ord, c_ord),
+      fill = list(is_true = FALSE, err_rate = 0, err_show = 0, err_signed = 0)
+    )
 
   # TOP-DOWN effect order: CL block first, then VC; BW,BMI adjacent within each.
   eff_levels <- plot_df |>
@@ -151,40 +179,46 @@ fig_covsel_heatmap <- function(
   plot_df <- dplyr::mutate(plot_df,
     effect = factor(effect, levels = rev(eff_levels)))
 
-  # bold outline only on TRUE-effect (FN) cells
-  true_df <- dplyr::filter(plot_df, is_true)
-
-  struct_lab <- .STRUCT_LAB[[structure]] %||% structure
+  # LAYOUT: "slide" stacks the three N panels vertically (one per row) so the
+  # figure is roughly landscape and drops onto a 16:9 slide; tiles fill the
+  # panel width instead of being forced square.  "wide" keeps the original
+  # single-row, square-tile arrangement (good for a full-page landscape).
+  layout <- match.arg(layout)
+  facet_nrow <- if (layout == "slide") 3L else 1L
 
   p <- ggplot2::ggplot(plot_df,
-                       ggplot2::aes(scenario, effect, fill = err_show * 100)) +
+                       ggplot2::aes(scenario, effect, fill = err_signed)) +
     ggplot2::geom_tile(colour = "grey85", linewidth = 0.3) +
-    # re-draw TRUE cells with a bold black border to flag the FN regime
-    ggplot2::geom_tile(data = true_df, colour = "black", linewidth = 0.8,
-                       fill = NA) +
-    ggplot2::scale_fill_gradient(
-      low = "#FFF5EB", high = "#B30000", na.value = "grey92",
-      name = "Error rate", limits = c(0, 100),
-      breaks = seq(0, 100, 25), labels = function(x) paste0(x, "%")) +
-    ggplot2::facet_wrap(~ sample_N, nrow = 1) +
+    # diverging scale: blue = FN (true effect missed), red = FP (null selected),
+    # white = no error.  Legend re-labelled so both arms read as 0-100%.
+    ggplot2::scale_fill_gradient2(
+      low = "#08519C", mid = "white", high = "#B30000",
+      midpoint = 0, na.value = "grey92", name = NULL,
+      limits = c(-100, 100), breaks = seq(-100, 100, 50),
+      labels = c("FN 100%", "FN 50%", "0", "FP 50%", "FP 100%")) +
     ggplot2::labs(
-      title    = sprintf("%s: where do FP / FN errors concentrate?",
-                         title_prefix),
-      subtitle = paste0(struct_lab,
-                        " | Bold outline = TRUE effect (FN rate).  ",
-                        "Plain tile = null effect (FP rate).  ",
-                        "BW & BMI adjacent to expose their confusion."),
       x = "Simulation scenario", y = "Covariate effect (param ~ covariate)"
     ) +
     theme_scm() +
-    ggplot2::coord_equal()
+    ggplot2::guides(fill = ggplot2::guide_colourbar(barwidth = 14))
+
+  # FACETING: with both structures, use a N(rows) x structure(cols) grid so ode
+  # and linCmt share one slide; otherwise keep the single-structure N layout.
+  if (both_struct) {
+    p <- p + ggplot2::facet_grid(sample_N ~ struct_f)
+  } else {
+    p <- p + ggplot2::facet_wrap(~ sample_N, nrow = facet_nrow)
+  }
+
+  # square tiles only in the "wide" layout; "slide" lets tiles fill the width
+  if (layout == "wide") p <- p + ggplot2::coord_equal()
 
   if (isTRUE(labels)) {
     lab_df <- dplyr::filter(plot_df, !is.na(err_show))
     p <- p + ggplot2::geom_text(
       data = lab_df,
       ggplot2::aes(label = round(err_show * 100)),
-      size = 2.6,
+      size = if (both_struct) 4.5 else 3.4,
       colour = ifelse(lab_df$err_show > 0.55, "white", "grey20"))
   }
 
@@ -193,8 +227,9 @@ fig_covsel_heatmap <- function(
     n_tag <- if (is.null(sample_N)) "allN" else paste0("N", paste(sample_N, collapse = "-"))
     s_tag <- structure
     stub  <- file.path(out_dir, sprintf("fig_covsel_heatmap_%s_%s", n_tag, s_tag))
-    ggplot2::ggsave(paste0(stub, ".png"), p, width = 11, height = 6, dpi = 150)
-    ggplot2::ggsave(paste0(stub, ".pdf"), p, width = 11, height = 6)
+    dims  <- if (both_struct) c(12, 10) else if (layout == "slide") c(13, 9) else c(22, 12)
+    ggplot2::ggsave(paste0(stub, ".png"), p, width = dims[1], height = dims[2], dpi = 200)
+    ggplot2::ggsave(paste0(stub, ".pdf"), p, width = dims[1], height = dims[2])
     message("saved: ", stub, ".{png,pdf}")
   }
 
