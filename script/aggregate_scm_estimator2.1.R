@@ -126,6 +126,99 @@ suppressPackageStartupMessages({
   )
 }
 
+# ---- Structural-intercept reference alignment -----------------------------
+# The DGP centres CL/Vc on FIXED constants (BW = 70, CrCL = 95).  runSCM instead
+# centres each SELECTED continuous covariate on the sample MEDIAN of the
+# one-row-per-subject covariate distribution (see R/scm.R: pairs$center[i] <-
+# median(subj_data[[col]])).  Consequently exp(lTVCL) / exp(lTVVc) from an SCM
+# fit are the CL / Vc AT THE MEDIAN covariate values, not at 70 / 95, so a naive
+# comparison against the truth conflates real bias with a centring artefact.
+#
+# We rescale the intercept ESTIMATE back onto the 70 / 95 anchor using the fit's
+# OWN power betas (which are reference-invariant):
+#   TVCL@70/95 = TVCL_hat * (70/median(BW))^b_CLBW * (95/median(CrCL))^b_CLcrCL
+#   TVVc@70    = TVVc_hat * (70/median(BW))^b_VcBW
+# Only covariates actually SELECTED carry a finite beta, so the adjustment is
+# self-consistent: an unselected covariate leaves the corresponding intercept
+# untouched (it was never centred on that covariate).  This mirrors the VAE
+# aggregator, which uses the MEAN instead of the MEDIAN.
+.COV_REF_BW   <- 70       # DGP BW_REF
+.COV_REF_CRCL <- 95       # DGP CRCL_REF
+.COV_REF_STAT <- stats::median  # runSCM centres continuous covariates at MEDIAN
+
+# cache of per-(sample_N, scenario, dataset_id) covariate reference values
+.cov_ref_cache <- new.env(parent = emptyenv())
+
+.cov_ref_values <- function(sample_N, scenario, dataset_id,
+                            input_root = "Inputdataset") {
+  if (is.na(sample_N) || is.na(scenario) || is.na(dataset_id)) return(NULL)
+  key <- paste(sample_N, scenario, dataset_id, sep = "|")
+  hit <- .cov_ref_cache[[key]]
+  if (!is.null(hit)) return(hit$val)          # cached (may be NULL result)
+  path <- file.path(input_root, sprintf("sim_obs_N%s", sample_N),
+                    sprintf("sim_obs_scenario_%s.rds", scenario))
+  out <- NULL
+  if (file.exists(path)) {
+    d <- tryCatch(readRDS(path), error = function(e) NULL)
+    if (!is.null(d) && all(c("DATASET", "SUBJECT", "BW", "CrCL") %in% names(d))) {
+      d1 <- d[d$DATASET == dataset_id, , drop = FALSE]
+      d1 <- d1[!duplicated(d1$SUBJECT), , drop = FALSE]
+      if (nrow(d1)) {
+        out <- list(BW   = .COV_REF_STAT(d1$BW,   na.rm = TRUE),
+                    CrCL = .COV_REF_STAT(d1$CrCL, na.rm = TRUE))
+      }
+    }
+  }
+  .cov_ref_cache[[key]] <- list(val = out)     # memoise (including NULL)
+  out
+}
+
+# Rescale TVCL / TVVc estimate onto the fixed 70 / 95 reference.  Applied to
+# every SCM candidate fit; the refit-TRUE model (already centred on 70 / 95) is
+# aggregated elsewhere and is not in scope here.
+.backtransform_intercepts <- function(r, meta) {
+  estimator <- as.character(r$estimator %||% meta$estimator %||% "")
+  if (grepl("true", estimator, ignore.case = TRUE)) return(r)  # never touch truth
+  rel <- r$rel_err
+  if (is.null(rel) || !nrow(rel) || is.null(rel$estimate)) return(r)
+
+  gete <- function(p) {
+    v <- suppressWarnings(as.numeric(rel$estimate[rel$parameter == p]))
+    if (length(v) == 1L) v else NA_real_
+  }
+  b_clbw <- gete("CLBW"); b_clcr <- gete("CLcrCL"); b_vcbw <- gete("VcBW")
+
+  ref <- .cov_ref_values(r$sample_N    %||% meta$sample_N,
+                         r$scenario_id %||% meta$scenario,
+                         r$dataset_id  %||% meta$dataset_id)
+  if (is.null(ref)) return(r)                  # sim file missing -> leave as-is
+  fBW   <- .COV_REF_BW   / ref$BW
+  fCRCL <- .COV_REF_CRCL / ref$CrCL
+
+  i_cl <- which(rel$parameter == "TVCL")
+  if (length(i_cl) == 1L && is.finite(rel$estimate[i_cl]) &&
+      (is.finite(b_clbw) || is.finite(b_clcr))) {
+    fac <- 1
+    if (is.finite(b_clbw)) fac <- fac * fBW^b_clbw
+    if (is.finite(b_clcr)) fac <- fac * fCRCL^b_clcr
+    rel$estimate[i_cl] <- rel$estimate[i_cl] * fac
+  }
+  i_vc <- which(rel$parameter == "TVVc")
+  if (length(i_vc) == 1L && is.finite(rel$estimate[i_vc]) && is.finite(b_vcbw)) {
+    rel$estimate[i_vc] <- rel$estimate[i_vc] * fBW^b_vcbw
+  }
+
+  # recompute error columns on the rescaled intercept estimates
+  rel$abs_err     <- ifelse(is.na(rel$estimate) | is.na(rel$true_value),
+                            NA_real_, rel$estimate - rel$true_value)
+  rel$rel_err     <- ifelse(is.na(rel$estimate) | is.na(rel$true_value) |
+                              rel$true_value == 0,
+                            NA_real_, (rel$estimate - rel$true_value) / rel$true_value)
+  rel$rel_err_pct <- rel$rel_err * 100
+  r$rel_err <- rel
+  r
+}
+
 # ---- Selection scoring on (var, covar, shape) -----------------------------
 # Shape-aware exact match, matching the linCmt HPCE_OC_Aggreation.r definition
 # (match_selected_to_truth joins by c("var","covar","shape")). runSCM emits
@@ -259,6 +352,7 @@ discover_scm_files <- function(root = "output", sub = "scm_bench") {
 }
 
 .unpack_rse <- function(r, meta) {
+  r   <- .backtransform_intercepts(r, meta)
   rel <- r$rel_err
   if (is.null(rel) || !nrow(rel)) return(tibble::tibble())
   tibble::tibble(
