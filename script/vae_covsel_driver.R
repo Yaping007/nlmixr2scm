@@ -103,29 +103,14 @@ err_txt  <- file.path(save_dir, sprintf("res_ds%03d_ERROR.txt", opts$dataset))
   message("ERROR sidecar written: ", err_txt)
 }
 
-# ---- Torch preflight -------------------------------------------------------
-# VAE (LSTM encoder) requires the `torch` R package AND a usable libtorch
-# backend (torch::install_torch() downloads it -- may be absent offline).
-.torch_ok <- function() {
-  if (!requireNamespace("torch", quietly = TRUE)) {
-    return(list(ok = FALSE, why = "R package 'torch' is not installed on this node."))
-  }
-  installed <- tryCatch(isTRUE(torch::torch_is_installed()),
-                        error = function(e) FALSE)
-  if (!installed) {
-    return(list(ok = FALSE, why = paste(
-      "'torch' is installed but the libtorch backend is not available",
-      "(torch::torch_is_installed() == FALSE). Run torch::install_torch()",
-      "once on an ONLINE login node to download libtorch.")))
-  }
-  list(ok = TRUE, why = "")
-}
-
-pf <- .torch_ok()
-if (!pf$ok) {
-  .write_error(paste0("TORCH PREFLIGHT FAILED\n", pf$why))
-  stop(pf$why, call. = FALSE)
-}
+# ---- Engine note -----------------------------------------------------------
+# nlmixr2est's est = "vae" is a NATIVE C++/Armadillo implementation (LSTM
+# encoder with hand-derived analytic backward; decoder = rxode2 solve). It does
+# NOT use the `torch` R package or a libtorch backend -- so there is no torch
+# preflight. The only optional extra is the `L0Learn` package, used solely for
+# large covariate searches (covSelectMethod = "l0learn"/"auto"); with the four
+# candidate covariates here the exact branch-and-bound runs and L0Learn is not
+# required.
 
 # ---- Inputs ----------------------------------------------------------------
 sim_path <- file.path(opts$input_root, sprintf("sim_obs_N%d", opts$N),

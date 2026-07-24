@@ -44,9 +44,15 @@ resolver, so only `vae_covsel_driver.R` is named on the command line.
 
 ### R package prerequisites
 
-`nlmixr2`, `nlmixr2est` (provides `est = "vae"` / `vaeControl`), `rxode2`,
-`nlmixr2scm`, `dplyr`, `tibble`, `tidyr`, and **`torch`** (+ libtorch backend —
-see below).
+`nlmixr2 >= 3.0`, `nlmixr2est >= 7.0.1` (provides `est = "vae"` / `vaeControl`),
+`rxode2` (dev build exporting `getIndCmt`), `nlmixr2scm`, `dplyr`, `tibble`,
+`tidyr`.
+
+**No `torch` / libtorch.** `est = "vae"` is a native C++/Armadillo engine.
+The only optional extra is **`L0Learn`** (CRAN), used solely for large
+covariate searches (`covSelectMethod = "l0learn"`/`"auto"`). The four-covariate
+grid here uses the exact branch-and-bound, so `L0Learn` is not required — but it
+is cheap to install and future-proofs wider grids.
 
 
 ## Output layout (schema 2.1)
@@ -56,28 +62,26 @@ output/vae_covsel_pilot/N<N>/scn<SS>_<structure>/covsel/
     res_ds<DDD>.rds        # full record (rel_err, diag, cov, $covsel block)
     res_ds<DDD>.fit.rds    # raw nlmixr2 fit
     res_ds<DDD>.meta.json  # greppable scalar manifest
-    res_ds<DDD>_ERROR.txt  # only if the task failed (e.g. torch missing)
+    res_ds<DDD>_ERROR.txt  # only if the task failed (missing input, fit error)
 ```
 
 The `$covsel` block carries `selected` (VAE's promoted `beta_*` terms mapped to
 `var/covar`) and `true_set` (the scenario's true covariates, derived from the
 `PsN_scenarios` indicators) — the basis for per-cell TP/FN/FP once aggregated.
 
-## ⚠️ Torch prerequisite
+## Engine prerequisite (no torch)
 
-VAE needs the **`torch`** R package **and** a working **libtorch** backend.
-The driver runs a preflight (`requireNamespace("torch")` +
-`torch::torch_is_installed()`); on failure it writes `res_ds<DDD>_ERROR.txt`
-and exits non-zero (loud fail, not a silent hang).
+`est = "vae"` is a **native C++/Armadillo** LSTM encoder with an analytic
+backward pass; the decoder is your ordinary `rxode2` model. There is **no
+`torch` / libtorch dependency** — nothing to download on the login node.
 
-If the probe returns torch errors, install once on an **online login node**
-(libtorch is downloaded — it will fail on an offline compute node):
+What each node does need is a working **`nlmixr2est >= 7.0.1`** install (which
+links against `rxode2`, `RcppParallel`/`tbb`, `stringfish`). If a node's build
+is broken you will see a `LoadLibrary`/`getIndCmt` error at `library()` time,
+not a torch error. Optionally install `L0Learn` for large covariate searches:
 
 ```r
-# on a login node with internet
-install.packages("torch")          # or the repo's pinned source
-torch::install_torch()             # downloads libtorch backend
-torch::torch_is_installed()        # must be TRUE
+install.packages("L0Learn")   # optional; only for covSelectMethod="l0learn"/"auto"
 ```
 
 ## Recommended workflow: probe first, then full sweep
@@ -124,7 +128,7 @@ bacct -l <jobid>                    # peak MEM / CPU / walltime AFTER completion
 ls output/vae_covsel_pilot/N80/scn16_linCmt/covsel/   # res_ds00{1..5}.*
 ```
 
-Check for torch failures:
+Check for task failures:
 
 ```bash
 find output/vae_covsel_pilot -name '*_ERROR.txt' -exec sed -n '1,6p' {} +
