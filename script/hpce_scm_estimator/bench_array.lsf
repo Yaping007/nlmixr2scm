@@ -27,7 +27,7 @@ set -euo pipefail
 : "${SCRIPTS_DIR:?SCRIPTS_DIR must be set (subdir with PerformanceEvaluation_scm_bench.R)}"
 : "${SAMPLE_N:?SAMPLE_N must be set (40|80|300)}"
 : "${SCN:?SCN must be set (1..16)}"
-: "${EST:?EST must be set (focei|foceif|irlsfoceif|vae)}"
+: "${EST:?EST must be set (focei|foceif|irlsfocei|irlsfoceif|vae)}"
 : "${OPT:?OPT must be set (bobyqa|nlminb|lbfgsb3c|NA)}"
 : "${STRUCTURE:?STRUCTURE must be set (linCmt|ode)}"
 : "${LSB_JOBINDEX:?LSB_JOBINDEX must be set (LSF populates for job arrays)}"

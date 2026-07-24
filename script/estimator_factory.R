@@ -9,7 +9,18 @@
 # Method grid (see valid_combos()):
 #   focei      x {bobyqa, nlminb, lbfgsb3c}   -- baseline family
 #   foceif     x {nlminb, lbfgsb3c}           -- Almquist analytic gradient
+#   irlsfocei  x {bobyqa}                      -- IRLS mu-referenced FOCEi (non-fast, est=ifocei)
+#   irlsfoceif x {lbfgsb3c}                    -- IRLS mu-referenced FOCEi (fast, est=ifoceif)
 #   saem       x  NA                          -- covariance via post-SAEM foceif refit
+#
+# ACTIVE COMPARISON (2026-07-23, manager-agreed): focei x bobyqa vs
+#   irlsfocei x bobyqa -- same derivative-free outer optimiser, differing ONLY
+#   in whether the mu-referenced IRLS profiling of the population/covariate
+#   thetas is on. This isolates the IRLS speed-up. `irlsfocei` is the NON-fast
+#   IRLS grid label (dispatches est="ifocei"): bobyqa is derivative-free so the
+#   fast `irlsfoceif` (est="ifoceif") variant's analytic sensitivity-model build
+#   (~106 s) would be pure overhead. All other (est, opt) cells remain valid
+#   combos but are PARKED (not in the default sweep).
 #
 # VAE was dropped from the benchmark: runSCM() fails to locate cl/vc symbols
 # in the vae-returned ui (parameter labels rewritten to lTVCL/lTVVc). Kept in
@@ -44,7 +55,11 @@ valid_combos <- function() {
     "focei",        "lbfgsb3c",
     "foceif",       "nlminb",
     "foceif",       "lbfgsb3c",
-    "irlsfoceif",   "lbfgsb3c"   # 2026-07-14: re-enabled; dispatches est="ifoceif"
+    "irlsfocei",    "bobyqa",    # 2026-07-23 ACTIVE: IRLS-vs-FOCEi speed test
+                                 # under the SAME derivative-free outer optimiser
+                                 # (non-fast, dispatches est="ifocei").
+    "irlsfoceif",   "lbfgsb3c"   # PARKED: fast IRLS grid label (dispatches
+                                 # est="ifoceif"), for the analytic-gradient outer.
   )
 }
 
@@ -57,42 +72,37 @@ is_valid_combo <- function(est, outer_opt) {
 }
 
 # ---- Grid-label -> nlmixr2 est dispatch name -------------------------------
-# The benchmark grid uses descriptive labels (foceif, irlsfoceif) that map onto
-# nlmixr2's internal est= aliases. With the console now loading nlmixr2est 6.2.0
-# (scratch lib, guaranteed by the project .Rprofile), these aliases dispatch
-# correctly:
-#   getValidNlmixrControl(., "ifoceif") -> class ifoceiControl  (verified live)
+# The benchmark grid uses descriptive labels (foceif, irlsfocei, irlsfoceif)
+# that map onto nlmixr2's internal est= aliases (verified live on nlmixr2est
+# 7.0.1):
+#   getValidNlmixrCtl.foceif -> foceiControl   (foceif,  fast=TRUE)
+#   getValidNlmixrCtl.ifocei -> ifoceiControl  (ifocei,  fast=FALSE, IRLS mu-ref)
+#   getValidNlmixrCtl.ifoceif-> ifoceiControl  (ifoceif, fast=TRUE,  IRLS mu-ref)
 #
-# We dispatch them DIRECTLY (not via est="focei") because the alias sets
-# fast=TRUE, which turns on the genuine Almquist ANALYTIC outer gradient. The
-# earlier est="focei" + muModel="irls" recipe did NOT set fast=TRUE, so it
-# silently fell back to a FINITE-DIFFERENCE gradient (header showed only
-# "mu: irls", no "grad: analytic") and, as a side effect, left covMethod empty
-# so SEs never propagated. Verified scn16/ds1/N80:
-#   est="ifoceif"          -> grad: analytic, covMethod=r,s (native SE),  307 s
-#   est="focei"+irls recipe-> grad: FD,       covMethod="" (cov2se SE),   205 s
-# The analytic gradient is the whole point of this estimator, so we take the
-# direct alias despite the ~50% longer runtime (the extra time is the symbolic
-# sensitivity-model setup, ~106 s, not optExpression).
+# foceif dispatches DIRECTLY (not via est="focei") because the alias sets
+# fast=TRUE, turning on the Almquist ANALYTIC outer gradient consumed by its
+# gradient-based optimisers (nlminb/lbfgsb3c).
 #
-# optExpression=FALSE (set in make_est_control) is still REQUIRED: it prevents
-# the parallel-CSE daemon deadlock on the ODE analytic-gradient build. It does
-# NOT disable the analytic gradient (proven: the direct ifoceif run had
-# optExpression=FALSE yet still reported grad: analytic).
+# irlsfocei (ACTIVE, x bobyqa) is the NON-fast IRLS grid label -> est="ifocei".
+# bobyqa is derivative-free -- it never consumes an outer gradient -- so the
+# fast irlsfoceif (est="ifoceif") variant would BUILD the symbolic sensitivity
+# model (~106 s setup) only to discard it. ifocei gives the identical IRLS
+# mu-referenced estimation and native r,s covariance with none of that overhead.
 #
-# saem/focei pass through unchanged. Requires nlmixr2est >= 6.2.0.
+# irlsfoceif (PARKED, x lbfgsb3c) is the FAST IRLS grid label -> est="ifoceif";
+# kept for a possible analytic-gradient-outer re-activation.
 #
-# 2026-07-22 (nlmixr2est 7.0.0): the ifoceif/foceif aliases are STILL present
-# (nlmixr2Est.ifoceif, getValidNlmixrCtl.ifoceif verified live), so this map is
-# unchanged. The 7.0.0 "est=irlsfoceif not supported" errors came from callers
-# passing the RAW grid label to nlmixr2() instead of routing through this
-# function -- the base fit in PerformanceEvaluation_scm_bench.R. foceif slipped
-# through only because "foceif" happens to be a valid est string; "irlsfoceif"
-# is not. Every nlmixr2()/base-fit call site MUST use nlmixr_est_name().
+# saem/focei pass through unchanged. Requires nlmixr2est >= 7.0.1.
+#
+# NOTE: nlmixr2est 7.0.0+ rejects the RAW grid labels "irlsfocei"/"irlsfoceif"
+# as est strings (no such method), so every nlmixr2()/base-fit call site MUST
+# route through nlmixr_est_name(). "foceif" slips through only because it happens
+# to also be a valid est string.
 nlmixr_est_name <- function(estimator) {
   switch(estimator,
     foceif     = "foceif",    # FOCEi + interaction, analytic gradient (fast=TRUE)
-    irlsfoceif = "ifoceif",   # IRLS-FOCEi + interaction, analytic gradient
+    irlsfocei  = "ifocei",    # 2026-07-23 ACTIVE: plain (non-fast) IRLS-FOCEi.
+    irlsfoceif = "ifoceif",   # PARKED: fast IRLS-FOCEi + interaction.
     estimator                 # focei, saem pass through unchanged
   )
 }
@@ -243,11 +253,27 @@ make_est_control <- function(est,
       rxControl          = rxc_analytic   # FIX 1 (toggled): sens-matched tols
     ),
 
-    irlsfoceif = nlmixr2est::foceiControl(
-      interaction        = TRUE,
-      muModel            = "irls",         # IRLS mu-referenced regression
+    # irlsfocei (ACTIVE, non-fast) and irlsfoceif (PARKED, fast) share one
+    # control body: the fast-ness is carried by the est= alias (ifocei vs
+    # ifoceif) that nlmixr_est_name() picks. We build the NATIVE ifoceiControl
+    # (nlmixr2est 7.0.1) rather than a plain foceiControl(muModel="irls"): the
+    # latter is only accepted via an auto-conversion that emits
+    # `.minfo("converting foceiControl to ifoceiControl")` every fit. ifoceiControl
+    # forwards ... to foceiControl and HARD-CODES muModel="irls" (so we omit it),
+    # keeping interaction=TRUE. The parked fast path (getValidNlmixrCtl.ifoceif =
+    # .foceiFastCtl(control, ifoceiControl)) is built from this SAME control class
+    # and just flips fast=TRUE, so one body serves both est aliases cleanly.
+    irlsfocei  = ,
+    irlsfoceif = nlmixr2est::ifoceiControl(
+      # 2026-07-23: the ACTIVE cell is irlsfocei x bobyqa (est="ifocei"). bobyqa
+      # is derivative-free so no outer gradient is consumed; the mu-referenced
+      # IRLS profiling of the population/covariate thetas (the whole point of the
+      # i* family) is active regardless of fast=, so irlsfocei x bobyqa is the
+      # correct IRLS counterpart to the plain focei x bobyqa baseline. The parked
+      # irlsfoceif x lbfgsb3c cell reuses this body but dispatches est="ifoceif".
+      interaction        = TRUE,           # ifoceiControl forces muModel="irls"
       sigdig             = sigdig,
-      outerOpt           = outer_opt,      # lbfgsb3c only in practice
+      outerOpt           = outer_opt,      # bobyqa (active) or lbfgsb3c (parked)
       print              = 0,
       printNcol          = 10L,   # explicit; see focei branch note.
       calcTables         = calcTables,
@@ -256,11 +282,12 @@ make_est_control <- function(est,
       maxOuterIterations = 2000,
       maxInnerIterations = 2000,
       derivEps           = derivEps,
-      # See foceif branch: optExpression=TRUE (CSE on) is 9% faster than FALSE
-      # on 6.2.0's serial-chunked gradient build and no longer deadlocks;
-      # fallbackFD=TRUE is the safety net. muModel="irls" + interaction=TRUE +
-      # est="ifoceif" (via nlmixr_est_name) gives the genuine IRLS-FOCEi
-      # analytic-gradient algorithm with native r,s covariance.
+      # optExpression/fallbackFD are inert on the non-fast ifocei path (no
+      # analytic outer gradient is built under fast=FALSE), but are kept TRUE as
+      # harmless safe defaults so the parked fast irlsfoceif cell needs no
+      # control change. Together with est="ifocei"/"ifoceif" (via
+      # nlmixr_est_name) this yields the IRLS-FOCEi algorithm with native r,s
+      # covariance; bobyqa supplies the derivative-free outer search.
       optExpression      = TRUE,
       fallbackFD         = TRUE,
       warm               = warm,

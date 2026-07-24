@@ -7,11 +7,14 @@
 # All cells now emit schema-2.1 records via package_scm_schema21() to
 #   output/scm_bench/N{NN}/scn{SS}_{structure}/{est}_{opt}/res_ds{DDD}.rds
 #
-# Structure notes:
-#   * linCmt : analytic 2-cmt oral. foceif/irlsfoceif DEGRADE to focei here
-#              (no ODE to interaction-linearise); they are still run to
-#              demonstrate 'prefer linCmt when possible'.
-#   * ode    : explicit ODE; unlocks analytic gradients for foceif/irlsfoceif.
+# Structure notes (apply to the PARKED analytic-gradient cells only):
+#   * linCmt : analytic 2-cmt oral. foceif / irlsfoceif+lbfgsb3c DEGRADE to a
+#              finite-difference gradient here (no ODE to interaction-linearise).
+#   * ode    : explicit ODE; unlocks analytic gradients for foceif and the
+#              parked irlsfoceif+lbfgsb3c cell.
+# The ACTIVE irlsfocei x bobyqa cell dispatches the non-fast est="ifocei", so
+# it uses NO outer gradient at all -- structure only changes the base model, not
+# the optimiser, for that cell.
 #
 # focei_bobyqa is now part of the general sweep (FOCEI_OPTS includes bobyqa)
 # so legacy linCmt focei_bobyqa is re-run under schema 2.1. The old
@@ -20,12 +23,27 @@
 # VAE is not part of this grid (runSCM incompatibility on vae-returned ui);
 # VAE covariate selection has its own driver (vae_covsel_driver.R).
 #
+# ACTIVE COMPARISON (2026-07-23, manager-agreed): the DEFAULT sweep now runs
+# exactly two cells -- focei x bobyqa and irlsfocei x bobyqa -- to test whether
+# the mu-referenced IRLS (est="ifocei", non-fast) speeds up the SCM search under
+# the SAME derivative-free outer optimiser. All other (est, opt) combinations
+# are still VALID (see valid_combos() in estimator_factory.R) but are PARKED:
+# enable them by overriding the env vars below.
+#
 # Env-var filters (space-separated lists):
 #   STRUCTURES='linCmt ode'          (default: linCmt ode)
 #   NS='80'                          (default: 40 80 300)
 #   SCENARIOS='16'                   (default: 1..16)
-#   ESTIMATORS='focei foceif ...'    (default: focei foceif irlsfoceif)
-#   FOCEI_OPTS='bobyqa nlminb ...'   (default: bobyqa nlminb lbfgsb3c)
+#   ESTIMATORS='focei irlsfocei'     (default: focei irlsfocei)
+#   FOCEI_OPTS='bobyqa'              (default: bobyqa; outer opts for focei)
+#   IRLSFOCEI_OPTS='bobyqa'          (default: bobyqa; outer opts for irlsfocei)
+#   IRLS_OPTS='lbfgsb3c'             (parked fast-IRLS opts; only if irlsfoceif in ESTIMATORS)
+#   FOCEIF_OPTS='nlminb lbfgsb3c'    (parked foceif opts; only if foceif in ESTIMATORS)
+#
+# Parked examples (re-enable the full reference grid):
+#   ESTIMATORS='focei foceif irlsfocei irlsfoceif' FOCEI_OPTS='bobyqa nlminb lbfgsb3c' \
+#     IRLSFOCEI_OPTS='bobyqa' IRLS_OPTS='lbfgsb3c' \
+#     bash script/hpce_scm_estimator/submit_all_arrays.sh <n_datasets> [maxpar]
 #
 # Isolation knobs (for clean, contention-free timing):
 #   CHAIN=1      run arrays strictly one-at-a-time (LSF ended-dependency chain)
@@ -55,15 +73,21 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [ -n "${STRUCTURES:-}" ] || STRUCTURES="linCmt ode"
 [ -n "${NS:-}"         ] || NS="40 80 300"
 [ -n "${SCENARIOS:-}"  ] || SCENARIOS="1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16"
-[ -n "${ESTIMATORS:-}" ] || ESTIMATORS="focei foceif irlsfoceif"
-[ -n "${FOCEI_OPTS:-}" ] || FOCEI_OPTS="bobyqa nlminb lbfgsb3c"
+# 2026-07-23: default sweep = the two active IRLS-vs-FOCEi cells only.
+[ -n "${ESTIMATORS:-}" ] || ESTIMATORS="focei irlsfocei"
+[ -n "${FOCEI_OPTS:-}"  ] || FOCEI_OPTS="bobyqa"          # outer opts for focei
+[ -n "${IRLSFOCEI_OPTS:-}" ] || IRLSFOCEI_OPTS="bobyqa"   # outer opts for irlsfocei
+[ -n "${IRLS_OPTS:-}"   ] || IRLS_OPTS="lbfgsb3c"         # parked fast-IRLS opts
+[ -n "${FOCEIF_OPTS:-}" ] || FOCEIF_OPTS="nlminb lbfgsb3c" # parked foceif opts
 
 # Valid outer_opts per estimator -- MUST mirror valid_combos() in
-# estimator_factory.R (saem removed 2026-07-17).
+# estimator_factory.R (saem removed 2026-07-17). irlsfocei (non-fast IRLS) pairs
+# with bobyqa (active); irlsfoceif (fast IRLS) with lbfgsb3c (parked).
 declare -A OPT_FOR
 OPT_FOR[focei]="$FOCEI_OPTS"
-OPT_FOR[foceif]="nlminb lbfgsb3c"
-OPT_FOR[irlsfoceif]="lbfgsb3c"
+OPT_FOR[foceif]="$FOCEIF_OPTS"
+OPT_FOR[irlsfocei]="$IRLSFOCEI_OPTS"
+OPT_FOR[irlsfoceif]="$IRLS_OPTS"
 
 # --- serialization / isolation knobs ---------------------------------------
 #   CHAIN=1     : submit arrays with an LSF dependency chain so only ONE array

@@ -30,9 +30,15 @@ All cells emit **schema-2.1** records via `package_scm_schema21()`.
 
 | Estimator | Outer optimizers | Notes |
 |---|---|---|
-| focei | bobyqa, nlminb, lbfgsb3c | Baseline; `focei_bobyqa` re-run under schema 2.1 |
-| foceif | nlminb, lbfgsb3c | Almquist analytic outer gradient (`fast=TRUE`) |
-| irlsfoceif | lbfgsb3c | IRLS inner + fast outer (mu-referenced models only) |
+| focei | **bobyqa** (active), nlminb, lbfgsb3c | Baseline; `focei_bobyqa` re-run under schema 2.1 |
+| irlsfocei | **bobyqa** (active) | IRLS mu-referenced FOCEi, **non-fast** `est="ifocei"` — derivative-free outer, no analytic-gradient build. The IRLS counterpart to `focei_bobyqa` |
+| irlsfoceif | lbfgsb3c (parked) | Fast IRLS mu-referenced FOCEi (`est="ifoceif"`, analytic outer gradient) |
+| foceif | nlminb, lbfgsb3c (parked) | Almquist analytic outer gradient (`fast=TRUE`) |
+
+**Active comparison (2026-07-23):** the default sweep runs only `focei_bobyqa`
+vs `irlsfocei_bobyqa` to isolate whether the IRLS mu-profiling speeds up the
+SCM search under the same derivative-free outer optimiser. All other combos are
+valid but parked (enable via the `ESTIMATORS`/`*_OPTS` env vars).
 
 **saem dropped** (2026-07-17): removed from `valid_combos()` and the job grid.
 
@@ -42,10 +48,12 @@ selection has its own driver (`script/vae_covsel_driver.R` + `hpce_vae_covsel/`)
 
 ### Structure note
 
-`foceif`/`irlsfoceif` need an ODE to interaction-linearise. On `linCmt` (analytic
-solution) they **degrade to `focei`** internally; they are still run there to
-document *"prefer linCmt when possible"*. The `ode` structure unlocks their
-analytic gradients.
+The analytic outer gradient only matters for the **parked** analytic-gradient
+cells (`foceif`, `irlsfoceif_lbfgsb3c`): those need an ODE to
+interaction-linearise and **degrade to a finite-difference gradient** on
+`linCmt`. The **active** `irlsfocei_bobyqa` cell dispatches non-fast
+`est="ifocei"` and uses no outer gradient, so structure only changes its base
+model, not its optimiser.
 
 ### Thread budget & timing (fair speed comparison)
 
@@ -167,7 +175,7 @@ Verify the extra estimator methods are present:
 
 ```r
 m <- as.character(utils::methods("nlmixr2Est"))
-sort(sub("^nlmixr2Est\\.", "", m))   # expect foceif, irlsfoceif, mufocei
+  sort(sub("^nlmixr2Est\\.", "", m))   # expect foceif, ifocei, ifoceif, mufocei
 ```
 
 ## Output layout (schema 2.1)
@@ -310,17 +318,19 @@ DS_START=6 \
 | `STRUCTURES` | `linCmt ode` | structure sweep |
 | `NS`         | `40 80 300`  | cohort sizes |
 | `SCENARIOS`  | `1 … 16`     | scenario ids |
-| `ESTIMATORS` | `focei foceif irlsfoceif` | estimators |
-| `FOCEI_OPTS` | `bobyqa nlminb lbfgsb3c`  | focei outer optimizers |
+| `ESTIMATORS` | `focei irlsfocei` | estimators (active default) |
+| `FOCEI_OPTS` | `bobyqa`     | focei outer optimizers |
+| `IRLSFOCEI_OPTS`| `bobyqa`  | irlsfocei outer optimizers |
+| `IRLS_OPTS`  | `lbfgsb3c`   | parked fast-IRLS (irlsfoceif) outer optimizers |
+| `FOCEIF_OPTS`| `nlminb lbfgsb3c` | parked foceif outer optimizers |
 | `DS_START`   | `1`          | first dataset index |
 
 Positional args: `submit_all_arrays.sh <n_datasets> [maxpar]`.
 
 Runtime budget (rough, from N=80 ds01 smoke test on linCmt):
 - `focei_bobyqa`: ~19 min / fit
-- `focei_{nlminb,lbfgsb3c}`: ~20–30 min / fit
-- `foceif_{nlminb,lbfgsb3c}`: ~20–25 min / fit
-- `irlsfoceif_lbfgsb3c`: ~10–15 min / fit (fastest)
+- `irlsfocei_bobyqa` (non-fast IRLS): comparable to `focei_bobyqa`; the IRLS mu-profiling is the variable under test
+- parked cells: `focei_{nlminb,lbfgsb3c}` ~20–30 min, `foceif_{nlminb,lbfgsb3c}` ~20–25 min, `irlsfoceif_lbfgsb3c` ~10–15 min / fit
 bash script/hpce_scm_estimator/submit_one_array.sh 300  16 focei nlminb ode 5 5 
 bash script/hpce_scm_estimator/submit_one_array.sh 300  16 focei lbfgsb3c ode 5 5 
 
@@ -377,6 +387,16 @@ Rscript script/aggregate_scm_estimator2.1.R --root output --sub scm_bench
 ```
 
 ### `irlsfoceif`/`foceif` analytic outer gradient never engages on ODE (`fast=TRUE` is inert) — INVESTIGATED 2026-07-23
+
+> **RESOLVED for the active sweep (2026-07-23).** Adopted option 2 below for the
+> IRLS cell: the active comparison uses a distinct `irlsfocei` grid label that
+> dispatches the **non-fast** `est="ifocei"` (see `nlmixr_est_name()` in
+> `estimator_factory.R`), which skips the wasted analytic augmented-model build
+> entirely. Because the outer optimiser is derivative-free `bobyqa`, the
+> analytic gradient was never going to be used anyway, so this is a strict win
+> (no ~100 s setup, identical IRLS estimation). The investigation below is
+> retained as the rationale and still applies to the **parked**
+> analytic-gradient cells (`foceif`, `irlsfoceif_lbfgsb3c`).
 
 **Symptom.** Every `foceif`/`irlsfoceif` ODE fit prints `grad: fd` and carries
 the run-info note *"fast=TRUE: the analytic outer gradient could not be solved
