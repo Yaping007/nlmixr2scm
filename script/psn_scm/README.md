@@ -17,13 +17,64 @@ bridged in the parser.
 
 | shape | PsN state | PsN model form | nlmixr2 form | transform |
 |---|---|---|---|---|
-| power | `5` | `PARAM = TVP * (cov/median)**θ` | `TVP * (cov/median)^θ` | none |
-| exp / lin | `4` | `PARAM = TVP * EXP(θ*(cov-median))` | `TVP * exp(θ*(cov-median))` | none |
+| power | `5` | `PARAM = TVP * (cov/ref)**θ` | `TVP * (cov/ref)^θ` | none |
+| exp / lin | `4` | `PARAM = TVP * EXP(θ*(cov-ref))` | `TVP * exp(θ*(cov-ref))` | none |
 
-Both center on the **sample median** by default (BW≈80, CrCL≈98.8 in scn16),
-so the continuous θ's are directly comparable — **no back-transform needed**.
-`continuous=1,4,5` in `run.scm` reproduces nlmixr2's `{power, lin}` shape set
-(`1` = not-included).
+Both tools center continuous covariates on **fixed physiological reference
+values** — **BW = 70 kg, CrCL = 95 mL/min** — set in `run.scm`'s
+`[reference_values]` block (BMI stays at its default median). The same anchor is
+used on the nlmixr2 side, so the continuous θ's are directly comparable —
+**no back-transform needed**. `continuous=1,4,5` in `run.scm` reproduces
+nlmixr2's `{power, lin}` shape set (`1` = not-included).
+
+### Shape-handling difference (PsN staged vs nlmixr2 simultaneous)
+
+The two tools **enumerate continuous shapes differently**, recorded here as a
+known, deliberate method difference (not a bug to equalize):
+
+| | nlmixr2 `runSCM` | PsN `scm` |
+|---|---|---|
+| shapes offered per step | **both** `lin` **and** `power` per covariate, simultaneously | **one** shape at a time: enter at state 4 (exp/lin); the state-4→5 **power upgrade** is a *separate later step* (a free `dDF=0` OFV move) |
+| entry statistic | $\max(\Delta\text{OFV}_\text{lin},\,\Delta\text{OFV}_\text{power})$ vs 1-df threshold | single-shape 1-df LRT, then a 0-df upgrade test |
+| fits per step | ~2× continuous candidates | fewer per step, but **more steps** |
+
+**The shapes are mathematically identical**, so cross-tool shape comparison is a
+1:1 relabel. nlmixr2 parameters are on the log scale ($\text{CL}=\exp(\theta+\eta)$),
+so its **linear** term sits inside the exponent and equals PsN's **exponential**
+(state 4):
+
+$$
+\exp\!\big(\theta_{\text{CL}}+\eta+\theta_{\text{cov}}(\text{cov}-\text{ref})\big)
+= \text{TVCL}\cdot\exp\!\big(\theta_{\text{cov}}(\text{cov}-\text{ref})\big),
+\qquad
+\Big(\tfrac{\text{cov}}{\text{ref}}\Big)^{\theta}=\exp\!\big(\theta\log\tfrac{\text{cov}}{\text{ref}}\big).
+$$
+
+Hence `nlmixr2 lin ≡ PsN exp (state 4)`, `nlmixr2 power ≡ PsN power (state 5)`,
+`cat ≡ state 2` — no lossy collapse.
+
+**Impact on operating characteristics** (second-order, partly cancelling; we
+**measure** rather than remove them):
+
+- **Power.** nlmixr2's simultaneous `max(lin, power)` entry is slightly more
+  *sensitive* to a strongly-nonlinear (power-truth) covariate; PsN offers exp
+  first and may need the later upgrade → nlmixr2 marginally higher raw power.
+- **False positives.** nlmixr2 runs ~2× continuous tests per step → higher
+  family-wise look count → marginally higher FP; PsN's staged search is more
+  conservative.
+- **Path dependence.** Staged vs simultaneous greedy order can reach different
+  final sets on borderline datasets — genuine method variance, averaged over the
+  100 datasets per cell.
+- **Model-fit count.** PsN trades more sequential fits for narrower per-step
+  menus; the parser records `scm$n_models_fit` (+ `n_forward_fit`,
+  `n_backward_fit`) so effort is reported **alongside** `cpu_sec`.
+
+**Which is "better"?** No universal winner: nlmixr2's simultaneous test is the
+cleaner hypothesis test (higher sensitivity); PsN's staged single-shape climb is
+classical Jonsson–Karlsson SCM (higher specificity, controlled complexity). The
+benchmark's job is to **quantify** the trade-off — report `power` (any relation),
+`power_exact` (relation + correct shape), and false-positive rate side by side,
+stratified by N and effect strength, using both tools **at their defaults**.
 
 ### Categorical covariates (SEX, RACE)
 
@@ -206,6 +257,28 @@ Rscript script/psn_scm/parse_psn_scm.R --cell output/psn_scm/runs/N300/scn16/ds0
 
 1. Feed `records/**` through the existing `compute_scm_*` aggregators to build
    `aggregated/psn_vs_nlmixr2_scm.csv`.
-2. Scale the exporter/driver to the full grid (N∈{40,80,300} × 16 scenarios ×
-   250 datasets); add a `manifest.csv` (one row per cell: keys, jobid, status,
-   wall, path) for tracking ~12,000 cells and locating failures.
+2. **Full grid** (N∈{40,80,300} × 16 scenarios × ds 1–100 = 4800 cells).
+   Submit and parse with the grid drivers (run from the repo root on HPCE):
+
+   ```bash
+   # submit every cell as its own single-node job (throttled, manifest-tracked)
+   bash script/psn_scm/run_full_grid.sh
+   # smoke a slice first / dry-run:
+   DRY_RUN=1 N_LIST="300" SCEN_LIST="16" DS_MAX=5 bash script/psn_scm/run_full_grid.sh
+
+   # watch
+   bjobs -o 'stat' | sort | uniq -c
+
+   # once bjobs is empty, parse the whole grid into records/
+   bash script/psn_scm/parse_full_grid.sh
+   ```
+
+   `run_full_grid.sh` writes `output/psn_scm_full0727/manifest.csv` (one row per
+   cell: keys, jobid, path) for tracking and locating failures;
+   `parse_full_grid.sh` walks it and parses only finished cells
+   (`logs/timing.json` present). The full launch uses an **isolated tree**
+   `output/psn_scm_full0727/{runs,records}` so it never overwrites the working
+   pilot under `output/psn_scm/` (override with `BENCH_ROOT=`).
+   Both resolve `Rscript` via `R_MODULE` (default `R/4.3.1-gomkl-2022a-0.1`);
+   override with `RSCRIPT=/path` or `R_MODULE=<module>`. Throttle concurrent
+   jobs with `THROTTLE` (default 400).

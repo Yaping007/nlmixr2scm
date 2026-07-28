@@ -44,6 +44,15 @@ suppressPackageStartupMessages({
 
 CN_STRICT_CUTOFF <- 1000
 
+# ---- expected centering anchors for continuous covariates -------------------
+# PsN's scm is configured (export_one_dataset.R [code] section) to pin BW at 70
+# and CrCL at 95, so TVCL/TVV2 are estimated DIRECTLY at these fixed references
+# and no post-hoc re-centering is applied.  These values are kept only to VALIDATE
+# that the winner .mod actually carries the expected center (a mismatch means the
+# [code] section didn't take effect); see the check in build_record().  BMI and
+# the categoricals are not anchored and are not checked here.
+REFERENCE_VALUES <- c(BW = 70, CRCL = 95)
+
 # ---- name maps -------------------------------------------------------------
 # PsN model param name -> (nlmixr2 var, truth beta parameter)
 .PSN_COVAR_TO_TRUTH <- c(
@@ -290,10 +299,39 @@ parse_selection <- function(cell_dir) {
     mutate(order = row_number())
 }
 
+# Count the number of candidate NONMEM model fits PsN performed during the SCM
+# search -- the effort axis that pairs with cpu_sec.  In scmlog.txt every tested
+# candidate is one "MODEL ... PVAL ..." row (both forward and backward tables);
+# the base model (node-0) is fit once and is not a MODEL row, so we add 1.
+# Returns a list(n_models_fit, n_forward, n_backward, n_base) for the record.
+count_model_fits <- function(cell_dir) {
+  cand <- c(file.path(cell_dir, "logs", "scmlog.txt"),
+            file.path(cell_dir, "scm_dir", "scmlog.txt"),
+            file.path(cell_dir, "logs", "scm_console.log"),
+            file.path(cell_dir, "scm_console.log"))
+  src <- cand[file.exists(cand)][1]
+  if (is.na(src)) return(list(n_models_fit = NA_integer_, n_forward = NA_integer_,
+                              n_backward = NA_integer_, n_base = 1L))
+  ln <- readLines(src, warn = FALSE)
+
+  # split into forward vs backward regions at the "Starting backward search" marker
+  bk <- grep("Starting backward search", ln)[1]
+  fwd_ln <- if (is.na(bk)) ln else ln[seq_len(bk - 1L)]
+  bck_ln <- if (is.na(bk)) character(0) else ln[bk:length(ln)]
+
+  # a candidate row = "TAG-STATE  PVAL  <base ofv> <new ofv> ..." (10 cols),
+  # excluding the "MODEL ... TEST ..." header line.
+  is_cand <- function(x) grepl("^\\s*[A-Za-z].*\\bPVAL\\b.*-?[0-9]", x) &
+                          !grepl("\\bTEST\\b", x)
+  n_fwd <- sum(is_cand(fwd_ln))
+  n_bck <- sum(is_cand(bck_ln))
+  list(n_models_fit = 1L + n_fwd + n_bck,   # +1 = base (node-0)
+       n_forward = n_fwd, n_backward = n_bck, n_base = 1L)
+}
+
 # ============================================================================
 # 2. Resolve the FINAL selected model + relation set
 # ============================================================================
-
 # Final relation set = forward-added relations minus backward-removed ones.
 # (state carried = the last state each param-covar reached in forward.)
 final_relations <- function(sel) {
@@ -371,6 +409,7 @@ build_record <- function(cell_dir, N, scenario, dataset, true_params,
   sel <- parse_selection(cell_dir)
   fr  <- final_relations(sel)
   fm  <- find_final_model(cell_dir, fr)
+  nfit <- count_model_fits(cell_dir)
 
   have_winner <- !is.null(fm)
   if (have_winner) {
@@ -409,6 +448,24 @@ build_record <- function(cell_dir, N, scenario, dataset, true_params,
     if (file.exists(e)) parse_ext(e) else NULL
   } else NULL
 
+  # ---- REFIT VALIDITY GUARD ---------------------------------------------------
+  # The refit MUST be the covariance evaluation of the WINNER (MAXEVAL=0 seeded
+  # at the winner .ext), so its OFV equals the winner OFV.  A stale/leftover
+  # refit_run (e.g. a base-model .lst from an earlier attempt) would otherwise
+  # silently supply SE + condition number for the WRONG model.  If the refit OFV
+  # disagrees with the winner OFV by > 0.01, reject the refit (cov_done=FALSE)
+  # rather than record a mismatched condition number.
+  if (have_winner && !is.null(refit) &&
+      is.finite(ext$obj %||% NA_real_) &&
+      is.finite(refit$obj %||% NA_real_) &&
+      abs((refit$obj %||% NA_real_) - ext$obj) > 0.01) {
+    warning(sprintf(
+      "refit OFV (%.4f) != winner OFV (%.4f) in %s; rejecting stale refit ",
+      refit$obj, ext$obj, cell_dir),
+      "(cond#/SE dropped, cov_done=FALSE). Re-run seed_refit + parser.")
+    refit <- NULL; refit_ext <- NULL
+  }
+
   # ---- selected covariates with estimates (+ categorical back-transform) ----
   th <- ext$est
   th_se <- (refit_ext %||% ext)$se
@@ -426,13 +483,15 @@ build_record <- function(cell_dir, N, scenario, dataset, true_params,
         truth_param = unname(.PSN_COVAR_TO_TRUTH[tag])
       ) |>
       ungroup() |>
-      select(var, covar, shape, theta_name, estimate, se, est_psn, truth_param)
+      select(var, covar, shape, theta_name, estimate, se, est_psn, center,
+             truth_param)
   } else {
     # reduced record: selection pattern only, estimates unavailable
     selected <- covdef |>
       transmute(var, covar, shape,
                 theta_name = NA_character_,
                 estimate   = NA_real_, se = NA_real_, est_psn = NA_real_,
+                center,
                 truth_param = unname(.PSN_COVAR_TO_TRUTH[tag]))
   }
 
@@ -445,6 +504,12 @@ build_record <- function(cell_dir, N, scenario, dataset, true_params,
     estimate    = struct_est,
     truth_param = unname(.PSN_STRUCT_TO_TRUTH[c("TVCL","TVV2","TVQ","TVV3","TVKA")])
   )
+
+  # ---- structural typical values are already at the fixed references ----------
+  # PsN's [code] section pins BW at 70 and CrCL at 95 (see export_one_dataset.R),
+  # so TVCL/TVV2 are estimated DIRECTLY at those references -- no post-hoc
+  # re-centering is applied here.  (theta is center-invariant; only the intercept
+  # anchor changed, and that change now happens inside NONMEM.)
 
   # ---- relative error vs truth ----
   truth <- true_params |>
@@ -519,7 +584,11 @@ build_record <- function(cell_dir, N, scenario, dataset, true_params,
       step_hist = sel,
       final_relations = fr,
       final_model = if (have_winner) basename(fm$mod) else NA_character_,
-      winner_found = have_winner
+      winner_found = have_winner,
+      n_models_fit = nfit$n_models_fit,
+      n_forward_fit = nfit$n_forward,
+      n_backward_fit = nfit$n_backward,
+      n_base_fit = nfit$n_base
     ),
     runtime = list(
       total_sec = tj$wall_sec %||% NA_real_,

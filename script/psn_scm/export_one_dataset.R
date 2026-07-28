@@ -167,10 +167,23 @@ cat("wrote base.mod\n")
 # Selection/detection scoring is unaffected (same relation, reparameterized).
 # We therefore keep categorical=1,2 (native) and back-transform theta afterward.
 #
-# Median-centering: nlmixr2 runSCM centers continuous covariates on the sample
-# median, which is PsN's DEFAULT.  We therefore DO NOT set [reference_values]
-# (the 70/95 anchors belong to the true-model refit study; the aggregator
-# re-anchors TVCL/TVVc afterward).
+# Centering: the STRUCTURAL typical value (TVCL/TVV2) is the parameter value AT
+# the covariate center.  The truth is defined at fixed physiological references
+# (BW=70, CrCL=95), so we pin PsN's center THERE via the [code] section -- PsN
+# then estimates the intercept directly at 70/95 and NO post-hoc re-centering is
+# needed.  theta is center-invariant (it only reanchors the intercept), so
+# covariate SELECTION + coefficient comparison are unaffected:
+#     exp(theta*(cov - c)) = exp(theta*cov) * exp(-theta*c)   [exp(-theta*c) -> TVCL]
+#     (cov / c)^theta      = cov^theta      * c^(-theta)      [c^(-theta)    -> TVCL]
+# The [code] section redefines only the exp (state 4) and power (state 5) forms
+# for BW and CRCL, substituting the fixed anchor for PsN's default `median`.
+# Both forms stay strictly positive, so PsN's default theta bounds
+# (-1000000, 0.001, 1000000) keep the covariate function positive -- no
+# [lower_bounds]/[upper_bounds] override required.  BMI (a distractor with no
+# physiological reference) keeps PsN's median default.  Wildcard `*:` applies to
+# both CL and V2.  (An earlier [reference_values] block was an INVALID PsN 5.5
+# section -- "Found invalid section: reference_values" -- which aborted scm; the
+# [code] section is the correct, documented mechanism.)
 #
 # Forward p=0.05, backward p=0.01.  linearize=0 => full re-estimation each step
 # (LRT parity with nlmixr2 runSCM).
@@ -191,6 +204,26 @@ V2=BW,CRCL,BMI,SEX,RACE
 [valid_states]
 continuous=1,4,5
 categorical=1,2
+
+[code]
+;fix centering at fixed references so TVCL/TVV2 are estimated at BW=70, CrCL=95
+;state 4 = exponential, state 5 = power (PsN default numbering)
+*:BW-4=PARCOV=EXP(THETA(1)*(COV-70))
+*:BW-5=PARCOV=((COV/70)**THETA(1))
+*:CRCL-4=PARCOV=EXP(THETA(1)*(COV-95))
+*:CRCL-5=PARCOV=((COV/95)**THETA(1))
+
+[lower_bounds]
+*:BW-4=-5
+*:BW-5=-5
+*:CRCL-4=-5
+*:CRCL-5=-5
+
+[upper_bounds]
+*:BW-4=5
+*:BW-5=5
+*:CRCL-4=5
+*:CRCL-5=5
 '
 writeLines(scm_cfg, file.path(out_dir, "run.scm"))
 cat("wrote run.scm\n")
