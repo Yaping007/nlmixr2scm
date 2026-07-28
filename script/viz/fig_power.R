@@ -58,8 +58,8 @@ theme_scm <- function(base_size = 12) {
 .STRUCT_LAB <- c(linCmt = "linCmt (analytic)", ode = "ODE")
 
 .METRIC_LAB <- c(Power       = "Power",
-                 PowerCN     = "Power (CN-gated)",
-                 PowerMinSuc = "Power (convergence-gated)")
+                 PowerCN     = "PowerCN",
+                 PowerMinSuc = "PowerMinSuc")
 
 # metric linetypes (used only in multi-metric overlay mode)
 .PAL_METRIC_LT <- c(Power = "solid", PowerCN = "22", PowerMinSuc = "42")
@@ -69,6 +69,8 @@ fig_power <- function(agg_dir   = "output/vae_covsel_aggregated",
                       metric    = c("Power", "PowerCN", "PowerMinSuc"),
                       sample_N  = NULL,   # NULL = all
                       structure = NULL,   # NULL = all
+                      estimator = NULL,   # NULL = all (e.g. "focei"); needs col
+                      outer_opt = NULL,   # NULL = all (e.g. "bobyqa"); needs col
                       save      = FALSE,
                       out_dir   = "output/figures/vae_covsel",
                       csv_name     = "vae_power.csv",  # "scm_power.csv" for SCM
@@ -92,7 +94,29 @@ fig_power <- function(agg_dir   = "output/vae_covsel_aggregated",
   # optional filtering knobs (default NULL => keep everything)
   if (!is.null(sample_N))  dat <- dplyr::filter(dat, sample_N  %in% !!sample_N)
   if (!is.null(structure)) dat <- dplyr::filter(dat, structure %in% !!structure)
-  if (nrow(dat) == 0L) stop("no rows after filtering (check sample_N / structure)")
+  # estimator / outer_opt filters (SCM power CSV only; VAE CSV lacks these cols)
+  if (!is.null(estimator)) {
+    if (!"estimator" %in% names(dat))
+      stop("estimator filter requested but 'estimator' column absent in ", csv_name)
+    dat <- dplyr::filter(dat, estimator %in% !!estimator)
+  }
+  if (!is.null(outer_opt)) {
+    if (!"outer_opt" %in% names(dat))
+      stop("outer_opt filter requested but 'outer_opt' column absent in ", csv_name)
+    dat <- dplyr::filter(dat, outer_opt %in% !!outer_opt)
+  }
+  if (nrow(dat) == 0L)
+    stop("no rows after filtering (check sample_N / structure / estimator / outer_opt)")
+  # guard: if multiple estimator/outer_opt cells remain, the (N,scenario,
+  # structure) grouping would double-plot -- force the caller to disambiguate.
+  if (all(c("estimator", "outer_opt") %in% names(dat))) {
+    ncell <- nrow(unique(dat[, c("estimator", "outer_opt")]))
+    if (ncell > 1L)
+      stop("power CSV holds ", ncell, " estimator x outer_opt cells; ",
+           "pass estimator= / outer_opt= to select one (got: ",
+           paste(unique(paste(dat$estimator, dat$outer_opt, sep = "_")),
+                 collapse = ", "), ")")
+  }
 
   # long over the requested metrics
   plot_df <- dat |>
@@ -130,9 +154,6 @@ fig_power <- function(agg_dir   = "output/vae_covsel_aggregated",
                                 breaks = seq(0, 100, 20),
                                 labels = function(x) paste0(x, "%")) +
     ggplot2::labs(
-      title    = sprintf("%s: %s by scenario and sample size",
-                         title_prefix, title_m),
-      subtitle = "Dashed line = 80% power threshold",
       x = "Simulation scenario", y = y_lab
     ) +
     theme_scm()
@@ -146,6 +167,8 @@ fig_power <- function(agg_dir   = "output/vae_covsel_aggregated",
   if (isTRUE(save)) {
     dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
     tag  <- if (multi) "multi" else metric
+    cell <- paste(c(estimator, outer_opt), collapse = "_")
+    if (nzchar(cell)) tag <- paste(cell, tag, sep = "_")
     stub <- file.path(out_dir, sprintf("fig_power_%s", tag))
     ggplot2::ggsave(paste0(stub, ".png"), p, width = 9, height = 7, dpi = 150)
     ggplot2::ggsave(paste0(stub, ".pdf"), p, width = 9, height = 7)

@@ -14,9 +14,11 @@
 #   30 min walltime  (probe 44 s; wide margin for N300/ode)
 # Raise -M / -W if N300 or ode cells approach these limits.
 #
-# NOTE  VAE needs the `torch` R package + libtorch backend. The driver runs a
-#       preflight check and writes res_ds<DDD>_ERROR.txt (and exits non-zero)
-#       if torch is missing, so a mis-provisioned node fails loudly.
+# NOTE  est = "vae" is a NATIVE C++/Armadillo engine (no `torch` / libtorch
+#       dependency). The only optional extra is `L0Learn` (large covariate
+#       searches only); the four-covariate grid here uses exact branch-and-bound
+#       and does not need it. A genuine fit error still writes
+#       res_ds<DDD>_ERROR.txt and exits non-zero (loud fail).
 # ============================================================================
 
 #BSUB -n 2
