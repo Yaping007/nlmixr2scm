@@ -16,7 +16,7 @@ set -euo pipefail
 
 SAMPLE_N=${1:?"Usage: $0 <N:40|80|300> <scn:1..16> <est> <opt|NA> <structure:linCmt|ode> <n_ds> [maxpar] [ds_start]"}
 SCN=${2:?"scenario required"}
-EST=${3:?"estimator required (focei|foceif|irlsfoceif|vae)"}
+EST=${3:?"estimator required (focei|foceif|irlsfocei|irlsfoceif|vae)"}
 OPT=${4:?"outer_opt required (bobyqa|nlminb|lbfgsb3c|NA)"}
 STRUCTURE=${5:?"structure required (linCmt|ode)"}
 NDS=${6:?"n_datasets required"}

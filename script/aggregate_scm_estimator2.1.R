@@ -17,8 +17,12 @@
 #  estimator/outer_opt grouping keys; the *.fit.rds sidecars are skipped.)
 #
 # Grouping cell = (sample_N, scenario, structure, estimator, outer_opt).
-# The completed sweep is focei_bobyqa only, but the keys are kept general so
-# additional estimator x optimizer cells aggregate without change.
+# The active sweep (2026-07-23) is the IRLS-vs-FOCEi speed comparison --
+# focei_bobyqa and irlsfocei_bobyqa -- but the keys are fully general, so any
+# additional estimator x optimizer cell (e.g. the parked irlsfoceif_lbfgsb3c or
+# foceif_* combos) aggregates without change. The <est>_<opt> directory level is
+# split on its LAST underscore, so multi-token labels like "irlsfocei_bobyqa"
+# parse to estimator="irlsfocei", outer_opt="bobyqa".
 #
 # RECORD SHAPE (schema 2.1, from package_scm_schema21):
 #   r$diag / r$diag_t3 : convergence + stability flags (same as VAE / refit)

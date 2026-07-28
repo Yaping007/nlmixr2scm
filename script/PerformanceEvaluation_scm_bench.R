@@ -286,7 +286,8 @@ run_bench_cell <- function(opts) {
       if (is.null(fit_base_i)) stop("VAE base fit failed after fallback: ", vae_status)
     } else {
       # Grid label -> nlmixr2 est= dispatch alias (foceif -> "foceif",
-      # irlsfoceif -> "ifoceif"; focei/saem pass through). REQUIRED: nlmixr2est
+      # irlsfocei -> "ifocei" (active, non-fast IRLS), irlsfoceif -> "ifoceif"
+      # (parked, fast IRLS); focei/saem pass through). REQUIRED: nlmixr2est
       # 7.0.0 rejects the raw grid label "irlsfoceif" (no such est), so the base
       # fit must use the alias. runSCM then inherits fit$est for every candidate
       # LRT and the tight-tol refit, so this one mapping fixes the whole chain.
