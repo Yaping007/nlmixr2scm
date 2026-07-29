@@ -68,17 +68,6 @@ fig_power(
   save     = TRUE      # writes PNG + PDF
 )
 
-# ---- Covariate-selection error pattern (FP / FN heatmap) -------------------
-source("script/viz/fig_covsel_heatmap.R")
-fig_covsel_heatmap(
-  agg_dir   = "output/vae_covsel_aggregated0722",
-  sample_N  = NULL,        # all N
-  structure = "linCmt",    # one structure per figure; use "ode" to swap
-  save      = TRUE
-)
-fig_covsel_heatmap(agg_dir = "output/vae_covsel_aggregated0722",
-                   structure = "ode", save = TRUE)
-
 ```
 
 ### Knobs
@@ -169,6 +158,17 @@ fig_covsel_heatmap(agg_dir   = "output/vae_covsel_aggregated",
                    min_fp    = 0,          # blank FP cells below this rate (de-clutter)
                    save      = FALSE,      # TRUE also writes PNG + PDF
                    out_dir   = "output/figures/vae_covsel")
+
+# ---- Covariate-selection error pattern (FP / FN heatmap) -------------------
+source("script/viz/fig_covsel_heatmap.R")
+fig_covsel_heatmap(
+  agg_dir   = "output/vae_covsel_aggregated0722",
+  sample_N  = NULL,        # all N
+  structure = "linCmt",    # one structure per figure; use "ode" to swap
+  save      = TRUE
+)
+fig_covsel_heatmap(agg_dir = "output/vae_covsel_aggregated0722",
+                   structure = "ode", save = TRUE)
 ```
 
 ### Knobs
@@ -235,10 +235,48 @@ true_value, n_used, MedRE_pct, MeanRE_pct, MARE_pct, RMRSE_pct, P90AbsRE_pct`.
 **Parameter groups (`param_class`):**
 
 - `covariate_beta` — `CLBW, CLcrCL, VcBW, VcSEX` (headline; centering-invariant).
-- `structural_intercept` — `TVCL, TVVc` (**caveat**: absorb the covariate
-  centering shift, so their relative error is *not* pure bias — footnoted).
+- `structural_intercept` — `TVCL, TVVc` (**now reference-aligned**: the
+  aggregators back-transform each estimate onto the DGP's fixed `BW = 70` /
+  `CrCL = 95` anchor before computing error, so the relative error is genuine
+  bias rather than a centering artefact — see *Reference alignment* below).
 - `structural_other` — `TVQ, TVVp, var_CL, var_Vc, cov_VcCL, ResErr` (clean
   baseline; fixed `TVKA` is dropped by default since its error is always 0).
+
+### Reference alignment (structural intercepts)
+
+The data-generating model defines `TVCL` / `TVVc` at **fixed** references
+`BW = 70`, `CrCL = 95`. The estimators instead centre each *selected* continuous
+covariate on a *sample* statistic, so a raw `exp(lTVCL)` is the typical value at
+that sample centre — a reference artefact, not bias. Both aggregators now
+back-transform the intercept onto the 70 / 95 anchor using the fit's **own**
+reference-invariant power betas:
+
+$$\text{TVCL}_{70/95} = \widehat{\text{TVCL}}\cdot\left(\tfrac{70}{c_{BW}}\right)^{\beta_{CLBW}}\!\!\cdot\left(\tfrac{95}{c_{CrCL}}\right)^{\beta_{CLcrCL}},\qquad \text{TVVc}_{70} = \widehat{\text{TVVc}}\cdot\left(\tfrac{70}{c_{BW}}\right)^{\beta_{VcBW}}$$
+
+The centre $c$ differs by pipeline — this is the **only** difference between the
+two implementations:
+
+| aggregator | script | centre statistic $c$ | matches engine |
+|---|---|---|---|
+| VAE covariate selection | `script/aggregate_vae_covsel.R` | `mean` | VAE centres on the sample **mean** |
+| runSCM estimator bench   | `script/aggregate_scm_estimator2.1.R` | `median` | `R/scm.R` centres on the subject-level **median** |
+
+Both are wired as the first line of `.unpack_rse()`, so *every* per-parameter
+metric (`RMRSE`, `MARE`, `MedRE`, …) is computed on the aligned estimate. The
+refit-**true** model is already anchored on 70 / 95 and is skipped. Empirically
+verified on scn16 / N = 300: the VAE mean back-transform recovers
+`TVCL = 0.594` vs truth `0.6` (median would give `0.628`; uncorrected `0.698`).
+
+```r
+# Re-aggregate so the CSVs the figures read carry the aligned intercepts
+Rscript script/aggregate_vae_covsel.R \
+  --root output --sub vae_covsel_full0722 \
+  --out_dir output/vae_covsel_aggregated0722
+
+Rscript script/aggregate_scm_estimator2.1.R \
+  --root output --sub scm_bench \
+  --out_dir output/scm_bench_aggregated
+```
 
 **Layout:**
 

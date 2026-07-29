@@ -6,24 +6,28 @@
 #
 # Reads the per-covariate roll-up written by aggregate_vae_covsel.R:
 #   output/vae_covsel_aggregated/vae_covsel_by_covar.csv
-#   cols: sample_N, scenario, structure, var, covar, n_datasets,
+#   cols: sample_N, scenario, structure, var, covar, shape, n_datasets,
 #         is_true, n_detected, detection_rate, n_TP, n_FN, n_FP
+#
+# SHAPE is now a scored dimension (parity with SCM/PsN): each (var, covar) has a
+# TRUE shape (continuous -> "power"; categorical -> "cat") plus DISTRACTOR shapes
+# ("lin").  A true covariate recovered in the WRONG shape scores FN on its true
+# shape row + FP on the wrong shape row.  Shape is folded into the y-axis effect
+# label ("CL~BW.power", "CL~BW.lin", ...) with the distractor shape placed
+# directly BELOW its true shape so a flip reads vertically.
 #
 # Per (scenario x effect) cell there are two mutually-exclusive regimes:
 #   * TRUE effect  (is_true = TRUE) : error = FALSE NEGATIVE
-#                                     FN rate = n_FN / N_cell
+#                                     FN rate = n_FN / n_datasets
 #   * FALSE effect (is_true = FALSE): error = FALSE POSITIVE
-#                                     FP rate = n_FP / N_cell
+#                                     FP rate = n_FP / n_datasets
 #
-# CRITICAL denominator note.  In vae_covsel_by_covar.csv the `n_datasets` column
-# is NOT the cell's dataset count -- it is the number of datasets in which THAT
-# (var, covar) pair appeared in covsel_long.  A distractor only appears when it
-# is falsely selected, so for FALSE effects n_datasets == n_FP and n_FP/n_datasets
-# is ALWAYS ~1 (a bug if used as an FP rate).  We therefore divide n_FP and n_FN
-# by the true per-cell dataset total N_cell (from vae_diag_rates.csv n_total /
-# equivalently vae_power.csv N), NOT by n_datasets.  True effects appear in every
-# dataset so their n_datasets already equals N_cell, but we use N_cell for both
-# regimes for correctness and symmetry.
+# DENOMINATOR.  `n_datasets` in vae_covsel_by_covar.csv is now the cell's TRUE
+# dataset total (aggregate_vae_covsel.R derives it from the per-cell fit count in
+# diag_long, NOT the per-pair appearance count), so n_FP / n_datasets and
+# n_FN / n_datasets are correct FP/FN rates for both regimes with no diag-rates
+# work-around.  (Historically n_datasets was the appearance count, forcing a
+# join to vae_diag_rates.csv$n_total; that quirk is fixed at source.)
 # Both are "how often the selector got THIS effect wrong", so a single
 # error-rate fill (0-100%, higher = worse) carries them together. TRUE-effect
 # cells (the FN regime) get a bold black outline so the two regimes are
@@ -66,7 +70,8 @@ suppressPackageStartupMessages({
 
 `%||%` <- function(a, b) if (is.null(a) || length(a) == 0L) b else a
 
-.STRUCT_LAB <- c(linCmt = "linCmt (analytic)", ode = "ODE")
+.STRUCT_LAB <- c(linCmt = "linCmt (analytic)", ode = "ODE",
+                 advan4 = "NONMEM (ADVAN4)")
 
 # canonical effect ordering: structural param first, then covariate
 .VAR_LAB   <- c(cl = "CL", vc = "VC", q = "Q", vp = "VP", ka = "KA")
@@ -116,22 +121,19 @@ fig_covsel_heatmap <- function(
   if (!both_struct) dat <- dplyr::filter(dat, structure == !!structure)
   if (nrow(dat) == 0L) stop("no rows after filtering (check sample_N / structure)")
 
-  # per-cell dataset total N_cell -- the correct FP/FN denominator (see header).
-  # n_datasets in the by-covar CSV is per-pair appearance count, not the cell N.
-  diag_csv <- file.path(trimws(agg_dir), "vae_diag_rates.csv")
-  if (!file.exists(diag_csv)) stop("diag-rates CSV not found (needed for N_cell): ", diag_csv)
-  n_cell <- readr::read_csv(diag_csv, show_col_types = FALSE) |>
-    dplyr::select(sample_N, scenario, structure, N_cell = n_total)
+  # per-cell dataset total is now carried directly by the by-covar CSV as
+  # `n_datasets` (aggregate_vae_covsel.R derives it from the per-cell fit count,
+  # so it is the correct FP/FN denominator for BOTH true effects and
+  # distractors -- no diag-rates work-around needed).
 
   # per-cell error rate + regime label.
   # y-axis is the full effect label "PARAM~COVAR" (unambiguous), ordered as a CL
   # block then a VC block; WITHIN each block BW & BMI are adjacent so the
   # collinearity pair reads vertically.
   plot_df <- dat |>
-    dplyr::left_join(n_cell, by = c("sample_N", "scenario", "structure")) |>
     dplyr::mutate(
       err_type = ifelse(is_true, "FN", "FP"),
-      err_rate = ifelse(is_true, n_FN / N_cell, n_FP / N_cell),
+      err_rate = ifelse(is_true, n_FN / n_datasets, n_FP / n_datasets),
       # blank trivial FP noise if requested
       err_show = dplyr::if_else(!is_true & err_rate < min_fp,
                                 NA_real_, err_rate),
@@ -140,16 +142,19 @@ fig_covsel_heatmap <- function(
       # error kinds get contrasting colours on ONE diverging scale.
       err_signed = dplyr::if_else(is_true, -err_show * 100, err_show * 100),
       param    = dplyr::coalesce(.VAR_LAB[var], toupper(var)),
-      effect   = paste0(param, "~", covar),
+      # effect label folds shape in so a power->lin flip reads vertically
+      effect   = paste0(param, "~", covar, ".",
+                        dplyr::coalesce(.SHAPE_LAB[tolower(shape)], shape)),
       v_ord    = match(var, names(.VAR_LAB)),
       c_ord    = match(covar, .COVAR_ORD),
+      s_ord    = match(tolower(shape), .SHAPE_ORD),
       scenario = factor(scenario, levels = sort(unique(scenario))),
       struct_f = dplyr::recode(structure,
                                linCmt = "linCmt (analytic)", ode = "ODE"),
       sample_N = factor(paste0("N = ", sample_N),
                         levels = paste0("N = ", c(40, 80, 300)))
     ) |>
-    dplyr::filter(!is.na(v_ord), !is.na(c_ord)) |>
+    dplyr::filter(!is.na(v_ord), !is.na(c_ord), !is.na(s_ord)) |>
     dplyr::mutate(
       struct_f = factor(struct_f,
         levels = intersect(c("linCmt (analytic)", "ODE"), unique(struct_f)))
@@ -166,14 +171,15 @@ fig_covsel_heatmap <- function(
   plot_df <- plot_df |>
     tidyr::complete(
       struct_f, sample_N, scenario,
-      tidyr::nesting(effect, param, var, covar, v_ord, c_ord),
+      tidyr::nesting(effect, param, var, covar, shape, v_ord, c_ord, s_ord),
       fill = list(is_true = FALSE, err_rate = 0, err_show = 0, err_signed = 0)
     )
 
-  # TOP-DOWN effect order: CL block first, then VC; BW,BMI adjacent within each.
+  # TOP-DOWN effect order: CL block first, then VC; BW,BMI adjacent within each;
+  # within a (var,covar) the TRUE shape sits directly above its distractor shape.
   eff_levels <- plot_df |>
-    dplyr::distinct(effect, v_ord, c_ord) |>
-    dplyr::arrange(v_ord, c_ord) |>
+    dplyr::distinct(effect, v_ord, c_ord, s_ord) |>
+    dplyr::arrange(v_ord, c_ord, s_ord) |>
     dplyr::pull(effect)
   # ggplot draws first factor level at BOTTOM -> reverse so CL~BW sits at top.
   plot_df <- dplyr::mutate(plot_df,
@@ -189,6 +195,13 @@ fig_covsel_heatmap <- function(
   p <- ggplot2::ggplot(plot_df,
                        ggplot2::aes(scenario, effect, fill = err_signed)) +
     ggplot2::geom_tile(colour = "grey85", linewidth = 0.3) +
+    # Bold black frame around the TRUE covariate effect of each scenario (the
+    # FN regime). Drawn as a separate top layer with fill=NA so the outline is
+    # never overdrawn by adjacent tiles; makes the true-vs-distractor regimes
+    # visually separable at a glance.
+    ggplot2::geom_tile(
+      data = dplyr::filter(plot_df, is_true),
+      fill = NA, colour = "black", linewidth = 0.2) +
     # diverging scale: blue = FN (true effect missed), red = FP (null selected),
     # white = no error.  Legend re-labelled so both arms read as 0-100%.
     ggplot2::scale_fill_gradient2(
@@ -197,7 +210,7 @@ fig_covsel_heatmap <- function(
       limits = c(-100, 100), breaks = seq(-100, 100, 50),
       labels = c("FN 100%", "FN 50%", "0", "FP 50%", "FP 100%")) +
     ggplot2::labs(
-      x = "Simulation scenario", y = "Covariate effect (param ~ covariate)"
+      x = "Simulation scenario", y = "Covariate effect (param ~ covariate . shape)"
     ) +
     theme_scm() +
     ggplot2::guides(fill = ggplot2::guide_colourbar(barwidth = 14))
@@ -228,6 +241,219 @@ fig_covsel_heatmap <- function(
     s_tag <- structure
     stub  <- file.path(out_dir, sprintf("fig_covsel_heatmap_%s_%s", n_tag, s_tag))
     dims  <- if (both_struct) c(12, 10) else if (layout == "slide") c(13, 9) else c(22, 12)
+    ggplot2::ggsave(paste0(stub, ".png"), p, width = dims[1], height = dims[2], dpi = 200)
+    ggplot2::ggsave(paste0(stub, ".pdf"), p, width = dims[1], height = dims[2])
+    message("saved: ", stub, ".{png,pdf}")
+  }
+
+  p
+}
+
+# ============================================================================
+# fig_covsel_heatmap_scm()  --  SCM covariate-selection error-pattern heatmap
+# ----------------------------------------------------------------------------
+# SCM differs from VAE in TWO ways this function accommodates:
+#
+#   (1) SHAPE is a selectable dimension.  Each (var, covar) has a TRUE shape
+#       (continuous BW/BMI/CrCL -> "power"; categorical SEX/RACE -> "cat") plus
+#       DISTRACTOR shapes (e.g. "lin" for a continuous covariate).  A true
+#       covariate can therefore be recovered in the WRONG shape -- the
+#       lin-vs-power shape-flip that drives the strict-power collapse.  We fold
+#       shape into the y-axis effect label ("CL~BW.power", "CL~BW.lin", ...) and
+#       place the distractor shape DIRECTLY BELOW its true shape, so a shape
+#       flip reads vertically: a dark FN tile on "CL~BW.power" stacked on a dark
+#       FP tile on "CL~BW.lin" is the signature of a flip.
+#
+#   (2) There are ESTIMATOR x OUTER_OPT cells.  The by-covar CSV carries both
+#       columns, so a single figure MUST fix one estimator/outer_opt cell
+#       (defaults focei/bobyqa).  A guard errors if >1 cell survives filtering.
+#
+# Reads output/scm_bench_rescue_winner_aggregated/scm_covsel_by_covar.csv
+#   cols: sample_N, scenario, structure, estimator, outer_opt, var, covar,
+#         shape, n_datasets, is_true, n_detected, detection_rate,
+#         n_TP, n_FN, n_FP
+# Denominator: `n_datasets` in the by-covar CSV is the cell's true fit count
+# (derived in aggregate_scm_estimator2.1.R), so FP/FN rates divide by it
+# directly -- no scm_diag_rates.csv join needed.
+#
+# USAGE:
+#   source("script/viz/fig_covsel_heatmap.R")
+#   fig_covsel_heatmap_scm()                                  # focei/bobyqa, linCmt, all N
+#   fig_covsel_heatmap_scm(sample_N = 300)
+#   fig_covsel_heatmap_scm(estimator = "focei", outer_opt = "bobyqa",
+#                          structure = "ode")
+#   fig_covsel_heatmap_scm(labels = FALSE, save = TRUE)
+# ============================================================================
+
+# within-pair shape order: TRUE shape first (top), distractors below.
+# `exp` is included for PsN/NONMEM SCM, which tests BOTH an exponential and a
+# power form for each continuous covariate ([code] section); truth is `power`,
+# so a selected `exp` is a legitimate shape-mismatch distractor.
+.SHAPE_ORD <- c("power", "exp", "lin", "cat")
+.SHAPE_LAB <- c(power = "power", exp = "exp", lin = "lin", cat = "cat")
+
+fig_covsel_heatmap_scm <- function(
+    agg_dir      = "output/scm_bench_rescue_winner_aggregated",
+    sample_N     = NULL,        # NULL = all (40, 80, 300)
+    structure    = "linCmt",    # ONE structure per figure ("linCmt" | "ode")
+    estimator    = "focei",     # fix ONE estimator cell
+    outer_opt    = "bobyqa",    # fix ONE outer optimiser cell
+    labels       = TRUE,
+    min_fp       = 0,           # blank FP cells below this rate
+    layout       = c("slide", "wide"),
+    show_title   = TRUE,        # FALSE = drop the plot title (tighter figure)
+    save         = FALSE,
+    out_dir      = "output/figures/scm_covsel",
+    csv_name     = "scm_covsel_by_covar.csv",
+    title_prefix = "SCM covariate selection") {
+
+  csv <- file.path(trimws(agg_dir), csv_name)
+  if (!file.exists(csv)) stop("by-covar CSV not found: ", csv)
+  dat <- readr::read_csv(csv, show_col_types = FALSE)
+
+  # ---- fix the estimator x outer_opt cell (SCM-specific) -------------------
+  if (!is.null(estimator) && "estimator" %in% names(dat))
+    dat <- dplyr::filter(dat, estimator == !!estimator)
+  if (!is.null(outer_opt) && "outer_opt" %in% names(dat))
+    dat <- dplyr::filter(dat, outer_opt == !!outer_opt)
+
+  if (!is.null(sample_N)) dat <- dplyr::filter(dat, sample_N %in% !!sample_N)
+  structure <- structure[1]
+  both_struct <- identical(structure, "both")
+  if (!both_struct) dat <- dplyr::filter(dat, structure == !!structure)
+  if (nrow(dat) == 0L) stop("no rows after filtering (check sample_N / structure / estimator / outer_opt)")
+
+  # guard: exactly ONE estimator x outer_opt cell must remain, else the fill
+  # would silently blend distinct estimators onto one tile.
+  cells <- dat |> dplyr::distinct(estimator, outer_opt)
+  if (nrow(cells) > 1L) {
+    msg <- paste(sprintf("%s/%s", cells$estimator, cells$outer_opt), collapse = ", ")
+    stop("more than one estimator/outer_opt cell after filtering: ", msg,
+         "\n  -> set estimator= and outer_opt= to pick exactly one.")
+  }
+  est_tag <- paste(cells$estimator[1], cells$outer_opt[1], sep = "_")
+
+  # per-cell dataset total is carried directly by the by-covar CSV as
+  # `n_datasets` (aggregate_scm_estimator2.1.R derives it from the per-cell fit
+  # count -> correct FP/FN denominator for true effects AND distractors).
+
+  plot_df <- dat |>
+    dplyr::mutate(
+      err_type = ifelse(is_true, "FN", "FP"),
+      err_rate = ifelse(is_true, n_FN / n_datasets, n_FP / n_datasets),
+      err_show = dplyr::if_else(!is_true & err_rate < min_fp, NA_real_, err_rate),
+      err_signed = dplyr::if_else(is_true, -err_show * 100, err_show * 100),
+      # var/covar casing varies by source (runSCM lowercase 'cl'/'CrCL' vs PsN
+      # canonicalised 'CL'/'CRCL'); match case-insensitively so both render.
+      param    = dplyr::coalesce(.VAR_LAB[tolower(var)], toupper(var)),
+      # effect label folds shape in so flips read vertically
+      effect   = paste0(param, "~", toupper(covar), ".",
+                        .SHAPE_LAB[tolower(shape)] %||% shape),
+      v_ord    = match(tolower(var), names(.VAR_LAB)),
+      c_ord    = match(toupper(covar), toupper(.COVAR_ORD)),
+      s_ord    = match(tolower(shape), .SHAPE_ORD),
+      scenario = factor(scenario, levels = sort(unique(scenario))),
+      struct_f = dplyr::recode(structure,
+                               linCmt = "linCmt (analytic)", ode = "ODE",
+                               advan4 = "NONMEM (ADVAN4)"),
+      sample_N = factor(paste0("N = ", sample_N),
+                        levels = paste0("N = ", c(40, 80, 300)))
+    ) |>
+    dplyr::filter(!is.na(v_ord), !is.na(c_ord), !is.na(s_ord)) |>
+    dplyr::mutate(
+      struct_f = factor(struct_f,
+        levels = intersect(c("linCmt (analytic)", "ODE", "NONMEM (ADVAN4)"),
+                           unique(struct_f)))
+    )
+
+  # drop unused N / structure levels so tidyr::complete() below does not
+  # re-fabricate empty panels for filtered-out sample sizes or structures.
+  plot_df <- droplevels(plot_df)
+
+  # complete the (sample_N x scenario x effect) grid.  As with VAE, a distractor
+  # (var,covar,shape) only gets a row when falsely selected >=1 time, so
+  # never-selected distractors are absent and must be filled as explicit FP=0.
+  # is_true varies BY SCENARIO (and by shape), so it is NOT part of the nesting
+  # key -- any filled cell is by definition a never-selected distractor
+  # (is_true = FALSE, FP = 0).
+  plot_df <- plot_df |>
+    tidyr::complete(
+      struct_f, sample_N, scenario,
+      tidyr::nesting(effect, param, var, covar, shape, v_ord, c_ord, s_ord),
+      fill = list(is_true = FALSE, err_rate = 0, err_show = 0, err_signed = 0,
+                  n_FN = 0, n_FP = 0)
+    ) |>
+    # per-tile error COUNT: FN count on true cells, FP count on distractor cells
+    dplyr::mutate(err_count = ifelse(is_true, n_FN, n_FP))
+
+  # TOP-DOWN order: CL block then VC; within each, covar order, then shape order
+  # (true shape first so its distractor sits directly below it).
+  eff_levels <- plot_df |>
+    dplyr::distinct(effect, v_ord, c_ord, s_ord) |>
+    dplyr::arrange(v_ord, c_ord, s_ord) |>
+    dplyr::pull(effect)
+  plot_df <- dplyr::mutate(plot_df,
+    effect = factor(effect, levels = rev(eff_levels)))
+
+  layout <- match.arg(layout)
+  facet_nrow <- if (layout == "slide") 3L else 1L
+
+  p <- ggplot2::ggplot(plot_df,
+                       ggplot2::aes(scenario, effect, fill = err_signed)) +
+    ggplot2::geom_tile(colour = "grey85", linewidth = 0.3) +
+    ggplot2::geom_tile(
+      data = dplyr::filter(plot_df, is_true),
+      fill = NA, colour = "black", linewidth = 0.2) +
+    ggplot2::scale_fill_gradient2(
+      low = "#08519C", mid = "white", high = "#B30000",
+      midpoint = 0, na.value = "grey92", name = NULL,
+      limits = c(-100, 100), breaks = seq(-100, 100, 50),
+      labels = c("FN 100%", "FN 50%", "0", "FP 50%", "FP 100%")) +
+    ggplot2::labs(
+      title = if (isTRUE(show_title))
+                sprintf("%s  (%s, %s)", title_prefix, est_tag, structure) else NULL,
+      x = "Simulation scenario",
+      y = "Covariate effect (param ~ covariate . shape)"
+    ) +
+    theme_scm() +
+    ggplot2::theme(
+      panel.spacing = grid::unit(0.4, "lines"),
+      plot.margin   = grid::unit(c(2, 2, 2, 2), "pt"),
+      legend.margin = ggplot2::margin(0, 0, 0, 0),
+      legend.box.spacing = grid::unit(2, "pt")
+    ) +
+    ggplot2::guides(fill = ggplot2::guide_colourbar(barwidth = 14))
+
+  if (both_struct) {
+    p <- p + ggplot2::facet_grid(sample_N ~ struct_f)
+  } else {
+    p <- p + ggplot2::facet_wrap(~ sample_N, nrow = facet_nrow)
+  }
+  # Pin tiles square in BOTH layouts so they cannot stretch to fill a wide plot
+  # pane (the "too wide" symptom).  In "slide" the 3 N panels stack vertically
+  # with square tiles -> a compact block that drops onto a 16:9 slide; in "wide"
+  # they sit side-by-side.
+  p <- p + ggplot2::coord_equal()
+
+  if (isTRUE(labels)) {
+    # print the raw FN/FP dataset COUNT in each tile.  Never-selected covariate
+    # relationships were filled to 0 by tidyr::complete() above, so (like VAE)
+    # they show an explicit "0" rather than a blank tile.
+    lab_df <- dplyr::filter(plot_df, !is.na(err_count))
+    p <- p + ggplot2::geom_text(
+      data = lab_df,
+      ggplot2::aes(label = err_count),
+      size = if (both_struct) 3.2 else 3.0,
+      fontface = "bold",
+      colour = ifelse(lab_df$err_show > 0.55, "white", "grey15"))
+  }
+
+  if (isTRUE(save)) {
+    dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+    n_tag <- if (is.null(sample_N)) "allN" else paste0("N", paste(sample_N, collapse = "-"))
+    stub  <- file.path(out_dir,
+      sprintf("fig_covsel_heatmap_scm_%s_%s_%s", est_tag, n_tag, structure))
+    dims  <- if (both_struct) c(14, 15) else if (layout == "slide") c(9, 15) else c(22, 14)
     ggplot2::ggsave(paste0(stub, ".png"), p, width = dims[1], height = dims[2], dpi = 200)
     ggplot2::ggsave(paste0(stub, ".pdf"), p, width = dims[1], height = dims[2])
     message("saved: ", stub, ".{png,pdf}")
