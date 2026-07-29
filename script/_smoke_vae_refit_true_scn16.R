@@ -83,7 +83,7 @@ parse_args <- function(argv) {
   opts
 }
 
-opts <- if (!interactive()) parse_args(commandArgs(trailingOnly = TRUE)) else parse_args(character(0))
+opts <- if (!interactive()) parse_args(commandArgs(trailingOnly = TRUE)) else parse_args(if (exists(".SMOKE_ARGS", inherits = TRUE)) get(".SMOKE_ARGS") else character(0))
 
 # ---- Inputs ----------------------------------------------------------------
 sim_path <- file.path(opts$input_root, sprintf("sim_obs_N%d", opts$N),

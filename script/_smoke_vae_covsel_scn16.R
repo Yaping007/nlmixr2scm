@@ -12,7 +12,15 @@
 #   the data.  It does NOT select from a hand-built candidate-theta superset.
 #   So we hand VAE a PLAIN BASE MODEL (no covariate terms) plus a dataset that
 #   carries every candidate covariate column, and let VAE auto-promote the
-#   winners.  The promoted `beta_<PARAM>_<COV>` terms ARE the selected model.
+#   winners.  The promoted `beta.<PARAM>.<COV>.<SHAPE>` terms ARE the selected
+#   model (nlmixr2est 7.0.2 dot-separated naming; 7.0.1 used beta_<PARAM>_<COV>).
+#
+#   SEARCH SPACE pinned to the runSCM / PsN scenario-16 candidate set (7.0.2):
+#     vaeControl(shapes=list(BW/CrCL/BMI = {power,lin}, SEX/RACE = TRUE,
+#                            fixCov=TRUE),
+#                covCenter=c(BW=70, CrCL=95), covCenterType="median")
+#     -> cl,vc x BW,CrCL,BMI in {power,lin} + SEX,RACE (cat) = 16 candidates,
+#        with PsN's physiological anchors (BW=70, CrCL=95; BMI at median).
 #
 #   TRUE scn16 relationships (what VAE should recover):
 #     cl ~ BW   (power), cl ~ CrCL (power), vc ~ BW (power),
@@ -106,8 +114,29 @@ base_mod <- switch(opts$structure,
   stop("Unknown structure: ", opts$structure)
 )
 
+# ---- VAE search space pinned to the runSCM / PsN scenario-16 candidate set ----
+# nlmixr2est 7.0.2 lets us fix the search to the SAME 16 candidates SCM/PsN use:
+#   cl,vc  x  BW,CrCL,BMI  in {power, lin}      (continuous, 2 shapes each)
+#   cl,vc  x  SEX,RACE     categorical ("cat")  (default eligible shape)
+# shapes=list(): naming a covariate + fixCov=TRUE restricts the search to exactly
+#   these five covariates; SEX/RACE = TRUE marks them eligible (auto "cat").
+# covCenter pins the physiological references PsN uses in its [code] section
+#   (BW=70, CrCL=95); BMI keeps the data median (covCenterType="median"), matching
+#   PsN (which leaves BMI at median) and SCM (median centering throughout).  The
+#   power exponent is centring-invariant, so coefficients stay comparable to truth.
 vae_ctrl <- nlmixr2est::vaeControl(
   covariateSelection = TRUE,
+  shapes = list(
+    BW   = c("power", "lin"),
+    CrCL = c("power", "lin"),
+    BMI  = c("power", "lin"),
+    SEX  = TRUE,       # categorical -> auto "cat"
+    RACE = TRUE,       # categorical -> auto "cat"
+    fixCov = TRUE      # search ONLY these five covariates (match SCM/PsN)
+  ),
+  covCenter          = c(BW = 70, CrCL = 95),  # PsN physiological anchors
+  covCenterType      = "median",               # BMI -> median (SCM/PsN default)
+  catCutoff          = 0.05,
   covMethod          = "r,s",
   calcTables         = TRUE,
   print              = 0
@@ -136,30 +165,60 @@ rec <- assemble_common(
   estimator   = "vae"
 )
 
-# ---- $covsel block: parse VAE's promoted beta_<PARAM>_<COV> terms ----------
-.param_to_var <- c(lTVCL = "cl", lTVVc = "vc")
+# ---- $covsel block: parse VAE's promoted beta coefficients ------------------
+# nlmixr2est 7.0.2 renamed the promoted covariate coefficients from the 7.0.1
+# underscore form (beta_lTVCL_CRCL) to a DOT-separated form:
+#   beta.<param>.<cov>.<shape>   e.g. beta.lTVCL.CRCL.power / beta.lTVVc.BW.lin
+#   beta.<param>.<cov>[.<level>] for categoricals   e.g. beta.lTVVc.SEX
+# and fit$theta may now return NULL, so estimates are read from $parFixedDf.
+.param_to_var <- c(lTVCL = "cl", lTVVc = "vc", cl = "cl", vc = "vc")
 .norm_covar   <- function(x) ifelse(toupper(x) == "CRCL", "CrCL", x)
+.shape_tokens <- c("power", "lin", "log", "identity", "center",
+                   "hockey", "hockeyLow", "hockeyHi")
+
+# named numeric of all fixed-effect estimates, robust to the 7.0.2 API
+.get_estimates <- function(fit) {
+  pf <- tryCatch(fit$parFixedDf, error = function(e) NULL)
+  if (!is.null(pf) && "Estimate" %in% names(pf) && !is.null(rownames(pf))) {
+    v <- pf$Estimate; names(v) <- rownames(pf); return(v)
+  }
+  th <- tryCatch(fit$theta, error = function(e) NULL)
+  if (!is.null(th)) return(th)
+  numeric(0)
+}
 
 .parse_beta_theta <- function(nms) {
-  hits <- grep("^beta_", nms, value = TRUE)
-  if (length(hits) == 0L)
-    return(tibble::tibble(theta_name = character(), var = character(), covar = character()))
-  m <- regmatches(hits, regexec("^beta_(lTV[[:alnum:]]+)_(.+)$", hits))
-  param <- vapply(m, function(x) if (length(x) == 3L) x[2] else NA_character_, character(1))
-  covar <- vapply(m, function(x) if (length(x) == 3L) x[3] else NA_character_, character(1))
-  tibble::tibble(theta_name = hits,
-                 var   = unname(.param_to_var[param]),
-                 covar = .norm_covar(covar))
+  empty <- tibble::tibble(theta_name = character(), var = character(),
+                          covar = character(), shape = character())
+  hits <- grep("^beta[._]", nms, value = TRUE)
+  if (length(hits) == 0L) return(empty)
+  rows <- lapply(hits, function(nm) {
+    toks <- strsplit(sub("^beta[._]", "", nm), "[._]")[[1]]
+    if (length(toks) < 2L) return(NULL)
+    param <- toks[1]
+    last  <- toks[length(toks)]
+    if (last %in% .shape_tokens) {
+      shape <- if (grepl("^hockey", last)) "hockey" else last
+      covar <- paste(toks[-c(1L, length(toks))], collapse = ".")
+    } else {
+      shape <- "cat"; covar <- paste(toks[-1L], collapse = ".")
+    }
+    tibble::tibble(theta_name = nm,
+                   var   = unname(.param_to_var[param]),
+                   covar = .norm_covar(covar), shape = shape)
+  })
+  out <- dplyr::bind_rows(rows)
+  if (is.null(out) || nrow(out) == 0L) empty else out
 }
 
 selected <- if (!is.null(fit)) {
-  th <- tryCatch(fit$theta, error = function(e) NULL)
+  th <- .get_estimates(fit)
   bt <- .parse_beta_theta(names(th))
   if (nrow(bt)) {
     bt |>
       dplyr::mutate(estimate = unname(th[theta_name])) |>
       dplyr::filter(!is.na(var)) |>
-      dplyr::select(var, covar, theta_name, estimate) |>
+      dplyr::select(var, covar, shape, theta_name, estimate) |>
       dplyr::arrange(dplyr::desc(abs(estimate)))
   } else NULL
 } else NULL
@@ -229,9 +288,9 @@ if (!is.null(selected)) {
   print(selected, n = nrow(selected))
 
   cmp <- dplyr::full_join(
-    dplyr::mutate(dplyr::select(true_set, var, covar), in_true = TRUE),
-    dplyr::mutate(dplyr::select(selected, var, covar), in_vae  = TRUE),
-    by = c("var", "covar")
+    dplyr::mutate(dplyr::select(true_set, var, covar, shape), in_true = TRUE),
+    dplyr::mutate(dplyr::select(selected, var, covar, shape), in_vae  = TRUE),
+    by = c("var", "covar", "shape")
   ) |>
     dplyr::distinct() |>
     dplyr::mutate(

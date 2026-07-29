@@ -18,6 +18,9 @@
 # Override any axis via env vars (space-separated):
 #   NS="40 80 300"   SCENARIOS="1 .. 16"   STRUCTURES="linCmt ode"
 #
+# Override the OUTPUT tree via OUT_ROOT (default output/vae_covsel_pilot):
+#   OUT_ROOT=output/vae_covsel_full0723_est710
+#
 # Examples
 #   # SINGLE PROBE first (recommended): N80, scn16, linCmt, 5 datasets
 #   NS=80 SCENARIOS=16 STRUCTURES=linCmt \
@@ -25,6 +28,11 @@
 #
 #   # FULL pilot (only after the probe's resources look OK):
 #   bash script/hpce_vae_covsel/submit_all_arrays.sh 5 20
+#
+#   # scn16 ONLY, all N x both structures, ds 1..245, into a 7.1.0 run tree:
+#   NS="40 80 300" SCENARIOS=16 STRUCTURES="linCmt ode" \
+#   OUT_ROOT=output/vae_covsel_full0723_est710 \
+#     bash script/hpce_vae_covsel/submit_all_arrays.sh 245 40 1
 # ============================================================================
 
 set -euo pipefail
@@ -47,6 +55,7 @@ echo "  STRUCTURES = $STRUCTURES"
 echo "  NDS        = $NDS   (datasets per cell)"
 echo "  MAXPAR     = $MAXPAR"
 echo "  DS_START   = $DS_START"
+echo "  OUT_ROOT   = ${OUT_ROOT:-output/vae_covsel_pilot}"
 echo "=========================================================="
 
 n_cells=0
