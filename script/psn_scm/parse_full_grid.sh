@@ -21,6 +21,17 @@ R_MODULE="${R_MODULE:-R/4.3.1-gomkl-2022a-0.1}"
 FORCE="${FORCE:-0}"
 BENCH_ROOT="${BENCH_ROOT:-output/psn_scm_full0727}"
 MANIFEST="${MANIFEST:-${BENCH_ROOT}/manifest.csv}"
+# Optional: also stage each parsed record into the aggregator layout
+#   ${STAGE_DST}/N<N>/scn<SS>_<STRUCT>/<EST>_<OPT>/res_ds<D>.rds
+# so no separate restage loop is needed.  Leave empty to only write records/.
+#   e.g.  STAGE_DST=output/psn_scm_full0727/ResforAggregation1 FORCE=1 bash parse_full_grid.sh
+STAGE_DST="${STAGE_DST:-}"
+STAGE_STRUCT="${STAGE_STRUCT:-advan4}"
+STAGE_EST="${STAGE_EST:-nonmem_scm}"
+STAGE_OPT="${STAGE_OPT:-focei}"
+# STAGE_ONLY=1 writes res_ds<D>.rds DIRECTLY to STAGE_DST and skips records/
+# entirely (parser --out_rds points at the res path).  Requires STAGE_DST.
+STAGE_ONLY="${STAGE_ONLY:-0}"
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "${REPO_ROOT}"
@@ -53,17 +64,45 @@ while IFS=, read -r N SCEN ds cell jobid ts; do
   # record path mirrors the cell with runs/ -> records/ (same rule the parser uses)
   rec="$(printf '%s' "${cell}" | sed 's#/runs/#/records/#')/psn_scm_record.rds"
 
+  # target res_ds<D>.rds path in the aggregator layout (used by both STAGE modes)
+  if [ -n "${STAGE_DST}" ]; then
+    scn2=$(printf '%02d' "${SCEN}")                  # zero-pad scenario -> scnSS
+    dsn=$((10#${ds}))                                # strip any zero-pad -> res_ds<int>
+    stage_dir="${STAGE_DST}/N${N}/scn${scn2}_${STAGE_STRUCT}/${STAGE_EST}_${STAGE_OPT}"
+    res="${stage_dir}/res_ds${dsn}.rds"
+  fi
+
   if [ ! -f "${cell}/logs/timing.json" ]; then
     n_wait=$((n_wait + 1)); continue                 # not finished yet
   fi
-  if [ "${FORCE}" != "1" ] && [ -f "${rec}" ]; then
-    n_skip=$((n_skip + 1)); continue                 # already parsed
+  # existence check: STAGE_ONLY checks the res file (no records written); else record
+  if [ "${FORCE}" != "1" ]; then
+    if [ "${STAGE_ONLY}" = "1" ] && [ -n "${STAGE_DST}" ]; then
+      [ -f "${res}" ] && { n_skip=$((n_skip + 1)); continue; }
+    elif [ -f "${rec}" ]; then
+      n_skip=$((n_skip + 1)); continue               # already parsed
+    fi
+  fi
+
+  # STAGE_ONLY: write res_ds<D>.rds DIRECTLY (no records/ copy).  Else write the
+  # record under records/ (default) and optionally copy it to the res layout.
+  if [ "${STAGE_ONLY}" = "1" ] && [ -n "${STAGE_DST}" ]; then
+    mkdir -p "${stage_dir}"
+    parse_out=(--out_rds "${res}")
+  else
+    parse_out=()
   fi
 
   if "${RSCRIPT_BIN}" script/psn_scm/parse_psn_scm.R \
         --cell "${cell}" --N "${N}" --scenario "${SCEN}" --dataset "${ds}" \
+        "${parse_out[@]}" \
         >/dev/null 2>&1; then
     n_ok=$((n_ok + 1))
+    # STAGE_DST (copy mode): stage the fresh record into the aggregator layout
+    if [ "${STAGE_ONLY}" != "1" ] && [ -n "${STAGE_DST}" ] && [ -f "${rec}" ]; then
+      mkdir -p "${stage_dir}"
+      cp "${rec}" "${res}"
+    fi
   else
     echo "  WARN: parse failed for ${cell}" >&2
     n_fail=$((n_fail + 1))
@@ -71,4 +110,9 @@ while IFS=, read -r N SCEN ds cell jobid ts; do
 done < "${MANIFEST}"
 
 echo "parsed: ${n_ok}  skipped(existing): ${n_skip}  waiting(unfinished): ${n_wait}  failed: ${n_fail}"
-echo "records -> output/psn_scm/records/"
+if [ "${STAGE_ONLY}" = "1" ] && [ -n "${STAGE_DST}" ]; then
+  echo "res     -> ${STAGE_DST}/N*/scn*_${STAGE_STRUCT}/${STAGE_EST}_${STAGE_OPT}/res_ds*.rds  (records/ skipped)"
+else
+  echo "records -> ${BENCH_ROOT}/records/"
+  [ -n "${STAGE_DST}" ] && echo "staged  -> ${STAGE_DST}/N*/scn*_${STAGE_STRUCT}/${STAGE_EST}_${STAGE_OPT}/res_ds*.rds"
+fi

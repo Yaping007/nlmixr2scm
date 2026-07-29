@@ -65,6 +65,27 @@ source(.find_shared_aggregator(), local = FALSE)
 # `load_one_scm_rds` / `aggregate_scm_bench_run` resolves to THESE versions)
 # =============================================================================
 
+# ---- covariate name canonicalisation (case-insensitive) ---------------------
+# The truth set hard-codes mixed case (e.g. "CrCL") while the PsN parser emits
+# the model-tag casing ("CRCL"); fold var + covar to a common case so cl~CrCL
+# truth matches cl~CRCL selection.  Defined HERE so the PsN aggregator is
+# self-contained -- it does NOT depend on the same fix having been applied to
+# the shared aggregate_scm_estimator2.1.R on HPCE.  Both `match_selected_to_truth`
+# and `.unpack_covsel` in the shared file resolve `.canon_pairs` by name at call
+# time, so this override wins once sourced.
+.canon_pairs <- function(tbl) {
+  if (is.null(tbl) || !nrow(tbl))
+    return(tibble::tibble(var = character(), covar = character(),
+                          shape = character()))
+  sh <- if ("shape" %in% names(tbl)) as.character(tbl$shape) else NA_character_
+  tibble::tibble(
+    var   = toupper(as.character(tbl$var)),
+    covar = toupper(as.character(tbl$covar)),
+    shape = dplyr::if_else(grepl("^[0-9]+$", sh), "cat", sh)
+  ) |>
+    dplyr::distinct()
+}
+
 # ---- diagnostics from the PsN top-level schema ------------------------------
 .unpack_diag <- function(r, meta, hit) {
   num  <- function(x) suppressWarnings(as.numeric(x %||% NA_real_))
