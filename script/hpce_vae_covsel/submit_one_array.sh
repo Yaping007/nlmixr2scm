@@ -32,7 +32,7 @@ REPO_ROOT="${REPO_ROOT:-$(cd "$HERE/../.." && pwd)}"
 
 # Auto-detect scripts subdir holding the driver
 SCRIPTS_DIR=""
-for c in script scripts R; do
+for c in script/hpce_vae_covsel script scripts R; do
   if [ -f "$REPO_ROOT/$c/vae_covsel_driver.R" ]; then
     SCRIPTS_DIR="$c"; break
   fi

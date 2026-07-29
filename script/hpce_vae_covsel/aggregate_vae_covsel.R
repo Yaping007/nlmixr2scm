@@ -658,47 +658,23 @@ compute_vae_relpower <- function(diag_long) {
 # the fraction of datasets in which VAE selected it.  Grouping INCLUDES shape
 # (matching compute_scm_covsel_by_covar) so a true `power` effect and its
 # spurious `lin` shape-flip occupy separate rows: the true row accrues FN when
-# VAE picks the wrong shape, the distractor `lin` row accrues FP.
-#
-# DENOMINATOR (`n_datasets`) = the cell's TRUE dataset count, taken from
-# `diag_long` (one row per fit), NOT the number of covsel_long rows in which the
-# pair happened to appear.  A distractor only appears in covsel_long when it is
-# falsely selected, so a per-appearance count would make `n_FP / n_datasets ~ 1`
-# for every distractor -- wrong.  Using the fit count makes `detection_rate`
-# (= n_detected / n_datasets) the correct per-relationship sensitivity for true
-# terms and the correct false-positive rate for distractors, with no downstream
-# N_cell work-around needed.  The fit count also includes fits that selected
-# nothing or failed, matching compute_vae_diag_rates()$n_total.
-compute_vae_covsel_by_covar <- function(covsel_long, diag_long = NULL) {
+# VAE picks the wrong shape, the distractor `lin` row accrues FP.  For a true
+# term detection_rate is its per-relationship sensitivity (marginal power); for
+# a distractor shape/pair it is the per-relationship false-positive rate.
+compute_vae_covsel_by_covar <- function(covsel_long) {
   if (!nrow(covsel_long)) return(tibble::tibble())
-  n_cell <- if (!is.null(diag_long) && nrow(diag_long)) {
-    diag_long |>
-      dplyr::group_by(sample_N, scenario, structure) |>
-      dplyr::summarise(n_datasets = dplyr::n_distinct(dataset_id),
-                       .groups = "drop")
-  } else {
-    # fallback (diag_long absent): distinct datasets that produced covsel rows
-    covsel_long |>
-      dplyr::group_by(sample_N, scenario, structure) |>
-      dplyr::summarise(n_datasets = dplyr::n_distinct(dataset_id),
-                       .groups = "drop")
-  }
   covsel_long |>
     dplyr::group_by(sample_N, scenario, structure, var, covar, shape) |>
     dplyr::summarise(
+      n_datasets     = dplyr::n(),
       is_true        = any(in_true %in% TRUE),
       n_detected     = sum(in_vae %in% TRUE),
+      detection_rate = mean(in_vae %in% TRUE),
       n_TP           = sum(verdict == "TP", na.rm = TRUE),
       n_FN           = sum(verdict == "FN", na.rm = TRUE),
       n_FP           = sum(verdict == "FP", na.rm = TRUE),
       .groups        = "drop"
     ) |>
-    dplyr::left_join(n_cell, by = c("sample_N", "scenario", "structure")) |>
-    dplyr::mutate(detection_rate = dplyr::if_else(n_datasets > 0,
-                                                  n_detected / n_datasets,
-                                                  NA_real_)) |>
-    dplyr::relocate(n_datasets, is_true, n_detected, detection_rate,
-                    .after = shape) |>
     dplyr::arrange(sample_N, scenario, structure, dplyr::desc(is_true),
                    var, covar, shape)
 }
@@ -719,7 +695,7 @@ aggregate_vae_covsel_run <- function(root          = "output",
   estim_cond    <- compute_vae_estim(loaded$rse_long, loaded$diag_long, mode = "cond")
   power         <- compute_vae_power(loaded$diag_long, cn_cor_cut = cn_cor_cut)
   relpower      <- compute_vae_relpower(loaded$diag_long)
-  covsel_by_cov <- compute_vae_covsel_by_covar(loaded$covsel_long, loaded$diag_long)
+  covsel_by_cov <- compute_vae_covsel_by_covar(loaded$covsel_long)
 
   if (write_outputs) {
     dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)

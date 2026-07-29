@@ -53,11 +53,22 @@ suppressPackageStartupMessages({
   getwd()
 })()
 
-source(file.path(.script_dir, "refit_helpers.R"))
-source(file.path(.script_dir, "true_model_factory.R"))
-source(file.path(.script_dir, "scm_bench_helpers.R"))
-source(file.path(.script_dir, "output_schema.R"))
-source(file.path(.script_dir, "estimator_factory.R"))
+# Location-robust helper sourcing: the five helpers live in the top-level
+# `script/` dir, but this driver may itself sit in `script/` OR a subfolder
+# (e.g. `script/hpce_vae_covsel/`).  Search `.script_dir`, its parent, and
+# `script/` so the driver works from either location without edits.
+.source_helper <- function(f) {
+  cand <- unique(c(file.path(.script_dir, f),
+                   file.path(dirname(.script_dir), f),
+                   file.path("script", f)))
+  hit <- cand[file.exists(cand)]
+  if (!length(hit)) stop("helper not found: ", f,
+                         " (looked in: ", paste(cand, collapse = ", "), ")")
+  source(hit[1])
+}
+invisible(lapply(c("refit_helpers.R", "true_model_factory.R",
+                   "scm_bench_helpers.R", "output_schema.R",
+                   "estimator_factory.R"), .source_helper))
 
 # ---- CLI -------------------------------------------------------------------
 parse_args <- function(argv) {

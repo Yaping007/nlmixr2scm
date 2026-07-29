@@ -142,7 +142,7 @@ Yields **16 candidates**: `cl,vc × {BW,CrCL,BMI}` in `power`+`lin` (12) plus `c
 
 | file | role |
 |------------------------------------|------------------------------------|
-| `vae_covsel_array.lsf` | LSF array template; reads `SAMPLE_N/SCN/STRUCTURE` from env, calls `script/vae_covsel_driver.R --dataset $LSB_JOBINDEX`. |
+| `vae_covsel_array.lsf` | LSF array template; reads `SAMPLE_N/SCN/STRUCTURE` from env, calls `$SCRIPTS_DIR/vae_covsel_driver.R --dataset $LSB_JOBINDEX` (`SCRIPTS_DIR` auto-detected by the submitter, e.g. `script/hpce_vae_covsel`). |
 | `submit_one_array.sh` | Submit ONE cell: `bsub -J "vaecov_N<N>_scn<SS>_<struct>[1-NDS]%MAXPAR"`. |
 | `submit_all_arrays.sh` | Triple loop over `NS × SCENARIOS × STRUCTURES`. |
 
@@ -157,7 +157,7 @@ Yields **16 candidates**: `cl,vc × {BW,CrCL,BMI}` in `power`+`lin` (12) plus `c
 | `output_schema.R` | `assemble_common()` (schema 2.1) and `write_fit_sidecar()`. |
 | `estimator_factory.R` | `seed_for_dataset()`, `seed_all()` for reproducible seeding. |
 
-The driver `source()`s the five helpers automatically via its `.script_dir` resolver, so only `vae_covsel_driver.R` is named on the command line.
+The driver `source()`s the five helpers automatically via a location-robust resolver (`.source_helper` searches `.script_dir`, its parent, and `script/`), so it works whether it lives in `script/` or `script/hpce_vae_covsel/`, and only `vae_covsel_driver.R` is named on the command line.
 
 ### R package prerequisites
 
@@ -266,22 +266,22 @@ bjobs -J 'vaecov_*'
 
 ## Aggregation
 
-Once (some or all of) the sweep has landed on disk, roll the per-dataset `res_ds*.rds` records up into operating characteristics with `script/aggregate_vae_covsel.R`. It scans `output/<sub>/N<N>/scn<SS>_<structure>/covsel/res_ds*.rds` and writes 11 CSVs + 1 bundled `.rds` to `output/vae_covsel_aggregated/`.
+Once (some or all of) the sweep has landed on disk, roll the per-dataset `res_ds*.rds` records up into operating characteristics with `script/hpce_vae_covsel/aggregate_vae_covsel.R`. It scans `output/<sub>/N<N>/scn<SS>_<structure>/covsel/res_ds*.rds` and writes 11 CSVs + 1 bundled `.rds` to `output/vae_covsel_aggregated/`.
 
 **Key argument — `--sub` / `sub`** selects which run tree to scan. The full sweep lives in `output/vae_covsel_full/`, so pass `--sub vae_covsel_full` (the default is `vae_covsel_pilot`). `root` stays `output` — it is the common parent of both the input tree (`output/<sub>`) and the output tree (`output/vae_covsel_aggregated`).
 
 ### Approach A — command line (HPCE-friendly)
 
 ``` bash
-Rscript script/aggregate_vae_covsel.R --root output --sub vae_covsel_full
+Rscript script/hpce_vae_covsel/aggregate_vae_covsel.R --root output --sub vae_covsel_full
 # optional custom output dir:
-# Rscript script/aggregate_vae_covsel.R --root output --sub vae_covsel_full --out_dir output/vae_covsel_full_aggregated
+# Rscript script/hpce_vae_covsel/aggregate_vae_covsel.R --root output --sub vae_covsel_full --out_dir output/vae_covsel_full_aggregated
 ```
 
 ### Approach B — interactive R
 
 ``` r
-source("script/aggregate_vae_covsel.R")
+source("script/hpce_vae_covsel/aggregate_vae_covsel.R")
 res <- aggregate_vae_covsel_run(root = "output", sub = "vae_covsel_full")
 
 res$power                                                 # Power / PowerCN / PowerMinSuc per cell
@@ -331,7 +331,7 @@ It aggregates **whatever is on disk at call time** — partially-complete cells 
 2.  **Aggregation (`aggregate_vae_covsel.R`) — salvages existing runs.** `.ensure_selected()` rebuilds `covsel$selected` from `parFixed` whenever the stored value is `NULL`/empty (via a **dot-aware `.recover_selected_from_parfixed()`** matching both `beta.<param>.<cov>.<shape>` and legacy `beta_<param>_<cov>`), and `.ensure_relerr_backfill()` then fills the NA covariate-β rows of `rel_err` (`CLBW`, `CLcrCL`, `VcBW`, `VcSEX`) from the same recovered estimates — so **power, FP/FN, detection, AND per-β relative error / RMRSE / MARE all come back**. **No re-fit needed** — just re-aggregate the affected tree, e.g.:
 
     ``` bash
-    Rscript script/aggregate_vae_covsel.R --root output --sub vae_covsel_full0722
+    Rscript script/hpce_vae_covsel/aggregate_vae_covsel.R --root output --sub vae_covsel_full0722
     ```
 
     Validation on the hand-checked cell: `N300 × scn16 × ode` went from `Power = 0` to **`Power = 0.90`** (27/30 exact), all four true effects at `detection_rate = 1.0`, and covariate-β `rel_err` fully populated (e.g. `CLBW` −17 %, `CLcrCL` +10 %, `VcBW` −27 %, `VcSEX` −26 %).
