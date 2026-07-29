@@ -15,16 +15,25 @@
 #   r$diag / r$diag_t3  : convergence + stability flags
 #   r$rel_err           : tibble(parameter, true_value, estimate, abs_err,
 #                                 rel_err, rel_err_pct)
-#   r$covsel$selected   : tibble(var, covar, theta_name, estimate)  -- NO shape
+#   r$covsel$selected   : tibble(var, covar, shape, theta_name, estimate)
 #   r$covsel$true_set   : tibble(var, covar, shape)
 #   r$fit_runtime_sec, r$status, r$sample_N, r$scenario_id, r$dataset_id, ...
 #
-# SELECTION SCORING -- on (var, covar) ONLY.
-#   VAE has a single fixed covariate form (power for continuous, log-shift for
-#   categorical); functional shape is NOT a VAE degree of freedom, and
-#   r$covsel$selected carries no `shape` column.  We therefore score TP/FN/FP on
-#   (var, covar), mirroring the driver's own verdict.  `true_set` is read from
-#   each record (already derived per scenario from the PsN_scenarios indicators).
+# SELECTION SCORING -- on (var, covar, shape), like runSCM / PsN.
+#   nlmixr2est >= 7.0.2 searches a MULTI-SHAPE candidate space (power + lin per
+#   continuous covariate), so functional shape IS a degree of freedom and the
+#   promoted beta name carries it (beta.<param>.<cov>.<shape>).  A relationship
+#   is a TRUE POSITIVE only when the (var, covar) pair AND its shape match the
+#   truth; a right pair on the wrong shape scores FP (wrong-shape term) + FN
+#   (unmet true term).  Shape is normalised (lower-case, hockey* -> hockey) and
+#   an NA/absent shape on either side is a WILDCARD, so legacy records that
+#   never stored a shape fall back to (var, covar) matching.  `true_set` is read
+#   from each record (derived per scenario from the PsN_scenarios indicators).
+#   The downstream per-covariate rollup GROUPS on (var, covar, shape) -- exactly
+#   like compute_scm_covsel_by_covar -- so a true `power` term and its spurious
+#   `lin` shape-flip land on SEPARATE rows (true FN row + distractor FP row),
+#   keeping the VAE and SCM by-covar CSVs structurally identical and letting the
+#   shape-fold heatmap render both regimes.
 #
 # REFERENCE HANDLING (affects estimation metrics only, not selection).
 #   The data-generating model centres continuous covariates at FIXED references
@@ -47,14 +56,14 @@
 #   vae_file_index.csv      one row per discovered RDS
 #   vae_diag_long.csv       per fit: convergence, stability, timing, selection
 #   vae_rse_long.csv        per (fit, parameter): rel_err + param_class
-#   vae_covsel_long.csv     per (fit, var, covar): in_true / in_vae / verdict
+#   vae_covsel_long.csv     per (fit, var, covar, shape): in_true / in_vae / verdict
 #   vae_diag_rates.csv      per cell: %converged, CN, timing
 #   vae_estim_all.csv       per (cell, parameter): MedRE / MARE / RMRSE (all)
 #   vae_estim_success.csv   same, restricted to strictly-converged fits
 #   vae_estim_cond.csv      same, restricted to exact-match fits
 #   vae_power.csv           per cell: Power / PowerCN / PowerMinSuc
 #   vae_relpower.csv        per (cell, k): fraction recovering >= k true covs
-#   vae_covsel_by_covar.csv per (cell, var, covar): detection rate / TP-FP-FN
+#   vae_covsel_by_covar.csv per (cell, var, covar, shape): detection rate / TP-FP-FN
 #   vae_covsel_aggregated.rds  bundle of every tibble + params + created_at
 #
 # Usage:
@@ -85,40 +94,78 @@ suppressPackageStartupMessages({
   )
 }
 
-# ---- Selection scoring on (var, covar) ------------------------------------
+# ---- Selection scoring on (var, covar, shape) -----------------------------
+# Like runSCM / PsN, a relationship is only a TRUE POSITIVE when BOTH the
+# covariate-parameter pair AND its functional shape agree with the truth.  A
+# right pair carried on the WRONG shape (e.g. cl~BW selected as `lin` when truth
+# is `power`) scores as one FP (the wrong-shape term) plus one FN (the unmet
+# true term) -- exactly as a stepwise procedure that added the wrong basis.
+# Shape tokens are normalised (lower-cased, hockey* collapsed to `hockey`); an
+# NA/absent shape on either side acts as a WILDCARD so legacy records that never
+# stored a shape fall back to (var, covar) matching instead of scoring all-FN.
+.norm_shape <- function(s) {
+  s <- tolower(as.character(s))
+  s[grepl("^hockey", s)] <- "hockey"
+  s[s %in% c("", "na")] <- NA_character_
+  s
+}
+.shape_match <- function(a, b) is.na(a) | is.na(b) | (a == b)
+
 .canon_pairs <- function(tbl) {
   if (is.null(tbl) || !nrow(tbl))
-    return(tibble::tibble(var = character(), covar = character()))
-  tbl |>
-    dplyr::transmute(var = as.character(var), covar = as.character(covar)) |>
+    return(tibble::tibble(var = character(), covar = character(),
+                          shape = character()))
+  sh <- if ("shape" %in% names(tbl)) tbl$shape else NA_character_
+  tibble::tibble(var   = as.character(tbl$var),
+                 covar = as.character(tbl$covar),
+                 shape = .norm_shape(sh)) |>
     dplyr::distinct()
 }
 
 # ---- Backward-compat recovery of $covsel$selected -------------------------
 # The updated nlmixr2est (>= 7.0.0) makes `fit$theta` return NULL, so the driver
 # stored `covsel$selected = NULL` even though VAE DID promote covariates.  The
-# promoted beta_<PARAM>_<COV> coefficients survive in the record's parFixed
-# table (rownames = parameter, column "Estimate").  When `covsel$selected` is
-# missing/empty we rebuild it from parFixed so old runs re-score correctly --
-# no re-fit needed.  Mirrors the driver's own parser.
+# promoted beta coefficients survive in the record's parFixed table (rownames =
+# parameter, column "Estimate").  When `covsel$selected` is missing/empty we
+# rebuild it from parFixed so old runs re-score correctly -- no re-fit needed.
+# Mirrors the driver's own parser: matches BOTH the 7.0.1 underscore form
+# (beta_lTVCL_CRCL) and the 7.0.2 dot form (beta.lTVCL.CRCL.power), capturing
+# the shape token when present.
 .recover_selected_from_parfixed <- function(r) {
   pf <- r$parFixed
   if (!is.data.frame(pf) || !nrow(pf) || is.null(rownames(pf))) return(NULL)
   nms  <- rownames(pf)
-  hits <- grep("^beta_", nms, value = TRUE)
+  hits <- grep("^beta[._]", nms, value = TRUE)
   if (!length(hits)) return(NULL)
-  m     <- regmatches(hits, regexec("^beta_(lTV[[:alnum:]]+)_(.+)$", hits))
-  param <- vapply(m, function(x) if (length(x) == 3L) x[2] else NA_character_, character(1))
-  covar <- vapply(m, function(x) if (length(x) == 3L) x[3] else NA_character_, character(1))
-  var   <- unname(c(lTVCL = "cl", lTVVc = "vc")[param])
-  covar <- ifelse(toupper(covar) == "CRCL", "CrCL", covar)
-  est   <- if ("Estimate" %in% colnames(pf)) {
-    suppressWarnings(as.numeric(pf[hits, "Estimate"]))
-  } else rep(NA_real_, length(hits))
-  keep <- !is.na(var)
+  .param_to_var <- c(lTVCL = "cl", lTVVc = "vc", cl = "cl", vc = "vc")
+  .shape_tokens <- c("power", "lin", "log", "identity", "center",
+                     "hockey", "hockeyLow", "hockeyHi")
+  parsed <- lapply(hits, function(nm) {
+    toks <- strsplit(sub("^beta[._]", "", nm), "[._]")[[1]]
+    if (length(toks) < 2L) return(NULL)
+    param <- toks[1]
+    last  <- toks[length(toks)]
+    if (last %in% .shape_tokens) {
+      shape <- if (grepl("^hockey", last)) "hockey" else last
+      covar <- paste(toks[-c(1L, length(toks))], collapse = ".")
+    } else {
+      shape <- "cat"; covar <- paste(toks[-1L], collapse = ".")
+    }
+    data.frame(theta_name = nm,
+               var   = unname(.param_to_var[param]),
+               covar = ifelse(toupper(covar) == "CRCL", "CrCL", covar),
+               shape = shape, stringsAsFactors = FALSE)
+  })
+  parsed <- do.call(rbind, parsed[!vapply(parsed, is.null, logical(1))])
+  if (is.null(parsed) || !nrow(parsed)) return(NULL)
+  est <- if ("Estimate" %in% colnames(pf)) {
+    suppressWarnings(as.numeric(pf[parsed$theta_name, "Estimate"]))
+  } else rep(NA_real_, nrow(parsed))
+  keep <- !is.na(parsed$var)
   if (!any(keep)) return(NULL)
-  tibble::tibble(var = var[keep], covar = covar[keep],
-                 theta_name = hits[keep], estimate = est[keep])
+  tibble::tibble(var = parsed$var[keep], covar = parsed$covar[keep],
+                 shape = parsed$shape[keep],
+                 theta_name = parsed$theta_name[keep], estimate = est[keep])
 }
 
 # Ensure r$covsel$selected is populated: keep an existing non-empty value,
@@ -189,12 +236,22 @@ match_selected_to_truth <- function(selected, true_set) {
     return(list(n_true_hit = 0L, n_false_pos = 0L,
                 exact_match = (nrow(tru) == 0L)))
   }
-  true_hit  <- dplyr::inner_join(sel, tru, by = c("var", "covar"))
-  false_pos <- dplyr::anti_join(sel, tru, by = c("var", "covar"))
-  miss      <- dplyr::anti_join(tru, sel, by = c("var", "covar"))
-  list(n_true_hit  = nrow(true_hit),
-       n_false_pos = nrow(false_pos),
-       exact_match = (nrow(false_pos) == 0L) && (nrow(miss) == 0L))
+  # candidate matches share the (var, covar) pair; a match COUNTS only when the
+  # shape is also compatible (equal, or wildcard NA on either side).
+  j <- dplyr::inner_join(
+    dplyr::mutate(sel, .si = dplyr::row_number()),
+    dplyr::mutate(tru, .ti = dplyr::row_number()),
+    by = c("var", "covar"), suffix = c(".sel", ".tru"),
+    relationship = "many-to-many"
+  ) |>
+    dplyr::filter(.shape_match(shape.sel, shape.tru))
+  hit_sel <- unique(j$.si)
+  hit_tru <- unique(j$.ti)
+  n_false_pos <- nrow(sel) - length(hit_sel)
+  n_miss      <- nrow(tru) - length(hit_tru)
+  list(n_true_hit  = length(hit_tru),
+       n_false_pos = n_false_pos,
+       exact_match = (n_false_pos == 0L) && (n_miss == 0L))
 }
 
 # ---- Structural-intercept reference back-transform ------------------------
@@ -388,20 +445,24 @@ discover_vae_files <- function(root = "output",
   true_set <- .canon_pairs(r$covsel$true_set)
   selected <- .canon_pairs(r$covsel$selected)
   if (!nrow(true_set) && !nrow(selected)) return(tibble::tibble())
-  cmp <- dplyr::full_join(
-    dplyr::mutate(true_set, in_true = TRUE),
-    dplyr::mutate(selected, in_vae  = TRUE),
-    by = c("var", "covar")
-  ) |>
-    dplyr::mutate(
-      in_true = tidyr::replace_na(in_true, FALSE),
-      in_vae  = tidyr::replace_na(in_vae,  FALSE),
-      verdict = dplyr::case_when(
-        in_true &  in_vae ~ "TP",
-        in_true & !in_vae ~ "FN",
-        !in_true &  in_vae ~ "FP"
-      )
-    )
+  sel <- dplyr::mutate(selected, .si = dplyr::row_number())
+  tru <- dplyr::mutate(true_set, .ti = dplyr::row_number())
+  j <- dplyr::inner_join(sel, tru, by = c("var", "covar"),
+                         suffix = c(".sel", ".tru"),
+                         relationship = "many-to-many") |>
+    dplyr::filter(.shape_match(shape.sel, shape.tru))
+  hit_sel <- unique(j$.si)
+  hit_tru <- unique(j$.ti)
+  # TP: true rows whose shape was matched;  FN: true rows left unmatched;
+  # FP: selected rows (wrong pair OR wrong shape) left unmatched.
+  tp <- tru |> dplyr::filter(.ti %in% hit_tru) |>
+    dplyr::transmute(var, covar, shape, in_true = TRUE,  in_vae = TRUE,  verdict = "TP")
+  fn <- tru |> dplyr::filter(!.ti %in% hit_tru) |>
+    dplyr::transmute(var, covar, shape, in_true = TRUE,  in_vae = FALSE, verdict = "FN")
+  fp <- sel |> dplyr::filter(!.si %in% hit_sel) |>
+    dplyr::transmute(var, covar, shape, in_true = FALSE, in_vae = TRUE,  verdict = "FP")
+  cmp <- dplyr::bind_rows(tp, fn, fp)
+  if (!nrow(cmp)) return(tibble::tibble())
   tibble::tibble(
     sample_N   = r$sample_N    %||% meta$sample_N,
     scenario   = r$scenario_id %||% meta$scenario,
@@ -409,6 +470,7 @@ discover_vae_files <- function(root = "output",
     dataset_id = r$dataset_id  %||% meta$dataset_id,
     var        = cmp$var,
     covar      = cmp$covar,
+    shape      = cmp$shape,
     in_true    = cmp$in_true,
     in_vae     = cmp$in_vae,
     verdict    = cmp$verdict
@@ -592,14 +654,17 @@ compute_vae_relpower <- function(diag_long) {
 }
 
 # ---- Aggregation: per-covariate detection per cell ------------------------
-# For each (cell, var, covar): whether it is a TRUE covariate, and the fraction
-# of datasets in which VAE selected it.  For a true covariate this fraction is
-# its per-relationship sensitivity (marginal power); for a distractor it is the
-# per-relationship false-positive rate.
+# For each (cell, var, covar, SHAPE): whether it is a TRUE covariate term, and
+# the fraction of datasets in which VAE selected it.  Grouping INCLUDES shape
+# (matching compute_scm_covsel_by_covar) so a true `power` effect and its
+# spurious `lin` shape-flip occupy separate rows: the true row accrues FN when
+# VAE picks the wrong shape, the distractor `lin` row accrues FP.  For a true
+# term detection_rate is its per-relationship sensitivity (marginal power); for
+# a distractor shape/pair it is the per-relationship false-positive rate.
 compute_vae_covsel_by_covar <- function(covsel_long) {
   if (!nrow(covsel_long)) return(tibble::tibble())
   covsel_long |>
-    dplyr::group_by(sample_N, scenario, structure, var, covar) |>
+    dplyr::group_by(sample_N, scenario, structure, var, covar, shape) |>
     dplyr::summarise(
       n_datasets     = dplyr::n(),
       is_true        = any(in_true %in% TRUE),
@@ -610,7 +675,8 @@ compute_vae_covsel_by_covar <- function(covsel_long) {
       n_FP           = sum(verdict == "FP", na.rm = TRUE),
       .groups        = "drop"
     ) |>
-    dplyr::arrange(sample_N, scenario, structure, dplyr::desc(is_true), var, covar)
+    dplyr::arrange(sample_N, scenario, structure, dplyr::desc(is_true),
+                   var, covar, shape)
 }
 
 # ---- Top-level driver -----------------------------------------------------

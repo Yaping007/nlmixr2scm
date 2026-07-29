@@ -53,11 +53,22 @@ suppressPackageStartupMessages({
   getwd()
 })()
 
-source(file.path(.script_dir, "refit_helpers.R"))
-source(file.path(.script_dir, "true_model_factory.R"))
-source(file.path(.script_dir, "scm_bench_helpers.R"))
-source(file.path(.script_dir, "output_schema.R"))
-source(file.path(.script_dir, "estimator_factory.R"))
+# Location-robust helper sourcing: the five helpers live in the top-level
+# `script/` dir, but this driver may itself sit in `script/` OR a subfolder
+# (e.g. `script/hpce_vae_covsel/`).  Search `.script_dir`, its parent, and
+# `script/` so the driver works from either location without edits.
+.source_helper <- function(f) {
+  cand <- unique(c(file.path(.script_dir, f),
+                   file.path(dirname(.script_dir), f),
+                   file.path("script", f)))
+  hit <- cand[file.exists(cand)]
+  if (!length(hit)) stop("helper not found: ", f,
+                         " (looked in: ", paste(cand, collapse = ", "), ")")
+  source(hit[1])
+}
+invisible(lapply(c("refit_helpers.R", "true_model_factory.R",
+                   "scm_bench_helpers.R", "output_schema.R",
+                   "estimator_factory.R"), .source_helper))
 
 # ---- CLI -------------------------------------------------------------------
 parse_args <- function(argv) {
@@ -161,8 +172,29 @@ base_mod <- switch(opts$structure,
 )
 
 # ---- VAE control: covariate selection ON (the "one run") -------------------
+# Search space PINNED to the runSCM / PsN candidate set (nlmixr2est 7.0.2).
+# This is SCENARIO-INDEPENDENT: every scenario 1..16 searches the SAME menu of
+# candidates (cl,vc x BW,CrCL,BMI in {power,lin} + SEX,RACE cat = 16 candidates);
+# only the TRUE active subset differs per scenario, and that is captured wholly
+# by `true_set` (derived above from PsN_scenarios).  Naming the covariates with
+# fixCov=TRUE restricts the search to exactly these five; SEX/RACE = TRUE marks
+# them eligible (auto "cat").  covCenter pins PsN's physiological anchors
+# (BW=70, CrCL=95); BMI keeps the data median (covCenterType="median"), matching
+# PsN (BMI at median) and SCM (median centering).  The power exponent is
+# centring-invariant, so coefficients stay comparable to truth.
 vae_ctrl <- nlmixr2est::vaeControl(
   covariateSelection = TRUE,
+  shapes = list(
+    BW   = c("power", "lin"),
+    CrCL = c("power", "lin"),
+    BMI  = c("power", "lin"),
+    SEX  = TRUE,       # categorical -> auto "cat"
+    RACE = TRUE,       # categorical -> auto "cat"
+    fixCov = TRUE      # search ONLY these five covariates (match SCM/PsN)
+  ),
+  covCenter          = c(BW = 70, CrCL = 95),  # PsN physiological anchors
+  covCenterType      = "median",               # BMI -> median (SCM/PsN default)
+  catCutoff          = 0.05,
   covMethod          = "r,s",
   calcTables         = TRUE,
   print              = 0
@@ -197,20 +229,39 @@ rec <- assemble_common(
   estimator   = "vae"
 )
 
-# ---- $covsel block: parse VAE's promoted beta_<PARAM>_<COV> terms ----------
-.param_to_var <- c(lTVCL = "cl", lTVVc = "vc")
+# ---- $covsel block: parse VAE's promoted beta coefficients -----------------
+# nlmixr2est 7.0.2 renamed the promoted covariate coefficients from the 7.0.1
+# underscore form (beta_lTVCL_CRCL) to a DOT-separated form:
+#   beta.<param>.<cov>.<shape>   e.g. beta.lTVCL.CRCL.power / beta.lTVVc.BW.lin
+#   beta.<param>.<cov>[.<level>] for categoricals   e.g. beta.lTVVc.SEX
+# The parser below matches BOTH separators (^beta[._]) and captures the shape.
+.param_to_var <- c(lTVCL = "cl", lTVVc = "vc", cl = "cl", vc = "vc")
 .norm_covar   <- function(x) ifelse(toupper(x) == "CRCL", "CrCL", x)
+.shape_tokens <- c("power", "lin", "log", "identity", "center",
+                   "hockey", "hockeyLow", "hockeyHi")
 
 .parse_beta_theta <- function(nms) {
-  hits <- grep("^beta_", nms, value = TRUE)
-  if (length(hits) == 0L)
-    return(tibble::tibble(theta_name = character(), var = character(), covar = character()))
-  m <- regmatches(hits, regexec("^beta_(lTV[[:alnum:]]+)_(.+)$", hits))
-  param <- vapply(m, function(x) if (length(x) == 3L) x[2] else NA_character_, character(1))
-  covar <- vapply(m, function(x) if (length(x) == 3L) x[3] else NA_character_, character(1))
-  tibble::tibble(theta_name = hits,
-                 var   = unname(.param_to_var[param]),
-                 covar = .norm_covar(covar))
+  empty <- tibble::tibble(theta_name = character(), var = character(),
+                          covar = character(), shape = character())
+  hits <- grep("^beta[._]", nms, value = TRUE)
+  if (length(hits) == 0L) return(empty)
+  rows <- lapply(hits, function(nm) {
+    toks <- strsplit(sub("^beta[._]", "", nm), "[._]")[[1]]
+    if (length(toks) < 2L) return(NULL)
+    param <- toks[1]
+    last  <- toks[length(toks)]
+    if (last %in% .shape_tokens) {
+      shape <- if (grepl("^hockey", last)) "hockey" else last
+      covar <- paste(toks[-c(1L, length(toks))], collapse = ".")
+    } else {
+      shape <- "cat"; covar <- paste(toks[-1L], collapse = ".")
+    }
+    tibble::tibble(theta_name = nm,
+                   var   = unname(.param_to_var[param]),
+                   covar = .norm_covar(covar), shape = shape)
+  })
+  out <- dplyr::bind_rows(rows)
+  if (is.null(out) || nrow(out) == 0L) empty else out
 }
 
 # Version-robust source of the promoted beta_* coefficients.  The updated
@@ -247,13 +298,13 @@ selected <- if (!is.null(fit) && !is.null(th_est)) {
     bt |>
       dplyr::mutate(estimate = unname(th_est[theta_name])) |>
       dplyr::filter(!is.na(var)) |>
-      dplyr::select(var, covar, theta_name, estimate) |>
+      dplyr::select(var, covar, shape, theta_name, estimate) |>
       dplyr::arrange(dplyr::desc(abs(estimate)))
   } else NULL
 } else NULL
 
 # Loud diagnostic: a converged VAE that promoted NOTHING is plausible only for
-# the null scenario (scn 1).  If beta_ terms are absent for a scenario that HAS
+# the null scenario (scn 1).  If beta terms are absent for a scenario that HAS
 # true covariates, the extraction path is broken -- warn so it is not silently
 # scored as all-FN (the exact failure mode of the fit$theta -> NULL regression).
 if (!is.null(fit)) {
@@ -261,7 +312,7 @@ if (!is.null(fit)) {
   n_sel_here  <- if (!is.null(selected)) nrow(selected) else 0L
   if (n_sel_here == 0L && n_true_here > 0L) {
     warning(sprintf(
-      paste0("[vae|covsel] extracted 0 promoted beta_* terms but scenario %s ",
+      paste0("[vae|covsel] extracted 0 promoted beta.* terms but scenario %s ",
              "has %d true covariate(s). parFixed rownames = {%s}. ",
              "Selection scoring will be all-FN -- check the nlmixr2est parameter API."),
       opts$scenario, n_true_here,
@@ -327,26 +378,39 @@ message(sprintf("<<< [vae|covsel] done in %.1fs  objf=%s  converged=%s",
                 runtime_sec, format(rec$objf %||% NA), format(rec$converged %||% NA)))
 
 sel_pairs <- if (!is.null(selected)) {
-  dplyr::select(selected, var, covar)
+  dplyr::select(selected, var, covar, shape)
 } else {
-  tibble::tibble(var = character(), covar = character())
+  tibble::tibble(var = character(), covar = character(), shape = character())
 }
 
-cmp <- dplyr::full_join(
-  dplyr::mutate(dplyr::select(true_set, var, covar), in_true = TRUE),
-  dplyr::mutate(sel_pairs, in_vae = TRUE),
-  by = c("var", "covar")
-) |>
-  dplyr::distinct() |>
-  dplyr::mutate(
-    in_true = tidyr::replace_na(in_true, FALSE),
-    in_vae  = tidyr::replace_na(in_vae,  FALSE),
-    verdict = dplyr::case_when(
-      in_true &  in_vae ~ "TP (correct)",
-      in_true & !in_vae ~ "FN (missed)",
-     !in_true &  in_vae ~ "FP (spurious)"
-    )
-  )
+# Shape-aware scoring (like runSCM / PsN): a relationship is TP only when the
+# (var, covar) pair AND its functional shape agree with the truth.  A right pair
+# on the wrong shape scores FP (wrong-shape term) + FN (unmet true term).
+.norm_shape <- function(s) {
+  s <- tolower(as.character(s)); s[grepl("^hockey", s)] <- "hockey"
+  s[s %in% c("", "na")] <- NA_character_; s
+}
+.shape_match <- function(a, b) is.na(a) | is.na(b) | (a == b)
+
+tru <- dplyr::transmute(true_set,
+                        var = as.character(var), covar = as.character(covar),
+                        shape = .norm_shape(shape), .ti = dplyr::row_number())
+sel <- dplyr::transmute(sel_pairs,
+                        var = as.character(var), covar = as.character(covar),
+                        shape = .norm_shape(shape), .si = dplyr::row_number())
+j <- dplyr::inner_join(sel, tru, by = c("var", "covar"),
+                       suffix = c(".sel", ".tru"),
+                       relationship = "many-to-many") |>
+  dplyr::filter(.shape_match(shape.sel, shape.tru))
+hit_sel <- unique(j$.si); hit_tru <- unique(j$.ti)
+cmp <- dplyr::bind_rows(
+  tru |> dplyr::filter(.ti %in% hit_tru) |>
+    dplyr::transmute(var, covar, shape, verdict = "TP (correct)"),
+  tru |> dplyr::filter(!.ti %in% hit_tru) |>
+    dplyr::transmute(var, covar, shape, verdict = "FN (missed)"),
+  sel |> dplyr::filter(!.si %in% hit_sel) |>
+    dplyr::transmute(var, covar, shape, verdict = "FP (spurious)")
+)
 
 if (nrow(cmp)) {
   message("\nSelection vs. truth (covariate x parameter):")
