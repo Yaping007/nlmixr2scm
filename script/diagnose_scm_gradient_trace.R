@@ -54,14 +54,20 @@ OPTS <- list(
   # (estimator, optimizer) cells to trace. focei/bobyqa is the reference and
   # also supplies the warm starting theta values reused by the gradient cells.
   cells        = list(
-    c("focei",  "bobyqa"),
-    c("focei",  "nlminb"),
-    c("focei",  "lbfgsb3c"),
-    c("foceif", "nlminb"),
-    c("foceif", "lbfgsb3c")
+    c("focei",      "bobyqa"),
+    c("focei",      "nlminb"),
+    c("focei",      "lbfgsb3c"),
+    c("foceif",     "nlminb"),
+    c("foceif",     "lbfgsb3c"),
+    c("irlsfoceif", "lbfgsb3c")
   ),
   warm_src     = "focei/bobyqa",          # cell whose thetas seed the warm arm
   cov_bound    = c(-5, 5),                # runSCM default candidate bounds
+  # structure: "ode" uses the explicit d/dt() base model (unlocks the Almquist
+  # analytic outer gradient -> the fd_switch mechanism is testable); "linCmt"
+  # uses the analytic linCmt() base (fast is auto-disabled, switch is always
+  # NA/FALSE). Override with env DIAG_STRUCTURE=ode|linCmt.
+  structure    = Sys.getenv("DIAG_STRUCTURE", "ode"),
   out_rds      = "output/diag/scm_gradient_trace_N80_scn16_ds01.rds"
 )
 
@@ -73,6 +79,11 @@ OPTS <- list(
 })()
 source(file.path(.script_dir, "scm_bench_helpers.R"))   # base model + to_nm_dataset
 source(file.path(.script_dir, "estimator_factory.R"))   # make_est_control
+
+# to_nm_dataset() reads the fixed study dose from the global DOSE_MG constant
+# (defined in the bench drivers, not the helper). Mirror it here so the
+# diagnostic can build the NM dataset standalone.
+if (!exists("DOSE_MG")) DOSE_MG <- 100
 
 # ---- Load the exact dataset the bench uses --------------------------------
 sim_path <- file.path(OPTS$input_root, sprintf("sim_obs_N%d", OPTS$N),
@@ -130,15 +141,30 @@ make_candidate_ui <- function(target, theta_name, term, cov_init,
     sprintf("eta.cl + eta.vc ~ c(%.8g, %.8g, %.8g)", o11, o21, o22),
     sprintf("prop.err <- %.10g", prop)
   )
-  model_lines <- c(
-    sprintf("cl <- exp(lTVCL%s + eta.cl)", term_cl),
-    sprintf("vc <- exp(lTVVc%s + eta.vc)", term_vc),
-    "q  <- exp(lTVQ)",
-    "vp <- exp(lTVVp)",
-    "ka <- exp(lTVKA)",
-    "cp <- linCmt()",
-    "cp ~ prop(prop.err)"
-  )
+  model_lines <- if (identical(OPTS$structure, "ode")) {
+    c(
+      sprintf("cl <- exp(lTVCL%s + eta.cl)", term_cl),
+      sprintf("vc <- exp(lTVVc%s + eta.vc)", term_vc),
+      "q  <- exp(lTVQ)",
+      "vp <- exp(lTVVp)",
+      "ka <- exp(lTVKA)",
+      "d/dt(depot)   <- -ka * depot",
+      "d/dt(central) <-  ka * depot - (cl/vc)*central - (q/vc)*central + (q/vp)*periph",
+      "d/dt(periph)  <-  (q/vc)*central - (q/vp)*periph",
+      "cp <- central/vc",
+      "cp ~ prop(prop.err)"
+    )
+  } else {
+    c(
+      sprintf("cl <- exp(lTVCL%s + eta.cl)", term_cl),
+      sprintf("vc <- exp(lTVVc%s + eta.vc)", term_vc),
+      "q  <- exp(lTVQ)",
+      "vp <- exp(lTVVp)",
+      "ka <- exp(lTVKA)",
+      "cp <- linCmt()",
+      "cp ~ prop(prop.err)"
+    )
+  }
   fn_text <- paste0(
     "function() {\n  ini({\n    ",
     paste(ini_lines, collapse = "\n    "),
@@ -154,17 +180,23 @@ summarise_fit <- function(fit, base_objf, theta_name) {
   if (is.null(fit) || isTRUE(fit$.failed)) {
     return(list(objf = NA_real_, dOFV = NA_real_, pchisqr = NA_real_,
                 theta_hat = NA_real_, conv = NA_integer_, msg = "FIT ERROR",
-                cn = NA_real_, cov_ok = NA))
+                cn = NA_real_, cov_ok = NA, switch = NA))
   }
   d <- diagnose_fit(fit)                       # from scm_bench_helpers.R
   objf <- as.numeric(fit$objf)
   dOFV <- base_objf - objf                     # forward-step convention
   pch  <- if (is.finite(dOFV) && dOFV > 0) 1 - stats::pchisq(dOFV, df = 1) else 1
   th   <- suppressWarnings(as.numeric(fit$theta[theta_name]))
+  # Did the Almquist analytic OUTER gradient fall back to finite differences
+  # for any iteration? This is the mechanism-A signal: fast=TRUE estimators
+  # (foceif/irlsfoceif) log "could not be solved at this point" in $runInfo
+  # when fallbackFD fires. focei (fast=FALSE) never has this -> NA.
+  ri   <- tryCatch(fit$runInfo, error = function(e) NULL)
+  swtch <- if (is.null(ri)) NA else any(grepl("could not be solved", ri))
   list(objf = objf, dOFV = dOFV, pchisqr = pch,
        theta_hat = if (length(th)) th else NA_real_,
        conv = d$convergence_code, msg = d$message %||% "",
-       cn = d$cond_num_cor, cov_ok = d$cov_ok)
+       cn = d$cond_num_cor, cov_ok = d$cov_ok, switch = swtch)
 }
 
 # ---- Main sweep ------------------------------------------------------------
@@ -175,7 +207,10 @@ for (cell in OPTS$cells) {
   est <- cell[1]; opt <- cell[2]; cell_key <- paste(est, opt, sep = "/")
   message(sprintf("\n===== base fit: %s =====", cell_key))
   ctrl <- make_est_control(est, opt, "screen")$ctrl
-  bf <- tryCatch(nlmixr2(base_2cmt_oral_linCmt, ds_i, est = est, control = ctrl),
+  base_model <- if (identical(OPTS$structure, "ode"))
+    base_2cmt_oral_ode else base_2cmt_oral_linCmt
+  bf <- tryCatch(nlmixr2(base_model, ds_i,
+                         est = nlmixr_est_name(est), control = ctrl),
                  error = function(e) { message("base failed: ", conditionMessage(e)); NULL })
   if (is.null(bf)) next
   base_fits[[cell_key]] <- bf
@@ -189,7 +224,8 @@ for (cell in OPTS$cells) {
     cc <- candidates[k, ]
     ui <- make_candidate_ui(cc$target, cc$theta_name, cc$term, cov_init = 0,
                             base_theta = base_theta, base_omega = base_omega)
-    f <- tryCatch(suppressWarnings(nlmixr2(ui, ds_i, est = est, control = ctrl)),
+    f <- tryCatch(suppressWarnings(nlmixr2(ui, ds_i,
+                                           est = nlmixr_est_name(est), control = ctrl)),
                   error = function(e) list(.failed = TRUE))
     s <- summarise_fit(f, base_objf, cc$theta_name)
     rows[[length(rows) + 1L]] <- tibble::tibble(
@@ -197,12 +233,12 @@ for (cell in OPTS$cells) {
       candidate = cc$key, truth = cc$truth,
       base_objf = base_objf, cand_objf = s$objf, dOFV = s$dOFV,
       pchisqr = s$pchisqr, theta_hat = s$theta_hat,
-      conv = s$conv, msg = s$msg, cn = s$cn
+      conv = s$conv, msg = s$msg, cn = s$cn, switch = s$switch
     )
-    message(sprintf("  [cold|%-15s] %-14s dOFV=%9.2f  p=%.3g  theta=%s  conv=%s  '%s'",
+    message(sprintf("  [cold|%-18s] %-14s dOFV=%9.2f  p=%.3g  theta=%s  conv=%s  fd_switch=%s  '%s'",
                     cell_key, cc$key, s$dOFV, s$pchisqr,
                     formatC(s$theta_hat, format = "g", digits = 3),
-                    s$conv, s$msg))
+                    s$conv, s$switch, s$msg))
   }
 }
 
@@ -230,7 +266,8 @@ for (cell in warm_cells) {
     ui <- make_candidate_ui(cc$target, cc$theta_name, cc$term,
                             cov_init = warm_init,
                             base_theta = bf$theta, base_omega = bf$omega)
-    f <- tryCatch(suppressWarnings(nlmixr2(ui, ds_i, est = est, control = ctrl)),
+    f <- tryCatch(suppressWarnings(nlmixr2(ui, ds_i,
+                                           est = nlmixr_est_name(est), control = ctrl)),
                   error = function(e) list(.failed = TRUE))
     s <- summarise_fit(f, base_objf, cc$theta_name)
     moved <- is.finite(s$theta_hat) && abs(s$theta_hat - warm_init) > 1e-4
@@ -239,13 +276,13 @@ for (cell in warm_cells) {
       candidate = cc$key, truth = cc$truth,
       base_objf = base_objf, cand_objf = s$objf, dOFV = s$dOFV,
       pchisqr = s$pchisqr, theta_hat = s$theta_hat,
-      conv = s$conv, msg = s$msg, cn = s$cn
+      conv = s$conv, msg = s$msg, cn = s$cn, switch = s$switch
     )
-    message(sprintf("  [warm|%-15s] %-14s init=%.3f -> theta=%s (%s)  dOFV=%9.2f  conv=%s  '%s'",
+    message(sprintf("  [warm|%-18s] %-14s init=%.3f -> theta=%s (%s)  dOFV=%9.2f  conv=%s  fd_switch=%s  '%s'",
                     cell_key, cc$key, warm_init,
                     formatC(s$theta_hat, format = "g", digits = 3),
                     if (moved) "MOVED" else "FROZEN",
-                    s$dOFV, s$conv, s$msg))
+                    s$dOFV, s$conv, s$switch, s$msg))
   }
 }
 
@@ -253,8 +290,8 @@ trace_tbl <- dplyr::bind_rows(rows)
 
 # ---- Report ----------------------------------------------------------------
 cat("\n\n================ SCM GRADIENT MECHANISM TRACE ================\n")
-cat(sprintf("N=%d  scenario=%d  dataset=%d\n\n",
-            OPTS$N, OPTS$scenario, OPTS$dataset))
+cat(sprintf("N=%d  scenario=%d  dataset=%d  structure=%s\n\n",
+            OPTS$N, OPTS$scenario, OPTS$dataset, OPTS$structure))
 
 cat("---- dOFV per candidate (LRT threshold chi2_1 @0.05 = 3.84) ----\n")
 wide <- trace_tbl |>
@@ -281,6 +318,16 @@ warm_diag <- trace_tbl |>
   dplyr::arrange(cell, candidate)
 print(as.data.frame(warm_diag), right = FALSE)
 
+cat("\n---- analytic outer gradient -> FD fallback (mechanism A) ----\n")
+cat("TRUE  = the Almquist analytic gradient 'could not be solved' for >=1\n",
+    "        iteration and fallbackFD swapped in an FD gradient (poisons the\n",
+    "        quasi-Newton curvature). NA = fast=FALSE estimator (focei).\n", sep = "")
+switch_diag <- trace_tbl |>
+  dplyr::mutate(col = paste(arm, cell, sep = " | ")) |>
+  dplyr::select(candidate, truth, col, switch) |>
+  tidyr::pivot_wider(names_from = col, values_from = switch)
+print(as.data.frame(switch_diag), right = FALSE)
+
 cat("\n---- convergence codes / messages ----\n")
 print(as.data.frame(
   trace_tbl |>
@@ -304,4 +351,8 @@ cat("* If TRUE-covariate dOFV is large under cold/bobyqa but ~0 under\n",
     "  is the correct fix, and gradient optimizers CAN stand on their own.\n",
     "* If warm_theta/nlminb dOFV stays ~0 even when started at the answer,\n",
     "  the surface noise itself defeats the FD gradient -> derivative-free\n",
-    "  screening is required (a legitimate scientific finding).\n", sep = "")
+    "  screening is required (a legitimate scientific finding).\n",
+    "* If irlsfoceif/lbfgsb3c shows switch=TRUE on the candidates it botches,\n",
+    "  the corruption is mechanism A (analytic->FD gradient swapping poisons\n",
+    "  the quasi-Newton Hessian). Fix 1 (sensitivity-matched atolSens/rtolSens\n",
+    "  in estimator_factory.R) should flip those to switch=FALSE.\n", sep = "")

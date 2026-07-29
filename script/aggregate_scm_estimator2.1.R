@@ -17,8 +17,12 @@
 #  estimator/outer_opt grouping keys; the *.fit.rds sidecars are skipped.)
 #
 # Grouping cell = (sample_N, scenario, structure, estimator, outer_opt).
-# The completed sweep is focei_bobyqa only, but the keys are kept general so
-# additional estimator x optimizer cells aggregate without change.
+# The active sweep (2026-07-23) is the IRLS-vs-FOCEi speed comparison --
+# focei_bobyqa and irlsfocei_bobyqa -- but the keys are fully general, so any
+# additional estimator x optimizer cell (e.g. the parked irlsfoceif_lbfgsb3c or
+# foceif_* combos) aggregates without change. The <est>_<opt> directory level is
+# split on its LAST underscore, so multi-token labels like "irlsfocei_bobyqa"
+# parse to estimator="irlsfocei", outer_opt="bobyqa".
 #
 # RECORD SHAPE (schema 2.1, from package_scm_schema21):
 #   r$diag / r$diag_t3 : convergence + stability flags (same as VAE / refit)
@@ -126,6 +130,99 @@ suppressPackageStartupMessages({
   )
 }
 
+# ---- Structural-intercept reference alignment -----------------------------
+# The DGP centres CL/Vc on FIXED constants (BW = 70, CrCL = 95).  runSCM instead
+# centres each SELECTED continuous covariate on the sample MEDIAN of the
+# one-row-per-subject covariate distribution (see R/scm.R: pairs$center[i] <-
+# median(subj_data[[col]])).  Consequently exp(lTVCL) / exp(lTVVc) from an SCM
+# fit are the CL / Vc AT THE MEDIAN covariate values, not at 70 / 95, so a naive
+# comparison against the truth conflates real bias with a centring artefact.
+#
+# We rescale the intercept ESTIMATE back onto the 70 / 95 anchor using the fit's
+# OWN power betas (which are reference-invariant):
+#   TVCL@70/95 = TVCL_hat * (70/median(BW))^b_CLBW * (95/median(CrCL))^b_CLcrCL
+#   TVVc@70    = TVVc_hat * (70/median(BW))^b_VcBW
+# Only covariates actually SELECTED carry a finite beta, so the adjustment is
+# self-consistent: an unselected covariate leaves the corresponding intercept
+# untouched (it was never centred on that covariate).  This mirrors the VAE
+# aggregator, which uses the MEAN instead of the MEDIAN.
+.COV_REF_BW   <- 70       # DGP BW_REF
+.COV_REF_CRCL <- 95       # DGP CRCL_REF
+.COV_REF_STAT <- stats::median  # runSCM centres continuous covariates at MEDIAN
+
+# cache of per-(sample_N, scenario, dataset_id) covariate reference values
+.cov_ref_cache <- new.env(parent = emptyenv())
+
+.cov_ref_values <- function(sample_N, scenario, dataset_id,
+                            input_root = "Inputdataset") {
+  if (is.na(sample_N) || is.na(scenario) || is.na(dataset_id)) return(NULL)
+  key <- paste(sample_N, scenario, dataset_id, sep = "|")
+  hit <- .cov_ref_cache[[key]]
+  if (!is.null(hit)) return(hit$val)          # cached (may be NULL result)
+  path <- file.path(input_root, sprintf("sim_obs_N%s", sample_N),
+                    sprintf("sim_obs_scenario_%s.rds", scenario))
+  out <- NULL
+  if (file.exists(path)) {
+    d <- tryCatch(readRDS(path), error = function(e) NULL)
+    if (!is.null(d) && all(c("DATASET", "SUBJECT", "BW", "CrCL") %in% names(d))) {
+      d1 <- d[d$DATASET == dataset_id, , drop = FALSE]
+      d1 <- d1[!duplicated(d1$SUBJECT), , drop = FALSE]
+      if (nrow(d1)) {
+        out <- list(BW   = .COV_REF_STAT(d1$BW,   na.rm = TRUE),
+                    CrCL = .COV_REF_STAT(d1$CrCL, na.rm = TRUE))
+      }
+    }
+  }
+  .cov_ref_cache[[key]] <- list(val = out)     # memoise (including NULL)
+  out
+}
+
+# Rescale TVCL / TVVc estimate onto the fixed 70 / 95 reference.  Applied to
+# every SCM candidate fit; the refit-TRUE model (already centred on 70 / 95) is
+# aggregated elsewhere and is not in scope here.
+.backtransform_intercepts <- function(r, meta) {
+  estimator <- as.character(r$estimator %||% meta$estimator %||% "")
+  if (grepl("true", estimator, ignore.case = TRUE)) return(r)  # never touch truth
+  rel <- r$rel_err
+  if (is.null(rel) || !nrow(rel) || is.null(rel$estimate)) return(r)
+
+  gete <- function(p) {
+    v <- suppressWarnings(as.numeric(rel$estimate[rel$parameter == p]))
+    if (length(v) == 1L) v else NA_real_
+  }
+  b_clbw <- gete("CLBW"); b_clcr <- gete("CLcrCL"); b_vcbw <- gete("VcBW")
+
+  ref <- .cov_ref_values(r$sample_N    %||% meta$sample_N,
+                         r$scenario_id %||% meta$scenario,
+                         r$dataset_id  %||% meta$dataset_id)
+  if (is.null(ref)) return(r)                  # sim file missing -> leave as-is
+  fBW   <- .COV_REF_BW   / ref$BW
+  fCRCL <- .COV_REF_CRCL / ref$CrCL
+
+  i_cl <- which(rel$parameter == "TVCL")
+  if (length(i_cl) == 1L && is.finite(rel$estimate[i_cl]) &&
+      (is.finite(b_clbw) || is.finite(b_clcr))) {
+    fac <- 1
+    if (is.finite(b_clbw)) fac <- fac * fBW^b_clbw
+    if (is.finite(b_clcr)) fac <- fac * fCRCL^b_clcr
+    rel$estimate[i_cl] <- rel$estimate[i_cl] * fac
+  }
+  i_vc <- which(rel$parameter == "TVVc")
+  if (length(i_vc) == 1L && is.finite(rel$estimate[i_vc]) && is.finite(b_vcbw)) {
+    rel$estimate[i_vc] <- rel$estimate[i_vc] * fBW^b_vcbw
+  }
+
+  # recompute error columns on the rescaled intercept estimates
+  rel$abs_err     <- ifelse(is.na(rel$estimate) | is.na(rel$true_value),
+                            NA_real_, rel$estimate - rel$true_value)
+  rel$rel_err     <- ifelse(is.na(rel$estimate) | is.na(rel$true_value) |
+                              rel$true_value == 0,
+                            NA_real_, (rel$estimate - rel$true_value) / rel$true_value)
+  rel$rel_err_pct <- rel$rel_err * 100
+  r$rel_err <- rel
+  r
+}
+
 # ---- Selection scoring on (var, covar, shape) -----------------------------
 # Shape-aware exact match, matching the linCmt HPCE_OC_Aggreation.r definition
 # (match_selected_to_truth joins by c("var","covar","shape")). runSCM emits
@@ -139,9 +236,14 @@ suppressPackageStartupMessages({
   if (is.null(tbl) || !nrow(tbl))
     return(tibble::tibble(var = character(), covar = character(), shape = character()))
   sh <- if ("shape" %in% names(tbl)) as.character(tbl$shape) else NA_character_
+  # Covariate names come from two sources with different casing conventions:
+  # the truth set hard-codes mixed case (e.g. "CrCL"), while the PsN parser
+  # emits the model-tag casing (e.g. "CRCL"). Fold covar (and var) to a common
+  # case so cl~CrCL truth matches cl~CRCL selection instead of silently missing
+  # (which zeroed power for every CrCL-active scenario: 5-8, 13-16).
   tibble::tibble(
-    var   = as.character(tbl$var),
-    covar = as.character(tbl$covar),
+    var   = toupper(as.character(tbl$var)),
+    covar = toupper(as.character(tbl$covar)),
     shape = dplyr::if_else(grepl("^[0-9]+$", sh), "cat", sh)
   ) |>
     dplyr::distinct()
@@ -259,6 +361,7 @@ discover_scm_files <- function(root = "output", sub = "scm_bench") {
 }
 
 .unpack_rse <- function(r, meta) {
+  r   <- .backtransform_intercepts(r, meta)
   rel <- r$rel_err
   if (is.null(rel) || !nrow(rel)) return(tibble::tibble())
   tibble::tibble(
@@ -497,21 +600,44 @@ compute_scm_relpower <- function(diag_long) {
 }
 
 # ---- Aggregation: per-covariate detection per cell ------------------------
-compute_scm_covsel_by_covar <- function(covsel_long) {
+# DENOMINATOR (`n_datasets`) = the cell's TRUE dataset count from `diag_long`
+# (one row per fit), NOT the per-(var,covar,shape) appearance count.  A
+# distractor only appears in covsel_long when falsely selected, so an
+# appearance-based denominator would make n_FP / n_datasets ~ 1 for every
+# distractor.  Using the fit count makes detection_rate correct for both true
+# terms (sensitivity) and distractors (false-positive rate), with no downstream
+# N_cell work-around; it matches compute_scm_diag_rates()$n_total.
+compute_scm_covsel_by_covar <- function(covsel_long, diag_long = NULL) {
   if (!nrow(covsel_long)) return(tibble::tibble())
+  cell_key <- c("sample_N", "scenario", "structure", "estimator", "outer_opt")
+  n_cell <- if (!is.null(diag_long) && nrow(diag_long)) {
+    diag_long |>
+      dplyr::group_by(dplyr::across(dplyr::all_of(cell_key))) |>
+      dplyr::summarise(n_datasets = dplyr::n_distinct(dataset_id),
+                       .groups = "drop")
+  } else {
+    covsel_long |>
+      dplyr::group_by(dplyr::across(dplyr::all_of(cell_key))) |>
+      dplyr::summarise(n_datasets = dplyr::n_distinct(dataset_id),
+                       .groups = "drop")
+  }
   covsel_long |>
     dplyr::group_by(sample_N, scenario, structure, estimator, outer_opt,
                     var, covar, shape) |>
     dplyr::summarise(
-      n_datasets     = dplyr::n(),
       is_true        = any(in_true %in% TRUE),
       n_detected     = sum(in_scm %in% TRUE),
-      detection_rate = mean(in_scm %in% TRUE),
       n_TP           = sum(verdict == "TP", na.rm = TRUE),
       n_FN           = sum(verdict == "FN", na.rm = TRUE),
       n_FP           = sum(verdict == "FP", na.rm = TRUE),
       .groups        = "drop"
     ) |>
+    dplyr::left_join(n_cell, by = cell_key) |>
+    dplyr::mutate(detection_rate = dplyr::if_else(n_datasets > 0,
+                                                  n_detected / n_datasets,
+                                                  NA_real_)) |>
+    dplyr::relocate(n_datasets, is_true, n_detected, detection_rate,
+                    .after = shape) |>
     dplyr::arrange(sample_N, scenario, structure, estimator, outer_opt,
                    dplyr::desc(is_true), var, covar, shape)
 }
@@ -532,7 +658,7 @@ aggregate_scm_bench_run <- function(root          = "output",
   estim_cond    <- compute_scm_estim(loaded$rse_long, loaded$diag_long, mode = "cond")
   power         <- compute_scm_power(loaded$diag_long, cn_cor_cut = cn_cor_cut)
   relpower      <- compute_scm_relpower(loaded$diag_long)
-  covsel_by_cov <- compute_scm_covsel_by_covar(loaded$covsel_long)
+  covsel_by_cov <- compute_scm_covsel_by_covar(loaded$covsel_long, loaded$diag_long)
 
   if (write_outputs) {
     dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
