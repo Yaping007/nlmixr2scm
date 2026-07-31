@@ -48,12 +48,18 @@ suppressPackageStartupMessages({
 # ---- shared look (mirrors fig_power.R) -------------------------------------
 .PAL_N <- c("40" = "#7F7F7F", "80" = "#E8820C", "300" = "#1F77B4")  # grey/orange/blue
 
-theme_scm <- function(base_size = 12) {
+theme_scm <- function(base_size = 16) {
   ggplot2::theme_minimal(base_size = base_size) +
     ggplot2::theme(
       panel.grid.minor = ggplot2::element_blank(),
       legend.position  = "top",
-      strip.text       = ggplot2::element_text(face = "bold"),
+      legend.title     = ggplot2::element_text(size = base_size),
+      legend.text      = ggplot2::element_text(size = base_size - 1),
+      strip.text       = ggplot2::element_text(face = "bold",
+                                               size = base_size + 1),
+      axis.title       = ggplot2::element_text(size = base_size + 1,
+                                               face = "bold"),
+      axis.text        = ggplot2::element_text(size = base_size - 2),
       plot.title       = ggplot2::element_text(face = "bold")
     )
 }
@@ -163,7 +169,7 @@ fig_diag_rates <- function(agg_dir   = "output/vae_covsel_aggregated",
   p <- ggplot2::ggplot(plot_df, aes_base) +
     ggplot2::geom_line(linewidth = 0.8) +
     ggplot2::geom_point(size = 2) +
-    ggplot2::facet_wrap(~ structure, ncol = 1,
+    ggplot2::facet_wrap(~ structure, nrow = 1,
                         labeller = ggplot2::labeller(structure = .STRUCT_LAB)) +
     ggplot2::scale_colour_manual(values = .PAL_N, name = "Sample size",
                                  labels = function(x) paste0(x, " subj")) +
@@ -191,8 +197,8 @@ fig_diag_rates <- function(agg_dir   = "output/vae_covsel_aggregated",
     est_tag <- if (all(c("estimator", "outer_opt") %in% names(dat)))
                  paste0("_", dat$estimator[1], "_", dat$outer_opt[1]) else ""
     stub  <- file.path(out_dir, sprintf("fig_diag_rates_%s_%s%s", stru, tag, est_tag))
-    ggplot2::ggsave(paste0(stub, ".png"), p, width = 9, height = 7, dpi = 150)
-    ggplot2::ggsave(paste0(stub, ".pdf"), p, width = 9, height = 7)
+    ggplot2::ggsave(paste0(stub, ".png"), p, width = 12, height = 5, dpi = 150)
+    ggplot2::ggsave(paste0(stub, ".pdf"), p, width = 12, height = 5)
     message("saved: ", stub, ".{png,pdf}")
   }
 

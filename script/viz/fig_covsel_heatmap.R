@@ -70,6 +70,55 @@ suppressPackageStartupMessages({
 
 `%||%` <- function(a, b) if (is.null(a) || length(a) == 0L) b else a
 
+# Recover the correct per-cell FP/FN denominator for a by-covar table.
+#
+# `n_datasets` is meant to be the number of fitted datasets in a
+# (structure [x estimator x outer_opt] x sample_N) cell -- the SHARED
+# denominator for true-effect FN rates (n_FN / N) and distractor FP rates
+# (n_FP / N).  Some aggregators instead record it PER (var, covar, shape) row,
+# so a distractor selected k times gets n_datasets = k, giving a spurious 100%
+# FP rate that saturates every nonzero tile red.
+#
+# The authoritative total is carried by the true-effect rows and is constant
+# across scenarios within a cell, so we broadcast max(n_datasets[is_true]) to
+# every row of the cell (falling back to the row-wise max when a cell has no
+# true-effect rows at all).  When n_datasets is already the correct constant
+# (e.g. the VAE aggregator) this is a no-op, so it is safe for the runSCM, PsN
+# and VAE workflows alike.
+.fix_covsel_denom <- function(dat) {
+  if (!all(c("n_datasets", "is_true") %in% names(dat))) return(dat)
+  cell <- intersect(c("structure", "estimator", "outer_opt", "sample_N"),
+                    names(dat))
+  # cell-wide authoritative total (max over the cell's true-effect rows); used
+  # as the fallback for the null scenario, which has NO true-effect row.
+  dat <- dat |>
+    dplyr::group_by(dplyr::across(dplyr::all_of(cell))) |>
+    dplyr::mutate(.denom_cell = {
+      tv <- suppressWarnings(max(n_datasets[is_true], na.rm = TRUE))
+      if (!is.finite(tv)) suppressWarnings(max(n_datasets, na.rm = TRUE)) else tv
+    }) |>
+    dplyr::ungroup()
+  # prefer the per-scenario total (the fitted-dataset count can vary by a few
+  # datasets across scenarios, e.g. failed fits), falling back to the cell-wide
+  # constant when a scenario carries no true-effect row.
+  if ("scenario" %in% names(dat)) {
+    dat <- dat |>
+      dplyr::group_by(dplyr::across(dplyr::all_of(c(cell, "scenario")))) |>
+      dplyr::mutate(.denom_scn =
+        suppressWarnings(max(n_datasets[is_true], na.rm = TRUE))) |>
+      dplyr::ungroup() |>
+      dplyr::mutate(.denom = dplyr::if_else(
+        is.finite(.denom_scn) & .denom_scn > 0, .denom_scn, .denom_cell))
+  } else {
+    dat <- dplyr::mutate(dat, .denom = .denom_cell)
+  }
+  dat |>
+    dplyr::mutate(n_datasets = dplyr::if_else(
+      is.finite(.denom) & .denom > 0, as.double(.denom),
+      as.double(n_datasets))) |>
+    dplyr::select(-tidyselect::any_of(c(".denom", ".denom_cell", ".denom_scn")))
+}
+
 .STRUCT_LAB <- c(linCmt = "linCmt (analytic)", ode = "ODE",
                  advan4 = "NONMEM (ADVAN4)")
 
@@ -90,8 +139,8 @@ theme_scm <- function(base_size = 15) {
       legend.position  = "top",
       strip.text       = ggplot2::element_text(face = "bold"),
       plot.title       = ggplot2::element_text(face = "bold"),
-      axis.text.x      = ggplot2::element_text(size = base_size - 1),
-      axis.text.y      = ggplot2::element_text(size = base_size - 1)
+      axis.text.x      = ggplot2::element_text(size = base_size - 2),
+      axis.text.y      = ggplot2::element_text(size = base_size - 3)
     )
 }
 
@@ -99,7 +148,7 @@ theme_scm <- function(base_size = 15) {
 fig_covsel_heatmap <- function(
     agg_dir      = "output/vae_covsel_aggregated",
     sample_N     = NULL,       # NULL = all (40, 80, 300)
-    structure    = "linCmt",   # ONE structure per figure ("linCmt" | "ode")
+    structure    = "both",     # "both" = linCmt + ode side by side (default) | "linCmt" | "ode"
     labels       = TRUE,
     min_fp       = 0,      # blank FP cells below this rate
     layout       = c("slide", "wide"),  # "slide" = N stacked (16:9-friendly)
@@ -121,10 +170,17 @@ fig_covsel_heatmap <- function(
   if (!both_struct) dat <- dplyr::filter(dat, structure == !!structure)
   if (nrow(dat) == 0L) stop("no rows after filtering (check sample_N / structure)")
 
-  # per-cell dataset total is now carried directly by the by-covar CSV as
-  # `n_datasets` (aggregate_vae_covsel.R derives it from the per-cell fit count,
-  # so it is the correct FP/FN denominator for BOTH true effects and
-  # distractors -- no diag-rates work-around needed).
+  # ---- recover the correct per-cell FP/FN denominator ----------------------
+  # `n_datasets` should be the number of fitted datasets in a
+  # (structure[x estimator x outer_opt] x sample_N) cell -- the common
+  # denominator for BOTH true-effect FN rates and distractor FP rates.  Some
+  # aggregators instead store it PER (var,covar,shape) row, so a distractor
+  # selected k times gets n_datasets = k and a spurious 100% FP rate (every
+  # nonzero tile saturates).  The authoritative total is carried by the
+  # true-effect rows and is constant across scenarios within a cell, so
+  # broadcast it to every row.  When n_datasets is already the correct constant
+  # (e.g. aggregate_vae_covsel.R) this is a no-op.
+  dat <- .fix_covsel_denom(dat)
 
   # per-cell error rate + regime label.
   # y-axis is the full effect label "PARAM~COVAR" (unambiguous), ordered as a CL
@@ -231,7 +287,7 @@ fig_covsel_heatmap <- function(
     p <- p + ggplot2::geom_text(
       data = lab_df,
       ggplot2::aes(label = round(err_show * 100)),
-      size = if (both_struct) 4.5 else 3.4,
+      size = if (both_struct) 4.0 else 3.0,
       colour = ifelse(lab_df$err_show > 0.55, "white", "grey20"))
   }
 
@@ -333,9 +389,12 @@ fig_covsel_heatmap_scm <- function(
   }
   est_tag <- paste(cells$estimator[1], cells$outer_opt[1], sep = "_")
 
-  # per-cell dataset total is carried directly by the by-covar CSV as
-  # `n_datasets` (aggregate_scm_estimator2.1.R derives it from the per-cell fit
-  # count -> correct FP/FN denominator for true effects AND distractors).
+  # ---- recover the correct per-cell FP/FN denominator ----------------------
+  # See .fix_covsel_denom(): some aggregators store n_datasets PER covariate row
+  # (distractor selected k times -> n_datasets = k -> spurious 100% FP rate).
+  # The true per-cell total lives on the true-effect rows and is constant across
+  # scenarios, so broadcast it.  No-op when n_datasets is already correct.
+  dat <- .fix_covsel_denom(dat)
 
   plot_df <- dat |>
     dplyr::mutate(

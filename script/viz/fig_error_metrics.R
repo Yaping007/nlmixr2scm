@@ -95,17 +95,23 @@ suppressPackageStartupMessages({
 # two-colour qualitative pair (deliberately NOT the blue/red FP-FN semantics)
 .COND_COL <- c("Unconditioned" = "#8C8C8C", "True selection" = "#2C7FB8")
 
-theme_scm <- function(base_size = 15) {
+theme_scm <- function(base_size = 18) {
   ggplot2::theme_minimal(base_size = base_size) +
     ggplot2::theme(
       panel.grid.major.y = ggplot2::element_blank(),
       panel.grid.minor   = ggplot2::element_blank(),
       legend.position    = "top",
-      strip.text         = ggplot2::element_text(face = "bold"),
+      legend.text        = ggplot2::element_text(size = base_size),
+      strip.text         = ggplot2::element_text(face = "bold",
+                                                 size = base_size),
       plot.title         = ggplot2::element_text(face = "bold"),
       plot.caption       = ggplot2::element_text(hjust = 0, colour = "grey35"),
+      axis.title.x       = ggplot2::element_text(size = base_size + 1,
+                                                 face = "bold"),
+      axis.title.y       = ggplot2::element_text(size = base_size + 1,
+                                                 face = "bold"),
       axis.text.x        = ggplot2::element_text(size = base_size - 3),
-      axis.text.y        = ggplot2::element_text(size = base_size - 2)
+      axis.text.y        = ggplot2::element_text(size = base_size - 3)
     )
 }
 
@@ -119,6 +125,10 @@ fig_error_metrics <- function(
     outer_opt  = NULL,     # SCM only (e.g. "bobyqa"); needs col
     metrics    = c("RMRSE", "MARE"),
     drop_fixed = TRUE,     # drop TVKA (fixed -> 0 error, uninformative)
+    x_cap      = 100,      # x-axis upper bound (%); larger values squished to
+                           # the edge + labelled, so a few huge var/cov terms
+                           # don't shrink every other parameter
+    vline_at   = 30,       # dashed reference line(s) at these % (NULL = none)
     labels     = FALSE,
     save       = FALSE,
     out_dir    = "output/figures/vae_covsel",
@@ -194,57 +204,85 @@ fig_error_metrics <- function(
   plot_df <- dplyr::mutate(plot_df,
     param_lab = factor(param_lab, levels = rev(lab_present)))
 
-  # ---- build faceting: metric (rows) x [N x structure] (cols) ---------------
-  # metric is the ONLY row facet so RMRSE stacks cleanly ABOVE MARE; the
-  # param_class grouping is preserved by the y-axis ordering (no right strip).
+  # ---- build faceting: within each metric, structure (rows) x N (cols) ------
+  # The two metrics (RMRSE / MARE) become side-by-side patchwork panels; inside
+  # each, sample size is the column and structure (linCmt / ode) the row.
   n_N      <- dplyr::n_distinct(plot_df$sample_N)
   n_struct <- dplyr::n_distinct(plot_df$structure)
-  col_terms <- c(if (n_N > 1)      "sampN_lab",
-                 if (n_struct > 1) "struct_lab")
-  if (length(col_terms) == 0L) col_terms <- "."
-  facet_spec <- as.formula(paste("metric ~", paste(col_terms, collapse = " + ")))
+  row_term <- if (n_struct > 1) "struct_lab" else "."
+  col_term <- if (n_N > 1)      "sampN_lab"  else "."
+  grid_spec <- stats::as.formula(paste(row_term, "~", col_term))
 
-  # ---- per-metric subplots stacked vertically -------------------------------
+  # ---- per-metric subplots placed SIDE BY SIDE ------------------------------
   # Each metric (RMRSE / MARE) is its own panel with the metric name as a
-  # CENTRED TOP title, so the two blocks separate cleanly; N (x structure) are
-  # the columns.  Panels are stitched with patchwork (shared legend on top).
-  col_spec <- as.formula(paste("~", paste(col_terms, collapse = " + ")))
+  # CENTRED TOP title; within a panel N are the columns and structure the rows.
+  # Panels are stitched horizontally with patchwork (shared legend on top).
   .METRIC_SUB <- c(
     RMRSE = "100\u00b7\u221amean(rel.err\u00b2)  \u2014 outlier-sensitive",
     MARE  = "100\u00b7median|rel.err|  \u2014 robust")
   dodge <- ggplot2::position_dodge(width = 0.6)
 
+  # x-axis upper bound is CAPPED (default 100%) so a handful of very large
+  # variance / covariance error terms don't compress every other parameter into
+  # an invisible stub.  Values beyond the cap are squished to the right edge and
+  # annotated with their true magnitude, so nothing is silently lost.
+  x_up  <- max(20, x_cap)
+  brk_step <- if (x_up <= 120) 50 else if (x_up <= 300) 100 else 200
+  x_brks   <- seq(0, x_up, brk_step)
+
   build_one <- function(m, first = FALSE, last = FALSE) {
     d <- dplyr::filter(plot_df, metric == m)
+    d <- dplyr::mutate(d,
+      value_plot = pmin(value, x_up),          # squish off-scale to the edge
+      off_scale  = !is.na(value) & value > x_up)
     g <- ggplot2::ggplot(d,
-                         ggplot2::aes(x = value, y = param_lab,
-                                      colour = conditioning, group = conditioning)) +
+                         ggplot2::aes(x = value_plot, y = param_lab,
+                                      colour = conditioning, group = conditioning))
+    if (!is.null(vline_at)) {
+      g <- g + ggplot2::geom_vline(xintercept = vline_at,
+                                   linetype = "dashed", colour = "#E69F00",
+                                   linewidth = 0.8)
+    }
+    g <- g +
       ggplot2::geom_linerange(
-        ggplot2::aes(xmin = 0, xmax = value),
-        position = dodge, linewidth = 0.7, alpha = 0.55) +
-      ggplot2::geom_point(position = dodge, size = 2.6) +
+        ggplot2::aes(xmin = 0, xmax = value_plot),
+        position = dodge, linewidth = 0.9, alpha = 0.55) +
+      ggplot2::geom_point(position = dodge, size = 3.2) +
       ggplot2::scale_colour_manual(values = .COND_COL, name = NULL) +
-      ggplot2::facet_grid(col_spec, scales = "free_y", space = "free_y") +
+      ggplot2::facet_grid(grid_spec, scales = "free_y", space = "free_y") +
       ggplot2::scale_x_continuous(labels = function(x) paste0(x, "%"),
-                                  limits = c(0, 80),
-                                  breaks = seq(0, 80, 20),
+                                  limits = c(0, x_up),
+                                  breaks = x_brks,
+                                  oob = scales::oob_squish,
                                   expand = ggplot2::expansion(mult = c(0, 0.02))) +
       ggplot2::labs(title = as.character(m),
                     subtitle = unname(.METRIC_SUB[as.character(m)]),
-                    x = if (last) "Relative error metric (%)" else NULL,
-                    y = NULL) +
+                    x = "Relative error metric (%)",
+                    y = if (first) "Parameter" else NULL) +
       theme_scm() +
       ggplot2::theme(
         plot.title    = ggplot2::element_text(face = "bold", hjust = 0.5,
-                                              size = ggplot2::rel(1.15)),
-        plot.subtitle = ggplot2::element_text(hjust = 0.5, colour = "grey35"),
+                                              size = ggplot2::rel(1.25)),
+        plot.subtitle = ggplot2::element_text(hjust = 0.5, colour = "grey35",
+                                              size = ggplot2::rel(0.9)),
         # add a gap between the N columns so adjacent 100%/0% ticks don't collide
-        panel.spacing.x = ggplot2::unit(1.4, "lines"),
-        # show the N (column) headers only on the TOP block to avoid repetition
-        strip.text.x  = if (first) ggplot2::element_text(face = "bold")
+        panel.spacing.x = ggplot2::unit(3, "lines"),
+        # N (column) headers on top of every metric panel; structure (row)
+        # strips only on the RIGHTMOST panel to avoid repeating them.
+        strip.text.x  = ggplot2::element_text(face = "bold"),
+        strip.text.y  = if (last) ggplot2::element_text(angle = -90, face = "bold")
                         else ggplot2::element_blank())
+    # annotate off-scale points with their TRUE magnitude at the right edge
+    if (any(d$off_scale)) {
+      g <- g + ggplot2::geom_text(
+        data = dplyr::filter(d, off_scale),
+        ggplot2::aes(label = paste0(round(value), "%")),
+        position = dodge, hjust = 1.1, size = 3.4, fontface = "italic",
+        show.legend = FALSE)
+    }
     if (isTRUE(labels)) {
       g <- g + ggplot2::geom_text(
+        data = dplyr::filter(d, !off_scale),
         ggplot2::aes(label = round(value)),
         position = dodge, hjust = -0.3, size = 3, show.legend = FALSE)
     }
@@ -261,7 +299,7 @@ fig_error_metrics <- function(
     "power betas, so their error is comparable to truth.")
 
   if (requireNamespace("patchwork", quietly = TRUE)) {
-    p <- patchwork::wrap_plots(panels, ncol = 1) +
+    p <- patchwork::wrap_plots(panels, nrow = 1) +
       patchwork::plot_layout(guides = "collect") +
       patchwork::plot_annotation(
         theme = ggplot2::theme(legend.position = "top"))
@@ -274,7 +312,9 @@ fig_error_metrics <- function(
                               position = dodge, linewidth = 0.7, alpha = 0.55) +
       ggplot2::geom_point(position = dodge, size = 2.6) +
       ggplot2::scale_colour_manual(values = .COND_COL, name = NULL) +
-      ggplot2::facet_grid(facet_spec, scales = "free_y", space = "free_y") +
+      ggplot2::facet_grid(
+        stats::as.formula(paste(row_term, "~ metric +", col_term)),
+        scales = "free_y", space = "free_y") +
       ggplot2::scale_x_continuous(labels = function(x) paste0(x, "%"),
                                   expand = ggplot2::expansion(mult = c(0, 0.08))) +
       ggplot2::labs(
@@ -298,11 +338,11 @@ fig_error_metrics <- function(
     stub  <- file.path(out_dir,
                        sprintf("fig_error_metrics_scn%s_%s_%s_%s%s",
                                scenario, n_tag, s_tag, m_tag, est_tag))
-    # width scales with N x structure cols; height with metric (row) count
-    n_cols <- max(1, n_N) * max(1, n_struct)
-    n_rows <- length(metrics)
-    w <- 4 + 3.2 * n_cols
-    h <- 5 + 3.0 * n_rows
+    # width scales with metric x N columns; height with structure (row) count
+    n_cols <- length(metrics) * max(1, n_N)
+    n_rows <- max(1, n_struct)
+    w <- 4 + 2.6 * n_cols
+    h <- 4 + 3.2 * n_rows
     ggplot2::ggsave(paste0(stub, ".png"), p, width = w, height = h, dpi = 200)
     ggplot2::ggsave(paste0(stub, ".pdf"), p, width = w, height = h)
     message("saved: ", stub, ".{png,pdf}")
