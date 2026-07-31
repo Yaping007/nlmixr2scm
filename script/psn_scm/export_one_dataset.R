@@ -38,6 +38,29 @@ INPUT_ROOT <- .opt("--input_root", "Inputdataset")
 OUT_ROOT   <- .opt("--out_root", file.path("output", "psn_scm", "runs"))
 DOSE_MG    <- 100
 
+# ---- structure + ODE numerical controls ------------------------------------
+# STRUCTURE selects the NONMEM structural model:
+#   "advan4" (default) -- 2-cmt oral, TRANS4 CLOSED-FORM analytic (head-to-head
+#                         vs runSCM linCmt).  Unchanged, byte-for-byte
+#                         reproducible: NO ODE tol, NO SADDLE_RESET.
+#   "ode"              -- SAME 2-cmt oral written as ADVAN13 general-ODE + $DES
+#                         (head-to-head vs runSCM structure="ode").  Exposes the
+#                         solver tolerances so they can be MATCHED to nlmixr2's
+#                         rxode2 (focei/bobyqa: atol=1e-8, rtol=1e-6) and adds
+#                         SADDLE_RESET=1 as the honest analog to runSCM's
+#                         profileInitOnStall stall-escape.
+# TOL/ATOL are NONMEM significant-digit style: TOL=n <-> rtol=1e-n,
+# ATOL=n <-> atol=1e-n.  Default TOL=6 ATOL=8 == rtol=1e-6, atol=1e-8.
+# Screening (SCM search) and the final MAXEVAL=0 covariance refit can carry
+# DIFFERENT tolerances (mirrors runSCM's optional screen-vs-final split); the
+# refit tol is written to refit_tol.txt and applied by seed_refit.R.
+STRUCTURE   <- tolower(.opt("--structure", "advan4"))
+stopifnot(STRUCTURE %in% c("advan4", "ode"))
+SCREEN_TOL  <- as.integer(.opt("--screen_tol",  "6"))   # rtol=1e-6 (screening)
+SCREEN_ATOL <- as.integer(.opt("--screen_atol", "8"))   # atol=1e-8 (screening)
+REFIT_TOL   <- as.integer(.opt("--refit_tol",  as.character(SCREEN_TOL)))
+REFIT_ATOL  <- as.integer(.opt("--refit_atol", as.character(SCREEN_ATOL)))
+
 # ---- resolve paths ---------------------------------------------------------
 here     <- normalizePath(file.path(INPUT_ROOT, sprintf("sim_obs_N%d", N)),
                           mustWork = TRUE)
@@ -91,17 +114,15 @@ csv_path <- file.path(out_dir, "data.csv")
 utils::write.csv(nm, csv_path, row.names = FALSE, quote = FALSE, na = ".")
 cat("wrote", nrow(nm), "rows ->", csv_path, "\n")
 
-# ---- base NONMEM control stream (2-cmt oral, ADVAN4 TRANS4) -----------------
+# ---- base NONMEM control stream --------------------------------------------
 # TRANS4 params: CL, V2 (central), Q, V3 (peripheral), KA.
 # KA fixed at 0.7 (log space in nlmixr2; here on natural scale).
-base_mod <- '$PROBLEM 2cmt oral base (scn16 N300 ds001) -- SCM benchmark
-$INPUT ID TIME EVID MDV AMT CMT DV BW BMI CRCL SEX RACE
-$DATA data.csv IGNORE=@
+# Two structural encodings of the SAME 2-cmt oral model, selected by --structure:
+#   advan4 -> ADVAN4 TRANS4  (closed-form analytic; the original, unchanged)
+#   ode    -> ADVAN13 + $DES (general ODE; tol-matched to runSCM rxode2)
 
-$SUBROUTINE ADVAN4 TRANS4
-
-$PK
-  TVCL = THETA(1)
+# common blocks shared by both encodings ------------------------------------
+.pk_params <- '  TVCL = THETA(1)
   TVV2 = THETA(2)
   TVQ  = THETA(3)
   TVV3 = THETA(4)
@@ -112,13 +133,9 @@ $PK
   Q  = TVQ
   V3 = TVV3
   KA = TVKA
-  S2 = V2
+  S2 = V2'
 
-$ERROR
-  IPRED = F
-  Y = IPRED * (1 + EPS(1))
-
-; --- typical values seeded at the data-generating truth ---------------------
+.theta_omega_sigma <- '; --- typical values seeded at the data-generating truth ---------------------
 $THETA
   (0, 0.6)      ; TVCL
   (0, 20)       ; TVV2  (central volume)
@@ -131,16 +148,80 @@ $OMEGA BLOCK(2)
   0.02  0.1     ; cov, var(eta.V2)
 
 $SIGMA
-  0.01          ; proportional error variance (~0.1 CV)
+  0.01          ; proportional error variance (~0.1 CV)'
+
+if (identical(STRUCTURE, "advan4")) {
+  # ---- ADVAN4 TRANS4 (closed-form analytic) -- ORIGINAL, unchanged ----------
+  # NO ODE tol and NO SADDLE_RESET here, so the advan4 sweep stays byte-for-byte
+  # reproducible against earlier results.
+  base_mod <- sprintf('$PROBLEM 2cmt oral base (scn%02d N%d ds%03d) -- SCM benchmark [advan4]
+$INPUT ID TIME EVID MDV AMT CMT DV BW BMI CRCL SEX RACE
+$DATA data.csv IGNORE=@
+
+$SUBROUTINE ADVAN4 TRANS4
+
+$PK
+%s
+
+$ERROR
+  IPRED = F
+  Y = IPRED * (1 + EPS(1))
+
+%s
 
 ; FOCEI-INTER, SIGDIG=4 mirrors nlmixr2 focei+bobyqa (sigdig=4).
 ; NOTE: NO $COVARIANCE here -- SCM screening runs cov-step OFF, exactly like
 ; nlmixr2 make_est_control(tier="screen", covMethod="").  The covariance step
 ; is run ONCE on the final selected model (see final_refit.template below).
 $ESTIMATION METHOD=1 INTER MAXEVAL=9999 SIGDIG=4 PRINT=5 NOABORT
-'
+', SCEN, N, DATASET, .pk_params, .theta_omega_sigma)
+
+} else {
+  # ---- ADVAN13 general ODE + $DES -- tol-matched to runSCM structure="ode" ---
+  # Same 2-cmt oral model written as an explicit ODE so the NONMEM solver
+  # tolerances are exposed and can be matched to nlmixr2's rxode2 (focei/bobyqa:
+  # atol=1e-8, rtol=1e-6).  TOL=<n> ~ rtol=1e-n, ATOL=<n> ~ atol=1e-n on the
+  # $SUBROUTINE line (screening tol); the MAXEVAL=0 refit tol is applied later
+  # by seed_refit.R from refit_tol.txt.
+  #   $MODEL: 1=depot (dose), 2=central (obs, S2=V2), 3=peripheral.
+  #   $DES  : depot -> central (KA); central <-> peripheral (Q); central CL out.
+  # SADDLE_RESET=1 = perturb-off-a-false-minimum, the honest NONMEM analog of
+  # runSCM profileInitOnStall (full-vector restart vs runSCM's targeted 1-D
+  # Brent profile -- close, not identical; see README).  NO RETRIES -> matches
+  # the benchmark's maxRetries=0.
+  base_mod <- sprintf('$PROBLEM 2cmt oral base (scn%02d N%d ds%03d) -- SCM benchmark [ode/ADVAN13]
+$INPUT ID TIME EVID MDV AMT CMT DV BW BMI CRCL SEX RACE
+$DATA data.csv IGNORE=@
+
+$SUBROUTINE ADVAN13 TOL=%d ATOL=%d
+
+$MODEL
+  COMP=(DEPOT, DEFDOSE)
+  COMP=(CENTRAL, DEFOBS)
+  COMP=(PERIPH)
+
+$PK
+%s
+
+$DES
+  DADT(1) = -KA * A(1)
+  DADT(2) =  KA * A(1) - (CL/V2) * A(2) - (Q/V2) * A(2) + (Q/V3) * A(3)
+  DADT(3) =  (Q/V2) * A(2) - (Q/V3) * A(3)
+
+$ERROR
+  IPRED = F
+  Y = IPRED * (1 + EPS(1))
+
+%s
+
+; FOCEI-INTER, SIGDIG=4 mirrors nlmixr2 focei+bobyqa (sigdig=4).
+; TOL/ATOL matched to rxode2 rtol=1e-6/atol=1e-8; SADDLE_RESET=1 ~ runSCM
+; profileInitOnStall (stall escape).  NO $COVARIANCE (screening cov-step OFF).
+$ESTIMATION METHOD=1 INTER MAXEVAL=9999 SIGDIG=4 PRINT=5 NOABORT SADDLE_RESET=1
+', SCEN, N, DATASET, SCREEN_TOL, SCREEN_ATOL, .pk_params, .theta_omega_sigma)
+}
 writeLines(base_mod, file.path(out_dir, "base.mod"))
-cat("wrote base.mod\n")
+cat("wrote base.mod  [structure=", STRUCTURE, "]\n", sep = "")
 
 # ---- PsN scm config --------------------------------------------------------
 # Search space = the SAME 16 candidates nlmixr2 tests:
@@ -242,6 +323,19 @@ final_refit_cov <- "$COVARIANCE UNCONDITIONAL MATRIX=RSR PRINT=E"
 writeLines(final_refit_cov, file.path(out_dir, "final_refit_cov.txt"))
 cat("wrote final_refit_cov.txt\n")
 
+# ---- refit ODE tolerances (ONLY for --structure ode) -----------------------
+# The MAXEVAL=0 covariance refit can run at a DIFFERENT (typically tighter) ODE
+# tolerance than screening, mirroring runSCM's optional screen-vs-final tol
+# split.  seed_refit.R reads this file and rewrites the winner .mod's
+# $SUBROUTINE ADVAN13 TOL=/ATOL= before the refit.  Absent for advan4 (analytic,
+# no ODE tol) so the refit inherits the winner .mod unchanged.
+if (identical(STRUCTURE, "ode")) {
+  writeLines(sprintf("TOL=%d\nATOL=%d", REFIT_TOL, REFIT_ATOL),
+             file.path(out_dir, "refit_tol.txt"))
+  cat(sprintf("wrote refit_tol.txt  [refit TOL=%d ATOL=%d; screen TOL=%d ATOL=%d]\n",
+              REFIT_TOL, REFIT_ATOL, SCREEN_TOL, SCREEN_ATOL))
+}
+
 # ---- copy the timed submission wrapper into the cell dir -------------------
 # submit_scm.sh records wall_sec (= runSCM_traced elapsed_s) into timing.json;
 # the parser reconstructs cpu_sec + hog from per-subrun .lst files.
@@ -263,5 +357,5 @@ if (file.exists(seed_src)) {
 cat("\n--- HPCE commands (run from", cell_dir, ") ---\n")
 cat("bsub -n 4 -W 10000 \"bash submit_scm.sh\"        # scm(base+search) + mandatory cov refit\n")
 cat("\n--- parse (from repo root) ---\n")
-cat(sprintf("Rscript script/psn_scm/parse_psn_scm.R --cell %s --N %d --scenario %d --dataset %d\n",
-            cell_dir, N, SCEN, DATASET))
+cat(sprintf("Rscript script/psn_scm/parse_psn_scm.R --cell %s --N %d --scenario %d --dataset %d --structure %s\n",
+            cell_dir, N, SCEN, DATASET, STRUCTURE))

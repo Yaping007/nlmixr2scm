@@ -112,6 +112,7 @@ script/psn_scm/
 output/psn_scm/
   runs/       N{n}/scn{s}/ds{d}/            # HEAVY, git-ignored (HPCE scratch)
     data.csv  base.mod  run.scm  final_refit_cov.txt  submit_scm.sh   # inputs
+    refit_tol.txt                           # ODE only: MAXEVAL=0 refit TOL/ATOL
     scm_dir/  refit/                        # PsN/NONMEM churn
     logs/     timing.json  scmlog.txt  scm_console.log
               refit.lst  refit.ext  refit_console.log
@@ -368,3 +369,99 @@ The viz layer was extended for PsN: the `.STRUCT_LAB` maps in `fig_power`/`fig_d
 **PsN vs nlmixr2.** Run the nlmixr2 `focei_bobyqa` records through `aggregate_scm_estimator2.1.R`, then pass **both** `agg_dir`s (or both `sources`) to each figure to draw the two tools side-by-side.
 
 > **Centering caveat for accuracy.** The PsN aggregator (`aggregate_psn_scm.R`) deliberately **skips** `.backtransform_intercepts()` — PsN records are already at 70/95 via the `[code]` section, so re-centering would double-correct. The shared `aggregate_scm_estimator2.1.R` still applies the median→70/95 back-transform for the **nlmixr2** side (runSCM centers on the median). Use the PsN aggregator for PsN records and the shared one for nlmixr2.
+
+------------------------------------------------------------------------
+
+## 7. ODE structure — PsN `ADVAN13` vs runSCM `ode`
+
+The default benchmark compares the NONMEM **analytic** `ADVAN4 TRANS4` (`structure="advan4"`) against runSCM's **analytic** `linCmt()` — both closed-form. A second, independent comparison benchmarks the **general-ODE** path on both tools: NONMEM `ADVAN13` + `$DES` (`structure="ode"`) against runSCM `make_true_model(structure="ode")`. NONMEM's ODE integrator is a closed-source commercial solver (LSODA-family), so this measures whether the two solvers reach the **same covariate-selection operating characteristics** on the identical ODE model — not just the same analytic answer.
+
+Everything downstream is structure-agnostic: the aggregator groups by `(sample_N, scenario, structure, estimator, outer_opt)` and discovers all `scn<SS>_<struct>` dirs, so **adding `ode` records never requires re-aggregating `advan4`** — they simply appear as extra `structure="ode"` rows.
+
+### Model encoding (same 2-cmt oral, written as an ODE)
+
+`export_one_dataset.R --structure ode` emits the identical model as `ADVAN13`:
+
+```
+$SUBROUTINE ADVAN13 TOL=6 ATOL=8
+$MODEL
+  COMP=(DEPOT, DEFDOSE)      ; 1
+  COMP=(CENTRAL, DEFOBS)     ; 2  (S2=V2)
+  COMP=(PERIPH)              ; 3
+$PK   ... CL,V2,Q,V3,KA,S2 (same as ADVAN4) ...
+$DES
+  DADT(1) = -KA*A(1)
+  DADT(2) =  KA*A(1) - (CL/V2)*A(2) - (Q/V2)*A(2) + (Q/V3)*A(3)
+  DADT(3) =  (Q/V2)*A(2) - (Q/V3)*A(3)
+$ERROR
+  IPRED = F
+  Y = IPRED*(1+EPS(1))
+$ESTIMATION METHOD=1 INTER MAXEVAL=9999 SIGDIG=4 PRINT=5 NOABORT SADDLE_RESET=1
+```
+
+The `$PK`, `$THETA/$OMEGA/$SIGMA`, `run.scm` search space, and the `[code]` 70/95 centering are **byte-identical** to the `advan4` branch — only the structural block (analytic ↔ `$DES`) and the `$SUBROUTINE`/`$ESTIMATION` lines differ. `$DES` matches the runSCM ODE RHS term-for-term (`d/dt(depot|central|periph)`), with `S2=V2` so `F = A(2)/S2` equals `central/vc`.
+
+### Tolerance matching (screening vs final refit)
+
+NONMEM `TOL`/`ATOL` are **significant-digit** style: `TOL=n ⇔ rtol=1e-n`, `ATOL=n ⇔ atol=1e-n`. runSCM's `focei/bobyqa` cell solves at `rtol=1e-6, atol=1e-8` (identical for screening and final — `estimator_factory.R` shares the tight tols across tiers). So the ODE defaults are **`TOL=6 ATOL=8`**, matching runSCM exactly.
+
+The screening search and the final MAXEVAL=0 covariance refit can carry **different** tols (mirrors runSCM's *optional* screen-coarsening knob, which defaults off):
+
+| tier | where the tol lives | knob | default |
+|---|---|---|---|
+| screening (SCM search) | `$SUBROUTINE ADVAN13 TOL=/ATOL=` in `base.mod` | `--screen_tol` / `--screen_atol` | `TOL=6 ATOL=8` |
+| final refit (MAXEVAL=0 cov) | `refit_tol.txt` → `seed_refit.R` rewrites the winner `.mod`'s `$SUBROUTINE` | `--refit_tol` / `--refit_atol` | = screen |
+
+`seed_refit.R` rewrites `ATOL=` then `TOL=` (perl lookbehind so the `TOL` inside `ATOL` is not double-matched) only when `--tol/--atol` are supplied; `advan4` (no ODE tol) is a no-op. Defaults keep both tiers identical for strict runSCM parity; tighten the refit with e.g. `--refit_tol 7 --refit_atol 9` if desired.
+
+### Stall / bad-init escape (parity with runSCM `profileInitOnStall`)
+
+The benchmark runs runSCM with **`maxRetries = 0`** (no perturb-init retries) and **`profileInitOnStall = TRUE`** (a stalled forward candidate is reseeded via a 1-D Brent FOCEi profile). The honest NONMEM analogs on the ODE `$ESTIMATION` line:
+
+| NONMEM option | role | runSCM analog |
+|---|---|---|
+| `NOABORT` | suppress abort on a transient non-computable objective/gradient (e.g. an ODE step that momentarily fails) and keep iterating from the last good point — a passive safety net, **no** init change | (nlmixr2 internal solver recovery) |
+| `SADDLE_RESET=1` | on reaching an apparent minimum, **perturb the full θ vector and restart** the quasi-Newton search to slide off a saddle / flat false minimum | `profileInitOnStall` |
+| *(omitted)* `RETRIES=n` | multi-start perturb-init retries | `maxRetries` — **kept at 0**, so `RETRIES` is deliberately **not** set (fair comparison) |
+
+> **Caveat — not algorithmically identical.** `SADDLE_RESET` is a *blind full-vector* perturb-and-restart of the multivariate quasi-Newton (BFGS-style) optimizer; it is **not** Brent-based. runSCM's `profileInitOnStall` is a *targeted 1-D Brent* profile of the specific stalled covariate coefficient, followed by a full FOCEi refit. They share the goal (escape a flat/false optimum without a full multi-start budget) but differ in mechanism — a close parity, not an equivalence. `NOABORT` and `SADDLE_RESET=1` are applied to the **ODE branch only**; the `advan4` branch is left exactly as before so its earlier results stay reproducible.
+
+### Running an ODE sweep (targeted, isolated from advan4)
+
+Run ODE into its **own** `BENCH_ROOT` so the `advan4` tree is never touched:
+
+``` bash
+# submit the ODE grid (one LSF array), tol-matched TOL=6 ATOL=8 by default
+STRUCT=ode BENCH_ROOT=output/psn_scm_ode0729 \
+  bash script/psn_scm/run_full_grid_array.sh
+# looser screening / tighter refit example:
+STRUCT=ode BENCH_ROOT=output/psn_scm_ode0729 \
+  STRUCT_TOL_ARGS="--screen_tol 5 --screen_atol 7 --refit_tol 6 --refit_atol 8" \
+  bash script/psn_scm/run_full_grid_array.sh
+
+# parse + stage ONLY the ode rows (STRUCT filter), tagged scn<SS>_ode/
+STRUCT=ode STAGE_DST=output/psn_scm_ode0729/ResforAggregation FORCE=1 \
+  bash script/psn_scm/parse_full_grid.sh
+```
+
+The manifest carries a 7th `structure` column; `parse_full_grid.sh` reads it per-row (so `advan4` and `ode` land in `scn<SS>_advan4/` vs `scn<SS>_ode/`), and `STRUCT=ode` skips non-matching rows. Older 6-column manifests default to `advan4`.
+
+``` bash
+# aggregate the ode tree (separate out_dir); advan4 untouched
+Rscript script/psn_scm/aggregate_psn_scm.R \
+  --root output/psn_scm_ode0729 --sub ResforAggregation \
+  --out_dir output/psn_scm_ode0729_aggregated
+```
+
+### Visualising the ODE comparison
+
+The four `fig_*` `.STRUCT_LAB` maps already carry `ode → "ODE"`. Because **both** tools use `structure="ode"`, the NONMEM-vs-runSCM distinction is the **estimator** facet (`nonmem_scm` vs the runSCM label), not the structure. Pass `structure = "ode"` and the estimator explicitly:
+
+``` r
+p_sel <- fig_covsel_heatmap_scm(agg_dir = "output/psn_scm_ode0729_aggregated",
+           csv_name = "scm_covsel_by_covar.csv", structure = "ode",
+           estimator = "nonmem_scm", outer_opt = "focei",
+           save = TRUE, out_dir = "output/figures/psn_scm_ode")
+```
+
+For a direct **NONMEM-ODE vs runSCM-ODE** figure, aggregate the runSCM `ode` records with `aggregate_scm_estimator2.1.R` and pass both `agg_dir`s (or both `sources`) — the two share `structure="ode"` and separate on `estimator`.

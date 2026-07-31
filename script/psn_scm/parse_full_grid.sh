@@ -32,6 +32,12 @@ STAGE_OPT="${STAGE_OPT:-focei}"
 # STAGE_ONLY=1 writes res_ds<D>.rds DIRECTLY to STAGE_DST and skips records/
 # entirely (parser --out_rds points at the res path).  Requires STAGE_DST.
 STAGE_ONLY="${STAGE_ONLY:-0}"
+# STRUCT filter: when set (e.g. STRUCT=ode), parse/stage ONLY manifest rows whose
+# structure column matches -- so an ODE sweep can be targeted without touching
+# advan4 rows in a shared manifest.  Empty = all structures.  The manifest's
+# per-row structure (7th column) overrides STAGE_STRUCT for the res-layout path,
+# so advan4 and ode land in scnSS_advan4/ vs scnSS_ode/ correctly.
+STRUCT="${STRUCT:-}"
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "${REPO_ROOT}"
@@ -57,10 +63,16 @@ RSCRIPT_BIN="$(resolve_rscript || true)"
 echo "parse Rscript -> ${RSCRIPT_BIN}"
 
 n_ok=0; n_skip=0; n_wait=0; n_fail=0
-# manifest columns: N,scenario,dataset,cell,jobid,submitted_utc
-while IFS=, read -r N SCEN ds cell jobid ts; do
+# manifest columns: N,scenario,dataset,cell,jobid,submitted_utc[,structure]
+# structure is optional (older manifests lack it) -> default advan4.
+while IFS=, read -r N SCEN ds cell jobid ts struct; do
   [ "${N}" = "N" ] && continue                       # header
   [ -n "${cell:-}" ] || continue
+  struct="${struct:-advan4}"                          # back-compat: no col -> advan4
+  # STRUCT filter: skip rows of other structures when targeting one (e.g. ode)
+  [ -n "${STRUCT}" ] && [ "${struct}" != "${STRUCT}" ] && continue
+  # per-cell res-layout structure segment (manifest struct wins over env default)
+  cell_struct="${struct:-${STAGE_STRUCT}}"
   # record path mirrors the cell with runs/ -> records/ (same rule the parser uses)
   rec="$(printf '%s' "${cell}" | sed 's#/runs/#/records/#')/psn_scm_record.rds"
 
@@ -68,7 +80,7 @@ while IFS=, read -r N SCEN ds cell jobid ts; do
   if [ -n "${STAGE_DST}" ]; then
     scn2=$(printf '%02d' "${SCEN}")                  # zero-pad scenario -> scnSS
     dsn=$((10#${ds}))                                # strip any zero-pad -> res_ds<int>
-    stage_dir="${STAGE_DST}/N${N}/scn${scn2}_${STAGE_STRUCT}/${STAGE_EST}_${STAGE_OPT}"
+    stage_dir="${STAGE_DST}/N${N}/scn${scn2}_${cell_struct}/${STAGE_EST}_${STAGE_OPT}"
     res="${stage_dir}/res_ds${dsn}.rds"
   fi
 
@@ -95,6 +107,7 @@ while IFS=, read -r N SCEN ds cell jobid ts; do
 
   if "${RSCRIPT_BIN}" script/psn_scm/parse_psn_scm.R \
         --cell "${cell}" --N "${N}" --scenario "${SCEN}" --dataset "${ds}" \
+        --structure "${cell_struct}" \
         "${parse_out[@]}" \
         >/dev/null 2>&1; then
     n_ok=$((n_ok + 1))
@@ -110,9 +123,11 @@ while IFS=, read -r N SCEN ds cell jobid ts; do
 done < "${MANIFEST}"
 
 echo "parsed: ${n_ok}  skipped(existing): ${n_skip}  waiting(unfinished): ${n_wait}  failed: ${n_fail}"
+# report the structure segment actually used (filter value, else per-cell/default)
+struct_shown="${STRUCT:-${STAGE_STRUCT}}"
 if [ "${STAGE_ONLY}" = "1" ] && [ -n "${STAGE_DST}" ]; then
-  echo "res     -> ${STAGE_DST}/N*/scn*_${STAGE_STRUCT}/${STAGE_EST}_${STAGE_OPT}/res_ds*.rds  (records/ skipped)"
+  echo "res     -> ${STAGE_DST}/N*/scn*_${struct_shown}/${STAGE_EST}_${STAGE_OPT}/res_ds*.rds  (records/ skipped)"
 else
   echo "records -> ${BENCH_ROOT}/records/"
-  [ -n "${STAGE_DST}" ] && echo "staged  -> ${STAGE_DST}/N*/scn*_${STAGE_STRUCT}/${STAGE_EST}_${STAGE_OPT}/res_ds*.rds"
+  [ -n "${STAGE_DST}" ] && echo "staged  -> ${STAGE_DST}/N*/scn*_${struct_shown}/${STAGE_EST}_${STAGE_OPT}/res_ds*.rds"
 fi
