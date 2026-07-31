@@ -50,6 +50,8 @@
 #   RSCRIPT / R_MODULE  R for the export step (NOT on the PsN module PATH)
 #   BENCH_ROOT output tree           (default output/psn_scm_full0727)
 #   JOBNAME    array job name        (default psnscm_full)
+#   SKIP_DONE=1 skip cells that already have logs/timing.json (resume a partial
+#              sweep -- resubmit only missing/failed cells)
 #   DRY_RUN=1  export + build index, submit nothing
 # ==============================================================================
 set -uo pipefail   # NOT -e: one failed export must not abort the sweep
@@ -59,6 +61,15 @@ SCEN_LIST="${SCEN_LIST:-1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16}"
 DS_MIN="${DS_MIN:-1}"
 DS_MAX="${DS_MAX:-100}"
 CORES="${CORES:-4}"
+# STRUCT selects the NONMEM structural model for the WHOLE sweep:
+#   "advan4" (default) -- ADVAN4 analytic (current head-to-head vs runSCM linCmt)
+#   "ode"              -- ADVAN13 general-ODE, tol-matched to runSCM structure=ode
+# Run ODE into a SEPARATE BENCH_ROOT so the advan4 sweep is never touched, e.g.
+#   STRUCT=ode BENCH_ROOT=output/psn_scm_ode0729 bash run_full_grid_array.sh
+# Optional --screen_tol/--refit_tol/--screen_atol/--refit_atol are forwarded to
+# export via the STRUCT_TOL_ARGS passthrough (default: TOL=6 ATOL=8 both tiers).
+STRUCT="${STRUCT:-advan4}"
+STRUCT_TOL_ARGS="${STRUCT_TOL_ARGS:-}"
 WALL_MIN="${WALL_MIN:-60}"
 MEM_MB="${MEM_MB:-2000}"
 THROTTLE="${THROTTLE:-400}"
@@ -66,6 +77,10 @@ QUEUE="${QUEUE:-}"
 R_MODULE="${R_MODULE:-R/4.3.1-gomkl-2022a-0.1}"
 JOBNAME="${JOBNAME:-psnscm_full}"
 DRY_RUN="${DRY_RUN:-0}"
+# SKIP_DONE=1 -> Phase 1 skips any cell that already has logs/timing.json
+# (a completed run).  Lets you resubmit ONLY the missing/failed cells after a
+# partial/aborted sweep without re-running the ones that already finished.
+SKIP_DONE="${SKIP_DONE:-0}"
 
 # Isolated output tree for the FULL launch -- SEPARATE from the pilot
 # (output/psn_scm/) so the sweep never overwrites working pilot cells.
@@ -75,8 +90,13 @@ REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "${REPO_ROOT}"
 RUNS_ROOT="${BENCH_ROOT}/runs"
 MANIFEST="${BENCH_ROOT}/manifest.csv"
-INDEX="${BENCH_ROOT}/array_index.tsv"
-TASK="${BENCH_ROOT}/array_task.sh"
+# Namespace the index/task per JOBNAME so concurrent (or aborted) launches into
+# the SAME BENCH_ROOT cannot truncate each other's live array index.  A running
+# array element resolves its cell from the index at runtime, so a shared
+# array_index.tsv is a footgun: a second launch's Phase-1 ': > INDEX' would
+# clobber the first array's mapping mid-flight.
+INDEX="${BENCH_ROOT}/array_index.${JOBNAME}.tsv"
+TASK="${BENCH_ROOT}/array_task.${JOBNAME}.sh"
 LOGDIR="${BENCH_ROOT}/lsf"
 mkdir -p "${RUNS_ROOT}" "${LOGDIR}"
 
@@ -105,7 +125,7 @@ echo "export Rscript -> ${RSCRIPT_BIN}"
 # Phase 1: export every cell + build the array index (idx -> cell)
 # ==============================================================================
 : > "${INDEX}"                                        # truncate index
-[ -f "${MANIFEST}" ] || echo "N,scenario,dataset,cell,jobid,submitted_utc" > "${MANIFEST}"
+[ -f "${MANIFEST}" ] || echo "N,scenario,dataset,cell,jobid,submitted_utc,structure" > "${MANIFEST}"
 
 idx=0; n_export_fail=0
 echo "=== Phase 1: export + index  N=[${N_LIST}] scn=[${SCEN_LIST}] ds=${DS_MIN}..${DS_MAX} ==="
@@ -116,9 +136,16 @@ for N in ${N_LIST}; do
       ds3="$(printf '%03d' "${ds}")"
       cell="${RUNS_ROOT}/N${N}/scn${scn2}/ds${ds3}"
 
+      # SKIP_DONE: a cell with logs/timing.json already finished -> don't
+      # re-export or resubmit it (resume a partial/aborted sweep cheaply).
+      if [ "${SKIP_DONE}" = "1" ] && [ -f "${cell}/logs/timing.json" ]; then
+        continue
+      fi
+
       # export inputs (fast, no NONMEM)
       if ! "${RSCRIPT_BIN}" script/psn_scm/export_one_dataset.R \
              --N "${N}" --scenario "${SCEN}" --dataset "${ds}" \
+             --structure "${STRUCT}" ${STRUCT_TOL_ARGS} \
              --out_root "${RUNS_ROOT}" >/dev/null 2>&1; then
         echo "  WARN: export failed for ${cell}; skipping" >&2
         n_export_fail=$((n_export_fail + 1))
@@ -188,11 +215,13 @@ echo "  ${out}"
 arrayid="$(printf '%s' "${out}" | grep -oE 'Job <[0-9]+>' | grep -oE '[0-9]+' | head -1)"
 
 # ---- append manifest rows (one per element) so parse_full_grid.sh works as-is
-# manifest columns: N,scenario,dataset,cell,jobid,submitted_utc
-# jobid recorded as <arrayid>[<idx>] so a failed element is locatable.
+# manifest columns: N,scenario,dataset,cell,jobid,submitted_utc,structure
+# jobid recorded as <arrayid>[<idx>] so a failed element is locatable.  The
+# trailing structure column tells parse_full_grid.sh which model each cell used
+# (advan4|ode) so parsing/staging tag it correctly.
 now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 while IFS=$'\t' read -r i N SCEN ds cell; do
-  echo "${N},${SCEN},${ds},${cell},${arrayid:-NA}[${i}],${now}" >> "${MANIFEST}"
+  echo "${N},${SCEN},${ds},${cell},${arrayid:-NA}[${i}],${now},${STRUCT}" >> "${MANIFEST}"
 done < "${INDEX}"
 
 echo

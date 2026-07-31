@@ -32,6 +32,13 @@ out_path   <- getopt("--out")
 data_rel   <- getopt("--data", "../data.csv")
 cov_file   <- getopt("--cov_file", "final_refit_cov.txt")
 maxeval    <- getopt("--maxeval", "0")
+# Optional ODE refit tolerances (structure="ode" only).  When set, rewrite the
+# winner .mod's $SUBROUTINE ADVAN13 TOL=/ATOL= so the MAXEVAL=0 covariance refit
+# runs at the FINAL (not screening) tolerance.  NONMEM sig-digit style:
+# TOL=n <-> rtol=1e-n, ATOL=n <-> atol=1e-n.  Absent -> winner .mod unchanged
+# (advan4 analytic has no ODE tol, so this is a no-op there).
+refit_tol  <- getopt("--tol")
+refit_atol <- getopt("--atol")
 stopifnot(!is.null(winner_mod), !is.null(winner_ext), !is.null(out_path))
 stopifnot(file.exists(winner_mod), file.exists(winner_ext))
 
@@ -125,6 +132,18 @@ for (line in mln) {
     } else {
       line <- paste0(line, " MAXEVAL=", maxeval)
     }
+  }
+
+  # ODE refit tol: rewrite $SUBROUTINE ADVAN13 TOL=/ATOL= to the FINAL tol.
+  # Rewrite ATOL first, then TOL with a lookbehind so the "TOL" inside "ATOL"
+  # is not double-matched.  No-op if the line carries no TOL/ATOL (advan4).
+  if (grepl("^\\s*\\$SUB", line, ignore.case = TRUE)) {
+    if (!is.null(refit_atol))
+      line <- gsub("ATOL\\s*=\\s*[0-9]+", paste0("ATOL=", refit_atol),
+                   line, ignore.case = TRUE)
+    if (!is.null(refit_tol))
+      line <- gsub("(?<![Aa])TOL\\s*=\\s*[0-9]+", paste0("TOL=", refit_tol),
+                   line, ignore.case = TRUE, perl = TRUE)
   }
 
   # fix $DATA path to the cell's data.csv (winner lived deep in scm_dir)

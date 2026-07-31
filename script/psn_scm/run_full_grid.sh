@@ -55,6 +55,10 @@ QUEUE="${QUEUE:-}"
 THROTTLE="${THROTTLE:-400}"
 R_MODULE="${R_MODULE:-R/4.3.1-gomkl-2022a-0.1}"
 DRY_RUN="${DRY_RUN:-0}"
+# STRUCT selects the structural model for the sweep (advan4|ode); run ode into a
+# separate BENCH_ROOT.  STRUCT_TOL_ARGS forwards --screen_tol/--refit_tol etc.
+STRUCT="${STRUCT:-advan4}"
+STRUCT_TOL_ARGS="${STRUCT_TOL_ARGS:-}"
 
 # Isolated output tree for the FULL launch -- kept SEPARATE from the pilot
 # (output/psn_scm/runs, records) so a full sweep never overwrites the working
@@ -110,7 +114,7 @@ wait_for_slot() {
 }
 
 # ---- manifest header (once) --------------------------------------------------
-[ -f "${MANIFEST}" ] || echo "N,scenario,dataset,cell,jobid,submitted_utc" > "${MANIFEST}"
+[ -f "${MANIFEST}" ] || echo "N,scenario,dataset,cell,jobid,submitted_utc,structure" > "${MANIFEST}"
 
 n_cells=0; n_submitted=0; n_export_fail=0
 echo "=== PsN SCM full grid: N=[${N_LIST}] scn=[${SCEN_LIST}] ds=${DS_MIN}..${DS_MAX} ==="
@@ -132,6 +136,7 @@ for N in ${N_LIST}; do
       # 1) export inputs
       if ! "${RSCRIPT_BIN}" script/psn_scm/export_one_dataset.R \
              --N "${N}" --scenario "${SCEN}" --dataset "${ds}" \
+             --structure "${STRUCT}" ${STRUCT_TOL_ARGS} \
              --out_root "${RUNS_ROOT}" >/dev/null 2>&1; then
         echo "  WARN: export failed for ${cell}; skipping" >&2
         n_export_fail=$((n_export_fail + 1))
@@ -151,7 +156,7 @@ for N in ${N_LIST}; do
              "bash submit_scm.sh" 2>&1 )"
       echo "  ${cell}: ${out}"
       jobid="$(printf '%s' "${out}" | grep -oE 'Job <[0-9]+>' | grep -oE '[0-9]+' | head -1)"
-      echo "${N},${SCEN},${ds},${cell},${jobid:-NA},$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "${MANIFEST}"
+      echo "${N},${SCEN},${ds},${cell},${jobid:-NA},$(date -u +%Y-%m-%dT%H:%M:%SZ),${STRUCT}" >> "${MANIFEST}"
       n_submitted=$((n_submitted + 1))
     done
   done

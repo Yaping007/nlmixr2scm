@@ -193,10 +193,21 @@ else
   # giving SE / condition number for the wrong point in parameter space.
   winner_ext="${winner%.mod}.ext"
   seeded=0
+  # ODE refit tol (structure=ode): export writes refit_tol.txt (TOL=/ATOL=); pass
+  # it to seed_refit so the MAXEVAL=0 refit runs at the FINAL tol.  Absent for
+  # advan4 (analytic) -> refit_tol_args stays empty and the winner .mod is used
+  # as-is.
+  refit_tol_args=()
+  if [ -f "./refit_tol.txt" ]; then
+    rtol_val="$(sed -n 's/^TOL=\([0-9]\+\).*/\1/p'  ./refit_tol.txt | head -1)"
+    ratol_val="$(sed -n 's/^ATOL=\([0-9]\+\).*/\1/p' ./refit_tol.txt | head -1)"
+    [ -n "${rtol_val}"  ] && refit_tol_args+=(--tol  "${rtol_val}")
+    [ -n "${ratol_val}" ] && refit_tol_args+=(--atol "${ratol_val}")
+  fi
   if [ -f "${winner_ext}" ]; then
     if run_seed --winner_mod "${winner}" --winner_ext "${winner_ext}" \
          --out refit/refit.mod --data "../data.csv" \
-         --cov_file "${REFIT_COV_FILE}" --maxeval 0; then
+         --cov_file "${REFIT_COV_FILE}" --maxeval 0 "${refit_tol_args[@]}"; then
       seeded=1
     else
       echo "WARN: seed_refit failed; refit skipped (cov_done will be FALSE)." >&2

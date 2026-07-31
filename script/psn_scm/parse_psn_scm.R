@@ -694,6 +694,11 @@ if (!interactive() && sys.nframe() == 0L) {
   N      <- as.integer(getopt("--N", "300"))
   scn    <- as.integer(getopt("--scenario", "16"))
   ds     <- as.integer(getopt("--dataset", "1"))
+  # structure tag recorded into the record (model_type / identity$structure):
+  #   "advan4" (default, ADVAN4 analytic) | "ode" (ADVAN13 general-ODE).
+  #   Distinguished downstream from runSCM's structure="ode" by estimator
+  #   (nonmem_scm vs the runSCM label), so both ODE structures share the tag.
+  structure <- tolower(getopt("--structure", "advan4"))
   tp_path <- getopt("--true_params", "Inputdataset/true_params_long.rds")
   stopifnot(!is.null(cell))
   # default record path mirrors the cell under records/ instead of runs/
@@ -702,7 +707,7 @@ if (!interactive() && sys.nframe() == 0L) {
   dir.create(dirname(out_rds), recursive = TRUE, showWarnings = FALSE)
 
   true_params <- readRDS(tp_path)
-  rec <- build_record(cell, N, scn, ds, true_params)
+  rec <- build_record(cell, N, scn, ds, true_params, structure = structure)
   saveRDS(rec, out_rds)
 
   # flat meta.json manifest (mirrors nlmixr2 res_ds*.meta.json headline fields)
