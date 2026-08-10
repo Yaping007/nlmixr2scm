@@ -65,7 +65,9 @@ suppressPackageStartupMessages({
 
 `%||%` <- function(a, b) if (is.null(a) || length(a) == 0L) b else a
 
-.STRUCT_LAB <- c(linCmt = "linCmt (analytic)", ode = "ODE")
+# advan4 FIRST -> top facet row (analytic-on-top convention).
+.STRUCT_LAB <- c(advan4 = "ADVAN4 (analytic)", linCmt = "linCmt (analytic)",
+                 ode = "ADVAN13 (ODE)")
 
 # pretty parameter labels (kept close to the raw names for traceability)
 .PARAM_LAB <- c(
@@ -193,6 +195,12 @@ fig_error_metrics <- function(
       conditioning = factor(conditioning,
                             levels = c("Unconditioned", "True selection")),
       struct_lab  = dplyr::coalesce(.STRUCT_LAB[structure], structure),
+      # ORDER rows by the .STRUCT_LAB sequence (advan4 -> linCmt -> ode) so the
+      # analytic panel sits ON TOP; a bare character would sort alphabetically
+      # and wrongly place "ADVAN13 (ODE)" above "ADVAN4 (analytic)".
+      struct_lab  = factor(struct_lab,
+                           levels = intersect(unname(.STRUCT_LAB),
+                                              unique(struct_lab))),
       sampN_lab   = factor(paste0("N = ", sample_N),
                            levels = paste0("N = ", c(40, 80, 300)))
     )

@@ -48,26 +48,33 @@ suppressPackageStartupMessages({
 # ---- shared look (mirrors fig_power.R) -------------------------------------
 .PAL_N <- c("40" = "#7F7F7F", "80" = "#E8820C", "300" = "#1F77B4")  # grey/orange/blue
 
-theme_scm <- function(base_size = 16) {
+theme_scm <- function(base_size = 14) {
   ggplot2::theme_minimal(base_size = base_size) +
     ggplot2::theme(
       panel.grid.minor = ggplot2::element_blank(),
       legend.position  = "top",
       legend.title     = ggplot2::element_text(size = base_size),
       legend.text      = ggplot2::element_text(size = base_size - 1),
-      strip.text       = ggplot2::element_text(face = "bold",
-                                               size = base_size + 1),
-      axis.title       = ggplot2::element_text(size = base_size + 1,
-                                               face = "bold"),
-      axis.text        = ggplot2::element_text(size = base_size - 2),
-      plot.title       = ggplot2::element_text(face = "bold")
+      strip.text       = ggplot2::element_text(size = base_size),
+      axis.title       = ggplot2::element_text(size = base_size),
+      axis.text.x      = ggplot2::element_text(size = base_size - 4),
+      axis.text.y      = ggplot2::element_text(size = base_size - 2),
+      plot.title       = ggplot2::element_text(size = base_size - 2)
     )
 }
 
-.STRUCT_LAB <- c(linCmt = "linCmt (analytic)", ode = "ODE",
-                 advan4 = "NONMEM (ADVAN4)")
+# advan4 FIRST so it is the top facet panel (analytic-on-top convention, matching
+# linCmt-on-top for the nlmixr2 figures). PsN data carries advan4 + ode; nlmixr2
+# data carries linCmt + ode -- unused levels are dropped by the facet.
+.STRUCT_LAB <- c(advan4 = "ADVAN4 (analytic)", linCmt = "linCmt (analytic)",
+                 ode = "ADVAN13 (ODE)")
 
-.METRIC_LAB <- c(
+# NOTE: diag-UNIQUE names (.DIAG_*) so sourcing fig_power.R -- which defines its
+# own global `.METRIC_LAB` / `.PAL_METRIC_LT` with DIFFERENT (Power*) keys -- can
+# never clobber these. A shared name previously caused fig_diag_rates() to look
+# up Converged/CNBelowCutoff/ConvergedStrict in the Power palette (-> all NA
+# linetypes -> every connecting line dropped) when both files were sourced.
+.DIAG_METRIC_LAB <- c(
   Converged       = "Converged (%)",
   CNBelowCutoff   = "Cond# < 1000 (%)",
   ConvergedStrict = "Converged & Cond# < 1000 (%)",
@@ -84,9 +91,9 @@ theme_scm <- function(base_size = 16) {
   MinSuc          = "MinSuc_pct"
 )
 
-# metric linetypes (multi-metric overlay mode only)
-.PAL_METRIC_LT <- c(Converged = "solid", CNBelowCutoff = "22",
-                    ConvergedStrict = "42", CovStep = "44", MinSuc = "13")
+# metric linetypes (multi-metric overlay mode only); diag-UNIQUE name.
+.DIAG_METRIC_LT <- c(Converged = "solid", CNBelowCutoff = "22",
+                     ConvergedStrict = "42", CovStep = "44", MinSuc = "13")
 
 # ---- main ------------------------------------------------------------------
 fig_diag_rates <- function(agg_dir   = "output/vae_covsel_aggregated",
@@ -138,6 +145,12 @@ fig_diag_rates <- function(agg_dir   = "output/vae_covsel_aggregated",
                  collapse = ", "), ")")
   }
 
+  # platform-aware structure labels: PsN/NONMEM (estimator == "nonmem_scm")
+  # renders ode as "ADVAN13 (ODE)"; nlmixr2 (focei/vae) renders plain "ODE".
+  is_nonmem  <- "estimator" %in% names(dat) && any(dat$estimator == "nonmem_scm")
+  struct_lab <- .STRUCT_LAB
+  if (!is_nonmem) struct_lab["ode"] <- "ODE"
+
   metric_cols <- unname(.METRIC_COL[metric])
   plot_df <- dat |>
     dplyr::select(sample_N, scenario, structure, dplyr::all_of(metric_cols)) |>
@@ -148,10 +161,10 @@ fig_diag_rates <- function(agg_dir   = "output/vae_covsel_aggregated",
                          levels = valid_metrics),
       scenario  = factor(scenario, levels = sort(unique(scenario))),
       sample_N  = factor(sample_N, levels = c(40, 80, 300)),
-      structure = factor(structure, levels = names(.STRUCT_LAB))
+      structure = factor(structure, levels = names(struct_lab))
     )
 
-  y_lab <- if (multi) "Rate (%)" else .METRIC_LAB[[metric]]
+  y_lab <- if (multi) "Rate (%)" else .DIAG_METRIC_LAB[[metric]]
 
   ylim   <- range(ylim)
   .span  <- diff(ylim)
@@ -170,7 +183,7 @@ fig_diag_rates <- function(agg_dir   = "output/vae_covsel_aggregated",
     ggplot2::geom_line(linewidth = 0.8) +
     ggplot2::geom_point(size = 2) +
     ggplot2::facet_wrap(~ structure, nrow = 1,
-                        labeller = ggplot2::labeller(structure = .STRUCT_LAB)) +
+                        labeller = ggplot2::labeller(structure = struct_lab)) +
     ggplot2::scale_colour_manual(values = .PAL_N, name = "Sample size",
                                  labels = function(x) paste0(x, " subj")) +
     ggplot2::scale_y_continuous(breaks = .brks,
@@ -186,9 +199,24 @@ fig_diag_rates <- function(agg_dir   = "output/vae_covsel_aggregated",
 
   if (multi) {
     p <- p + ggplot2::scale_linetype_manual(
-      values = .PAL_METRIC_LT[metric], name = "Metric",
-      labels = .METRIC_LAB[metric])
+      values = .DIAG_METRIC_LT[metric], name = "Metric",
+      labels = .DIAG_METRIC_LAB[metric])
   }
+
+  # Put the two top legends (Sample size + Metric) SIDE BY SIDE on a single row.
+  # (Kept identical to fig_power.R so convergence and power legends match.)
+  p <- p + ggplot2::theme(
+      legend.box          = "horizontal",
+      legend.box.just     = "left",
+      legend.box.spacing  = ggplot2::unit(2, "pt"),
+      legend.spacing.x    = ggplot2::unit(4, "pt"),
+      legend.margin       = ggplot2::margin(0, 0, 0, 0),
+      legend.key.size     = ggplot2::unit(14, "pt"),
+      legend.title        = ggplot2::element_text(size = 12),
+      legend.text         = ggplot2::element_text(size = 12)
+    ) +
+    ggplot2::guides(colour   = ggplot2::guide_legend(nrow = 1),
+                    linetype = ggplot2::guide_legend(nrow = 1))
 
   if (isTRUE(save)) {
     dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
@@ -197,8 +225,8 @@ fig_diag_rates <- function(agg_dir   = "output/vae_covsel_aggregated",
     est_tag <- if (all(c("estimator", "outer_opt") %in% names(dat)))
                  paste0("_", dat$estimator[1], "_", dat$outer_opt[1]) else ""
     stub  <- file.path(out_dir, sprintf("fig_diag_rates_%s_%s%s", stru, tag, est_tag))
-    ggplot2::ggsave(paste0(stub, ".png"), p, width = 12, height = 5, dpi = 150)
-    ggplot2::ggsave(paste0(stub, ".pdf"), p, width = 12, height = 5)
+    ggplot2::ggsave(paste0(stub, ".png"), p, width = 9, height = 4.5, dpi = 150)
+    ggplot2::ggsave(paste0(stub, ".pdf"), p, width = 9, height = 4.5)
     message("saved: ", stub, ".{png,pdf}")
   }
 

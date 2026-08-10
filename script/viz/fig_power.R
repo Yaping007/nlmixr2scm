@@ -45,18 +45,25 @@ suppressPackageStartupMessages({
 # ---- shared look (local for now; promotable to viz_common.R later) ---------
 .PAL_N <- c("40" = "#7F7F7F", "80" = "#E8820C", "300" = "#1F77B4")  # grey/orange/blue
 
-theme_scm <- function(base_size = 12) {
+theme_scm <- function(base_size = 14) {
   ggplot2::theme_minimal(base_size = base_size) +
     ggplot2::theme(
       panel.grid.minor = ggplot2::element_blank(),
       legend.position  = "top",
-      strip.text       = ggplot2::element_text(face = "bold"),
-      plot.title       = ggplot2::element_text(face = "bold")
+      legend.title     = ggplot2::element_text(size = base_size),
+      legend.text      = ggplot2::element_text(size = base_size - 1),
+      strip.background = ggplot2::element_rect(fill = "grey92", colour = NA),
+      strip.text       = ggplot2::element_text(size = base_size),
+      axis.title       = ggplot2::element_text(size = base_size),
+      axis.text.x      = ggplot2::element_text(size = base_size - 4),
+      axis.text.y      = ggplot2::element_text(size = base_size - 2),
+      plot.title       = ggplot2::element_text(size = base_size - 2)
     )
 }
 
-.STRUCT_LAB <- c(linCmt = "linCmt (analytic)", ode = "ODE",
-                 advan4 = "NONMEM (ADVAN4)")
+# advan4 FIRST -> top facet panel (analytic-on-top convention).
+.STRUCT_LAB <- c(advan4 = "ADVAN4 (analytic)", linCmt = "linCmt (analytic)",
+                 ode = "ADVAN13 (ODE)")
 
 .METRIC_LAB <- c(Power       = "Power",
                  PowerCN     = "PowerCN",
@@ -119,6 +126,12 @@ fig_power <- function(agg_dir   = "output/vae_covsel_aggregated",
                  collapse = ", "), ")")
   }
 
+  # platform-aware structure labels: PsN/NONMEM (estimator == "nonmem_scm")
+  # renders ode as "ADVAN13 (ODE)"; nlmixr2 (focei/vae) renders plain "ODE".
+  is_nonmem  <- "estimator" %in% names(dat) && any(dat$estimator == "nonmem_scm")
+  struct_lab <- .STRUCT_LAB
+  if (!is_nonmem) struct_lab["ode"] <- "ODE"
+
   # long over the requested metrics
   plot_df <- dat |>
     dplyr::select(sample_N, scenario, structure, dplyr::all_of(metric)) |>
@@ -127,7 +140,7 @@ fig_power <- function(agg_dir   = "output/vae_covsel_aggregated",
     dplyr::transmute(
       scenario  = factor(scenario, levels = sort(unique(scenario))),
       sample_N  = factor(sample_N, levels = c(40, 80, 300)),
-      structure = factor(structure, levels = names(.STRUCT_LAB)),
+      structure = factor(structure, levels = names(struct_lab)),
       metric    = factor(metric, levels = valid_metrics),
       power_pct = power * 100
     )
@@ -147,8 +160,8 @@ fig_power <- function(agg_dir   = "output/vae_covsel_aggregated",
                         colour = "grey40", linewidth = 0.4) +
     ggplot2::geom_line(linewidth = 0.8) +
     ggplot2::geom_point(size = 2) +
-    ggplot2::facet_wrap(~ structure, ncol = 1,
-                        labeller = ggplot2::labeller(structure = .STRUCT_LAB)) +
+    ggplot2::facet_wrap(~ structure, nrow = 1,
+                        labeller = ggplot2::labeller(structure = struct_lab)) +
     ggplot2::scale_colour_manual(values = .PAL_N, name = "Sample size",
                                  labels = function(x) paste0(x, " subj")) +
     ggplot2::scale_y_continuous(limits = c(0, 100),
@@ -165,14 +178,29 @@ fig_power <- function(agg_dir   = "output/vae_covsel_aggregated",
       labels = .METRIC_LAB[metric])
   }
 
+  # Put the two top legends (Sample size + Power definition) SIDE BY SIDE on a
+  # single row (matching the convergence figure).
+  p <- p + ggplot2::theme(
+      legend.box          = "horizontal",
+      legend.box.just     = "left",
+      legend.box.spacing  = ggplot2::unit(2, "pt"),
+      legend.spacing.x    = ggplot2::unit(4, "pt"),
+      legend.margin       = ggplot2::margin(0, 0, 0, 0),
+      legend.key.size     = ggplot2::unit(14, "pt"),
+      legend.title        = ggplot2::element_text(size = 11.5),
+      legend.text         = ggplot2::element_text(size = 11.5)
+    ) +
+    ggplot2::guides(colour   = ggplot2::guide_legend(nrow = 1),
+                    linetype = ggplot2::guide_legend(nrow = 1))
+
   if (isTRUE(save)) {
     dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
     tag  <- if (multi) "multi" else metric
     cell <- paste(c(estimator, outer_opt), collapse = "_")
     if (nzchar(cell)) tag <- paste(cell, tag, sep = "_")
     stub <- file.path(out_dir, sprintf("fig_power_%s", tag))
-    ggplot2::ggsave(paste0(stub, ".png"), p, width = 9, height = 7, dpi = 150)
-    ggplot2::ggsave(paste0(stub, ".pdf"), p, width = 9, height = 7)
+    ggplot2::ggsave(paste0(stub, ".png"), p, width = 12, height = 4.5, dpi = 150)
+    ggplot2::ggsave(paste0(stub, ".pdf"), p, width = 12, height = 4.5)
     message("saved: ", stub, ".{png,pdf}")
   }
 

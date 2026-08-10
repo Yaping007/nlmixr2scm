@@ -119,8 +119,9 @@ suppressPackageStartupMessages({
     dplyr::select(-tidyselect::any_of(c(".denom", ".denom_cell", ".denom_scn")))
 }
 
-.STRUCT_LAB <- c(linCmt = "linCmt (analytic)", ode = "ODE",
-                 advan4 = "NONMEM (ADVAN4)")
+# advan4 FIRST -> leftmost structure column (analytic-first convention).
+.STRUCT_LAB <- c(advan4 = "ADVAN4 (analytic)", linCmt = "linCmt (analytic)",
+                 ode = "ADVAN13 (ODE)")
 
 # canonical effect ordering: structural param first, then covariate
 .VAR_LAB   <- c(cl = "CL", vc = "VC", q = "Q", vp = "VP", ka = "KA")
@@ -413,15 +414,15 @@ fig_covsel_heatmap_scm <- function(
       s_ord    = match(tolower(shape), .SHAPE_ORD),
       scenario = factor(scenario, levels = sort(unique(scenario))),
       struct_f = dplyr::recode(structure,
-                               linCmt = "linCmt (analytic)", ode = "ODE",
-                               advan4 = "NONMEM (ADVAN4)"),
+                               linCmt = "linCmt (analytic)", ode = "ADVAN13 (ODE)",
+                               advan4 = "ADVAN4 (analytic)"),
       sample_N = factor(paste0("N = ", sample_N),
                         levels = paste0("N = ", c(40, 80, 300)))
     ) |>
     dplyr::filter(!is.na(v_ord), !is.na(c_ord), !is.na(s_ord)) |>
     dplyr::mutate(
       struct_f = factor(struct_f,
-        levels = intersect(c("linCmt (analytic)", "ODE", "NONMEM (ADVAN4)"),
+        levels = intersect(c("ADVAN4 (analytic)", "linCmt (analytic)", "ADVAN13 (ODE)"),
                            unique(struct_f)))
     )
 
