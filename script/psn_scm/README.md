@@ -465,3 +465,125 @@ p_sel <- fig_covsel_heatmap_scm(agg_dir = "output/psn_scm_ode0729_aggregated",
 ```
 
 For a direct **NONMEM-ODE vs runSCM-ODE** figure, aggregate the runSCM `ode` records with `aggregate_scm_estimator2.1.R` and pass both `agg_dir`s (or both `sources`) — the two share `structure="ode"` and separate on `estimator`.
+
+------------------------------------------------------------------------
+
+## 8. ODE sweep — split-tree, per-cohort queue workflow (as run)
+
+The full ODE grid (`N∈{40,80,300} × 16 scn × ds 1–100 = 4800 cells`) was run in **two separate `BENCH_ROOT` trees** because the cohorts differ wildly in per-fit cost — N40/N80 finish on `short`, but the N300 `ADVAN13`+`$DES` fits are slow and the four fully-loaded scenarios need `long`. Splitting the trees lets each cohort use its own queue and its own LSF array **without waiting for the other to drain**.
+
+### Storage layout (why two trees)
+
+| tree (`BENCH_ROOT`) | cohorts | queue | array files |
+|---|---|---|---|
+| `output/psn_scm_ode0729` | N40, N80 | `short` | `array_index.tsv`, `array_task.sh`, `manifest.csv` |
+| `output/psn_scm_ode0729_N300` | N300 | split `short`/`long` (see below) | `array_index.psnscm_n300_light.tsv` + `…_long.tsv`, matching `array_task.*.sh`, `manifest.csv` |
+
+**The `runs/` directories MUST stay in different trees** — each tree carries its own `manifest.csv` (what the parser walks) and its own `array_index*.tsv`. Do **not** `mv` the N300 `runs/` under the N40/N80 tree; the manifests wouldn't cover the moved cells and the parse would skip them. Keeping them separate has **zero downside** downstream: records/aggregation are keyed `N{n}/scn{s}/ds{d}`, so cohorts never collide and simply reunite by key at the `ResforAggregation` layer.
+
+### Queue assignment (per cohort × scenario)
+
+Wall cost tracks the number of active covariate effects (scenario 16 = all four; scenario 1 = none):
+
+| cohort | scenarios | queue | wall (`-W`) | why |
+|---|---|---|---|---|
+| N40, N80 | 1–16 (all) | `short` | 60 min | small populations; every ODE fit finishes fast |
+| N300 | 1–11, 13 | `short` | 60 min | sparse/light covariate loads → still fit within `short` |
+| N300 | **12, 14, 15, 16** | `long` | ≥ 6000 min | densest covariate scenarios; `ADVAN13`+`$DES` re-estimated each SCM step is slow |
+
+The N300 tree is therefore submitted as **two LSF arrays** — a `light` array (`short`, scn 1–11,13) and a `long` array (`long`, scn 12,14–16) — hence the two `array_index.psnscm_n300_{light,long}.tsv` + `array_task.psnscm_n300_{light,long}.sh` pairs.
+
+> **Do the two N300 arrays need to finish sequentially?** **No.** The `light` and `long` arrays write into **disjoint** cell sets (different scenarios), so they can run **concurrently** — submit both, they never touch the same `ds` folder. You only wait *within* a tree if you were re-using the **same** `scm_dir` (you aren't). The sole gate is: **all cells must have `logs/timing.json` before you parse that tree.**
+
+### Step 1 — submit (per cohort/queue)
+
+``` bash
+# --- Tree 1: N40 + N80 on short ---
+STRUCT=ode BENCH_ROOT=output/psn_scm_ode0729 \
+  N_LIST="40 80" QUEUE=short WALL_MIN=60 \
+  bash script/psn_scm/run_full_grid_array.sh
+
+# --- Tree 2: N300, light scenarios on short (1–11,13) ---
+STRUCT=ode BENCH_ROOT=output/psn_scm_ode0729_N300 \
+  N_LIST="300" SCEN_LIST="1 2 3 4 5 6 7 8 9 10 11 13" \
+  QUEUE=short WALL_MIN=60 ARRAY_TAG=psnscm_n300_light \
+  bash script/psn_scm/run_full_grid_array.sh
+
+# --- Tree 2: N300, heavy scenarios on long (12,14,15,16) ---
+STRUCT=ode BENCH_ROOT=output/psn_scm_ode0729_N300 \
+  N_LIST="300" SCEN_LIST="12 14 15 16" \
+  QUEUE=long WALL_MIN=6000 ARRAY_TAG=psnscm_n300_long \
+  bash script/psn_scm/run_full_grid_array.sh
+```
+
+> Confirm the exact env-var names your `run_full_grid_array.sh` reads (`QUEUE`/`WALL_MIN`/`SCEN_LIST`/`ARRAY_TAG`); the labels above match the driver's documented defaults (`WALL_MIN=60`, `THROTTLE`, `CORES=4`). If it uses `bsub -q` inline instead of a `QUEUE=` knob, pass the queue through whatever flag the driver exposes.
+
+### Completeness gate (before parsing each tree)
+
+Parse a tree **only once every cell has `logs/timing.json`** (the last-written done-marker). Per-cohort check:
+
+``` bash
+# N40 / N80 tree
+for N in 40 80; do
+  ROOT=output/psn_scm_ode0729/runs/N$N
+  for scn in "$ROOT"/scn*; do for i in $(seq -w 1 100); do
+    [ -f "$scn/ds$i/logs/timing.json" ] || echo "N$N $(basename $scn) ds$i MISSING"
+  done; done
+done
+# N300 tree
+ROOT=output/psn_scm_ode0729_N300/runs/N300
+for scn in "$ROOT"/scn*; do for i in $(seq -w 1 100); do
+  [ -f "$scn/ds$i/logs/timing.json" ] || echo "N300 $(basename $scn) ds$i MISSING"
+done; done
+```
+
+Prints nothing ⇒ that tree is complete and ready to parse. (This is the same gate used to find the scn07/08 N300 rescue cells that were resubmitted to `long`.)
+
+### Step 2 — parse each tree separately, stage into ONE shared root
+
+Both trees are parsed **independently** (each against its own `manifest.csv`) but `STAGE_DST` points at the **same** `ResforAggregation` folder, so all cohorts land side-by-side in the aggregator layout. Records/`res_ds*.rds` are keyed by `N{n}/scn{s}_ode/…` — no cohort collides.
+
+``` bash
+# Tree 1: N40 + N80  ->  shared ResforAggregation
+STRUCT=ode STAGE_DST=output/psn_scm_ode0729/ResforAggregation FORCE=1 \
+  BENCH_ROOT=output/psn_scm_ode0729 \
+  bash script/psn_scm/parse_full_grid.sh
+
+# Tree 2: N300  ->  SAME shared ResforAggregation
+STRUCT=ode STAGE_DST=output/psn_scm_ode0729/ResforAggregation FORCE=1 \
+  BENCH_ROOT=output/psn_scm_ode0729_N300 \
+  bash script/psn_scm/parse_full_grid.sh
+```
+
+Verified run output (this exact split):
+
+```
+# Tree 1
+parsed: 3652  skipped: 0  waiting: 0  failed: 0
+records -> output/psn_scm_ode0729/records/
+staged  -> output/psn_scm_ode0729/ResforAggregation/N*/scn*_ode/nonmem_scm_focei/res_ds*.rds
+# Tree 2
+parsed: 1600  skipped: 0  waiting: 0  failed: 0
+records -> output/psn_scm_ode0729_N300/records/
+staged  -> output/psn_scm_ode0729/ResforAggregation/N*/scn*_ode/nonmem_scm_focei/res_ds*.rds
+```
+
+> Note the **records/** stay in each tree (`psn_scm_ode0729/records/` and `psn_scm_ode0729_N300/records/`) — only the **staged** `res_ds*.rds` are pooled into the one `ResforAggregation`. Tree 1's `parsed: 3652` covers N40+N80 (3200 cells) plus any `advan4`/extra rows in that manifest; Tree 2's `1600` = N300 × 16 scn × 100 ds.
+
+### Step 3 — aggregate the pooled root (one pass)
+
+Because both cohorts' `res_ds*.rds` share the one `ResforAggregation`, a **single** aggregate call produces the combined N40/N80/N300 CSVs:
+
+``` bash
+Rscript script/psn_scm/aggregate_psn_scm.R \
+  --root output/psn_scm_ode0729 --sub ResforAggregation \
+  --out_dir output/psn_scm_ode0729_aggregated
+```
+
+The aggregator groups by `(sample_N, scenario, structure, estimator, outer_opt)`, so all three cohorts appear as distinct `sample_N` rows in the same CSVs — ready for the `fig_*` layer (§7 "Visualising the ODE comparison").
+
+### Summary — the three rules for the split-tree run
+
+1. **Separate `runs/` trees** (different `BENCH_ROOT`) — one per queue/cohort strategy; never `mv` runs between them (breaks the per-tree manifest).
+2. **Parse each tree separately** against its own manifest, but **stage every tree into the same `ResforAggregation`** (keys are cohort-namespaced → no collision).
+3. **One aggregate call** over the pooled `ResforAggregation` → combined CSVs. Arrays within/across trees run concurrently; the only gate is `logs/timing.json` present for every cell before that tree is parsed.

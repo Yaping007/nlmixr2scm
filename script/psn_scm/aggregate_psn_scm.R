@@ -26,13 +26,13 @@
 #   agg <- aggregate_psn_scm_run(
 #     root    = "output/psn_scm_full0727",
 #     sub     = "ResforAggregation",
-#     out_dir = "output/psn_scm_full0727_aggregated"
+#     out_dir = "output/psn_scm_full0727_aggregated1"
 #   )
 #
 # CLI:
 #   Rscript script/psn_scm/aggregate_psn_scm.R \
 #     --root output/psn_scm_full0727 --sub ResforAggregation \
-#     --out_dir output/psn_scm_full0727_aggregated
+#     --out_dir output/psn_scm_full0727_aggregated1
 # =============================================================================
 
 suppressPackageStartupMessages({
