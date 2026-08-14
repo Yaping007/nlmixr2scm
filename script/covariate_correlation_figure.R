@@ -1,6 +1,6 @@
 # ==============================================================================
 # Covariate correlation figure (Fig 2 style) across three virtual-population
-# cohorts (N = 40, 80, 300) with 250 datasets each.
+# cohorts (N = 40, 80, 300), restricted to the first 100 replicate datasets.
 # ------------------------------------------------------------------------------
 #   Inputs (relative to workspace root):
 #     simulated_virtual_dataset_eta_filtered_N40/sim_obs_all_scenarios.rds
@@ -11,10 +11,12 @@
 #
 #   Outputs:
 #     simulated_virtual_dataset/ref_cor.rds
-#     outputs/covariate_cor_summary.csv
-#     outputs/fig2_covariate_correlation_{N40,N80,N300}.png  (300 dpi)
+#     output/figures/correlationMatrix/covariate_cor_summary.csv
+#     output/figures/correlationMatrix/fig2_covariate_correlation_{N40,N80,N300}.png
 #
 #   Design notes:
+#     * Only datasets 1-100 are used (DATASET <= DATASET_MAX); set DATASET_MAX
+#       below to change the range.
 #     * Covariates in each sim dataset are scenario-invariant (iCov is shared
 #       across the 16 scenarios in simulate_scenario_v2()), so we dedupe on
 #       (DATASET, SUBJECT) within SCENARIO == 1.
@@ -41,17 +43,20 @@ suppressPackageStartupMessages({
 NHANES_DIR <- "C:/Users/LIUYA8J/OneDrive - Novartis Pharma AG/Internship/NHANES_dataset"
 
 cohort_paths <- c(
-  N40  = "simulated_virtual_dataset_eta_filtered_N40/sim_obs_all_scenarios.rds",
-  N80  = "simulated_virtual_dataset_eta_filtered_N80/sim_obs_all_scenarios.rds",
-  N300 = "simulated_virtual_dataset_eta_filtered/sim_obs_all_scenarios.rds"
+  N40  = "Inputdataset/sim_obs_N40/sim_obs_scenario_01.rds",
+  N80  = "Inputdataset/sim_obs_N80/sim_obs_scenario_01.rds",
+  N300 = "Inputdataset/sim_obs_N300/sim_obs_scenario_01.rds"
 )
 
-out_fig_dir <- "outputs"
+out_fig_dir <- "output/figures/correlationMatrix"
 out_ref_dir <- "simulated_virtual_dataset"
 dir.create(out_fig_dir, showWarnings = FALSE, recursive = TRUE)
 dir.create(out_ref_dir, showWarnings = FALSE, recursive = TRUE)
 
 VAR_ORDER <- c("BMI", "BW", "CrCL", "RACE", "SEX")
+
+# Focus the analysis on the first 100 replicate datasets (1-100) only.
+DATASET_MAX <- 100L
 
 # ==============================================================================
 # 1. Rebuild NHANES reference correlation
@@ -106,12 +111,17 @@ saveRDS(ref_cor, file.path(out_ref_dir, "ref_cor.rds"))
 #   Filter to SCENARIO == 1 (covariates are shared across all 16 scenarios)
 #   then distinct(DATASET, SUBJECT, <covariates>). Result: 250 * N_subj rows.
 # ==============================================================================
-load_covariates <- function(path, var_order = VAR_ORDER) {
+load_covariates <- function(path, var_order = VAR_ORDER,
+                            dataset_max = DATASET_MAX) {
   if (!file.exists(path)) {
     stop("Missing sim dataset: ", path)
   }
-  readRDS(path) |>
-    dplyr::filter(SCENARIO == 1L) |>
+  d <- readRDS(path)
+  # Covariates are scenario-invariant; these files hold scenario 1 only. Keep
+  # the SCENARIO filter defensively in case a combined file is supplied.
+  if ("SCENARIO" %in% names(d)) d <- dplyr::filter(d, SCENARIO == 1L)
+  d |>
+    dplyr::filter(DATASET <= dataset_max) |>
     dplyr::distinct(DATASET, SUBJECT,
                     dplyr::across(dplyr::all_of(var_order))) |>
     dplyr::select(DATASET, SUBJECT, dplyr::all_of(var_order))
@@ -119,9 +129,9 @@ load_covariates <- function(path, var_order = VAR_ORDER) {
 
 cohort_cov <- purrr::map(cohort_paths, load_covariates)
 
-# Sanity: expect 250 datasets per cohort
+# Sanity: expect DATASET_MAX datasets per cohort
 cohort_n_ds <- vapply(cohort_cov, function(d) dplyr::n_distinct(d$DATASET), integer(1))
-if (any(cohort_n_ds != 250L)) {
+if (any(cohort_n_ds != DATASET_MAX)) {
   warning("Unexpected dataset counts: ",
           paste(sprintf("%s=%d", names(cohort_n_ds), cohort_n_ds), collapse = ", "))
 }
@@ -296,9 +306,9 @@ render_fig2_panel <- function(pooled, sd_mat = NULL, title, out_png,
 }
 
 cohort_titles <- c(
-  N40  = "N = 40 per dataset (250 datasets)",
-  N80  = "N = 80 per dataset (250 datasets)",
-  N300 = "N = 300 per dataset (250 datasets)"
+  N40  = sprintf("N = 40 per dataset (%d datasets)", DATASET_MAX),
+  N80  = sprintf("N = 80 per dataset (%d datasets)", DATASET_MAX),
+  N300 = sprintf("N = 300 per dataset (%d datasets)", DATASET_MAX)
 )
 
 for (cohort in names(cohort_paths)) {

@@ -200,6 +200,7 @@ fig_power_threeway_grid <- function(sources   = .TW_SOURCES,
                                     metrics   = c("Power", "PowerCN",
                                                   "PowerMinSuc"),
                                     save      = FALSE,
+                                    show_title = FALSE,
                                     out_dir   = "output/figures/threeway_N80",
                                     base_size = 16) {
   dat <- .tw_load_full(sources, metrics)
@@ -225,7 +226,7 @@ fig_power_threeway_grid <- function(sources   = .TW_SOURCES,
     scale_y_continuous(limits = c(0, 100),
                        labels = function(x) paste0(x, "%")) +
     labs(
-      title = "Covariate-selection power",
+      title = if (isTRUE(show_title)) "Covariate-selection power" else NULL,
       x     = "Simulation scenario",
       y     = "Power"
     ) +

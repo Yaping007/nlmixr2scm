@@ -76,9 +76,12 @@ DRYRUN="${DRYRUN:-0}"
 [ -n "${SCENARIOS:-}" ]  || SCENARIOS="1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16"
 [ -n "${STRUCTURES:-}" ] || STRUCTURES="linCmt ode"
 
-# Auto-detect scripts subdir holding the driver (same logic as submit_one_array.sh)
+# Auto-detect scripts subdir holding the driver (same logic as submit_one_array.sh).
+# The driver now lives alongside these submitters in script/hpce_vae_covsel/, so
+# that dir is searched FIRST; the flat script/ location is kept as a fallback for
+# older checkouts.
 SCRIPTS_DIR=""
-for c in script scripts R; do
+for c in script/hpce_vae_covsel script scripts R; do
   if [ -f "$REPO_ROOT/$c/vae_covsel_driver.R" ]; then
     SCRIPTS_DIR="$c"; break
   fi

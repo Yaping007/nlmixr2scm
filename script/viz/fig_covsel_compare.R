@@ -31,7 +31,7 @@ if (!exists(".fix_covsel_denom")) source("script/viz/fig_covsel_heatmap.R")
 
 .CMP_SOURCES <- list(
   "nlmixr2-SCM" = list(
-    path      = "output/scm_bench_rescue_winner_aggregated/scm_covsel_by_covar.csv",
+    path      = "output/scm_focei_bobyqa_703est_0805_aggregated/scm_covsel_by_covar.csv",
     estimator = "focei",
     outer_opt = "bobyqa"
   ),
@@ -41,7 +41,7 @@ if (!exists(".fix_covsel_denom")) source("script/viz/fig_covsel_heatmap.R")
     outer_opt = "focei"
   ),
   "nlmixr2-VAE" = list(
-    path      = "output/vae_covsel_full0729_est702_aggregated/vae_covsel_by_covar.csv",
+    path      = "output/vae_covsel_full0807_est703_aggregated/vae_covsel_by_covar.csv",
     estimator = NULL,
     outer_opt = NULL
   )
@@ -181,7 +181,7 @@ fig_covsel_diff <- function(sources   = .CMP_SOURCES,
   if (isTRUE(labels)) {
     lab <- dplyr::filter(dat, !is.na(delta))
     p <- p + geom_text(data = lab, aes(label = round(delta)),
-                       size = 3.2, fontface = "bold",
+                       size = 4.6, fontface = "bold",
                        colour = ifelse(abs(lab$delta) > 55, "white", "grey20"))
   }
 

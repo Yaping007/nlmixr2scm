@@ -39,7 +39,7 @@ if (!exists(".fix_covsel_denom")) source("script/viz/fig_covsel_heatmap.R")
 
 .SC_SOURCES <- list(
   "nlmixr2-SCM" = list(
-    dir = "output/scm_bench_rescue_winner_aggregated",
+    dir = "output/scm_focei_bobyqa_703est_0805_aggregated",
     diag_rates = "scm_diag_rates.csv", power = "scm_power.csv",
     by_covar = "scm_covsel_by_covar.csv", estim_cond = "scm_estim_cond.csv",
     diag_long = "scm_diag_long.csv", rse_long = "scm_rse_long.csv",
@@ -53,7 +53,7 @@ if (!exists(".fix_covsel_denom")) source("script/viz/fig_covsel_heatmap.R")
     wall = "wall_total_sec",
     estimator = "nonmem_scm", outer_opt = "focei"),
   "nlmixr2-VAE" = list(
-    dir = "output/vae_covsel_full0729_est702_aggregated",
+    dir = "output/vae_covsel_full0807_est703_aggregated",
     diag_rates = "vae_diag_rates.csv", power = "vae_power.csv",
     by_covar = "vae_covsel_by_covar.csv", estim_cond = "vae_estim_cond.csv",
     diag_long = "vae_diag_long.csv", rse_long = "vae_rse_long.csv",

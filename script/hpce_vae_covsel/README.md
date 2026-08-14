@@ -235,7 +235,7 @@ NS="40 80 300" SCENARIOS=16 STRUCTURES="linCmt ode" \
 OUT_ROOT=output/vae_covsel_full0723_est710 \
   bash script/hpce_vae_covsel/submit_all_arrays.sh 245 40 1
 
-  OUT_ROOT=output/vae_covsel_full0723_est710 bash script/hpce_vae_covsel/submit_all_arrays.sh 250 40 1
+  OUT_ROOT=output/vae_covsel_full0807_est703 bash script/hpce_vae_covsel/submit_all_arrays.sh 100 1 1
 ```
 
 Monitor and inspect resource usage:

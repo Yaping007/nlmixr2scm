@@ -242,7 +242,6 @@ bkill 261294 261295 261296 261297 261298 261299 261300 261301 261302 261303 2613
 bash script/hpce_scm_estimator/submit_one_array.sh 40  2 focei bobyqa linCmt 1 1 212 #retun failed runs
 bash script/hpce_scm_estimator/submit_one_array.sh 80  9 focei bobyqa linCmt 1 1  13
 
-
 bash script/hpce_scm_estimator/submit_one_array.sh 300  16 focei bobyqa ode 1 1 
 
 OUT_ROOT=output/scm_bench_rescue FORCE_RERUN=1 JOBTAG=rescue   bash script/hpce_scm_estimator/submit_one_array.sh 300 16 focei bobyqa ode 1 1

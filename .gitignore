@@ -79,3 +79,27 @@ renv/staging/
 
 output/
 share/
+
+# Generated figures and tables (produced on HPCE, disposable)
+figs/
+tables/
+presentation/
+# ---------------------------------------------------------------------------
+# PsN SCM benchmark (script/psn_scm): commit the LIGHT keepers, ignore the
+# HEAVY run trees.  output/ and *.rds/*.csv are ignored above, so we must
+# re-include each parent level, then the two keeper subtrees.
+#   runs/       -> heavy PsN/NONMEM churn (disposable, HPCE scratch): IGNORED
+#   records/    -> per-cell psn_scm_record.{rds,meta.json}          : COMMITTED
+#   aggregated/ -> cohort roll-ups (rds/csv)                        : COMMITTED
+# ---------------------------------------------------------------------------
+!output/
+output/*
+!output/psn_scm/
+output/psn_scm/*
+!output/psn_scm/records/
+!output/psn_scm/records/**
+!output/psn_scm/aggregated/
+!output/psn_scm/aggregated/**
+# keep runs/ explicitly ignored even though it lives under the re-included parent
+output/psn_scm/runs/
+output/psn_scm/records/
