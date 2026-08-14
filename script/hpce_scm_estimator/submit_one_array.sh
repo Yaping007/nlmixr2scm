@@ -81,6 +81,12 @@ REPACKAGE=${REPACKAGE:-0}
 # profile-on-stall rescue) so the cached scm_ds*.rds must be regenerated.
 FORCE_RERUN=${FORCE_RERUN:-0}
 
+# Profile-on-stall rescue toggle (A/B test). TRUE (default) runs the 1-D
+# frozen-base profile warm-start when a candidate stalls; FALSE disables it so
+# the power contribution of that rescue can be isolated. Changing this alters
+# the SCM search, so pair FALSE runs with FORCE_RERUN=1 + a distinct OUT_ROOT.
+PROFILE_INIT_ON_STALL=${PROFILE_INIT_ON_STALL:-TRUE}
+
 # Force the personal library (rxode2 >= 5.1.3) ahead of the site lib. `module
 # load R` can point R_LIBS_USER at a site lib carrying rxode2 5.0.2, which then
 # loads first and aborts nlmixr2 with "namespace 'rxode2' 5.0.2 is already
@@ -131,7 +137,7 @@ bsub_out="$(
     -J "${JOBNAME}[${DS_START}-${DS_END}]%${MAXPAR}" \
     -o "${LOGDIR}/${JOBNAME}.%J.%I.out" \
     -e "${LOGDIR}/${JOBNAME}.%J.%I.err" \
-    -env "all, REPO_ROOT=${REPO_ROOT}, SCRIPTS_DIR=${SCRIPTS_DIR}, SAMPLE_N=${SAMPLE_N}, SCN=${SCN}, EST=${EST}, OPT=${OPT}, STRUCTURE=${STRUCTURE}, WORKERS=${WORKERS}, RX_THREADS=${RX_THREADS}, OUT_ROOT=${OUT_ROOT}, SCREEN_SIGDIG=${SCREEN_SIGDIG}, SCREEN_ATOL=${SCREEN_ATOL}, SCREEN_RTOL=${SCREEN_RTOL}, WARM=${WARM}, REPACKAGE=${REPACKAGE}, FORCE_RERUN=${FORCE_RERUN}, R_LIBS_USER_OVERRIDE=${R_LIBS_USER_OVERRIDE}" \
+    -env "all, REPO_ROOT=${REPO_ROOT}, SCRIPTS_DIR=${SCRIPTS_DIR}, SAMPLE_N=${SAMPLE_N}, SCN=${SCN}, EST=${EST}, OPT=${OPT}, STRUCTURE=${STRUCTURE}, WORKERS=${WORKERS}, RX_THREADS=${RX_THREADS}, OUT_ROOT=${OUT_ROOT}, SCREEN_SIGDIG=${SCREEN_SIGDIG}, SCREEN_ATOL=${SCREEN_ATOL}, SCREEN_RTOL=${SCREEN_RTOL}, WARM=${WARM}, REPACKAGE=${REPACKAGE}, FORCE_RERUN=${FORCE_RERUN}, PROFILE_INIT_ON_STALL=${PROFILE_INIT_ON_STALL}, R_LIBS_USER_OVERRIDE=${R_LIBS_USER_OVERRIDE}" \
     < "$HERE/bench_array.lsf"
 )"
 echo "$bsub_out"

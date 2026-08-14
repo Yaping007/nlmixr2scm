@@ -73,7 +73,12 @@ parse_args <- function(argv) {
                screen_sigdig = NA_real_,
                screen_atol   = NA_real_,
                screen_rtol   = NA_real_,
-               warm          = "calc")
+               warm          = "calc",
+               # 2026-08-09: profile-on-stall rescue is ON by default (matches
+               # the production sweep). Set --profile_init_on_stall FALSE to run
+               # the A/B arm that DISABLES the 1-D frozen-base profile, to test
+               # whether that rescue is what buys the SCM power.
+               profile_init_on_stall = TRUE)
   i <- 1L
   while (i <= length(argv)) {
     a <- argv[i]
@@ -96,6 +101,7 @@ parse_args <- function(argv) {
       "--screen_atol"      = { v <- val(); opts$screen_atol   <- if (v %in% c("NA","na","")) NA_real_ else as.numeric(v) },
       "--screen_rtol"      = { v <- val(); opts$screen_rtol   <- if (v %in% c("NA","na","")) NA_real_ else as.numeric(v) },
       "--warm"             = { opts$warm <- val() },
+      "--profile_init_on_stall" = { v <- val(); opts$profile_init_on_stall <- toupper(v) %in% c("TRUE","T","1","YES","ON") },
       stop(sprintf("Unknown arg: %s", a))
     )
     i <- i + 1L
@@ -119,6 +125,10 @@ scm_bench_vars   <- c("cl", "vc")
 scm_bench_covars <- c("BW", "CrCL", "BMI")
 scm_bench_cats   <- c("SEX", "RACE")
 scm_bench_shapes <- c("power", "lin")
+# Fixed covariate reference (centering) values, matching the data-generating
+# model (scenario16console: BW/70, CrCL/95). Covariates not named here (BMI)
+# fall back to the per-dataset median inside runSCM().
+scm_bench_centers <- c(BW = 70, CrCL = 95)
 
 # ---- VAE screening wrapper (with graceful fallback) -----------------------
 # Returns list(fit=..., covMethod_used=..., status=...)
@@ -311,6 +321,13 @@ run_bench_cell <- function(opts) {
       covarsVec  = scm_bench_covars,
       catvarsVec = scm_bench_cats,
       shapes     = scm_bench_shapes,
+      # 2026-08-05: pin the covariate reference (centering) values to the SAME
+      # fixed references the DGP used (BW/70, CrCL/95 in scenario16console) so
+      # the estimated covariate coefficients and the structural intercept are on
+      # a reference identical to truth and comparable across datasets, instead
+      # of each dataset's own median. BMI (a decoy, not in the DGP) keeps its
+      # median center.
+      centers    = scm_bench_centers,
       # 2026-07-13: reverted non-zero SCM candidate inits (A). Non-zero
       # inits shift the LRT null: H0(theta=0) vs H1(theta=0.5) creates a
       # large structural OFV drop at the init itself, so LRT selects
@@ -330,7 +347,9 @@ run_bench_cell <- function(opts) {
       # only if it STRICTLY improves dObjf, so it can never make a candidate
       # worse; a no-op for healthy (analytic linCmt) candidates. Fires
       # independently of maxRetries, so it is active even at maxRetries = 0L.
-      profileInitOnStall = TRUE,
+      # 2026-08-09: now toggleable (--profile_init_on_stall) for the A/B test
+      # of whether this 1-D frozen-base profile is what drives SCM power.
+      profileInitOnStall = opts$profile_init_on_stall,
       stallTol   = 0,
       confirm    = FALSE
     )

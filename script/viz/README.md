@@ -68,17 +68,6 @@ fig_power(
   save     = TRUE      # writes PNG + PDF
 )
 
-# ---- Covariate-selection error pattern (FP / FN heatmap) -------------------
-source("script/viz/fig_covsel_heatmap.R")
-fig_covsel_heatmap(
-  agg_dir   = "output/vae_covsel_aggregated0722",
-  sample_N  = NULL,        # all N
-  structure = "linCmt",    # one structure per figure; use "ode" to swap
-  save      = TRUE
-)
-fig_covsel_heatmap(agg_dir = "output/vae_covsel_aggregated0722",
-                   structure = "ode", save = TRUE)
-
 ```
 
 ### Knobs
@@ -130,23 +119,61 @@ effects tend to become false positive (FP) or false negative (FN)?"* Designed
 around the **BW↔BMI collinearity story**: correlated covariates steal each
 other's signal, so a true `~BW` effect leaks into `~BMI` (and vice versa).
 
-**Data source:** `output/vae_covsel_aggregated/vae_covsel_by_covar.csv`
-(plus `vae_diag_rates.csv` for the per-cell dataset total `n_total`).
-Columns used: `sample_N, scenario, structure, var, covar, is_true, n_FN, n_FP`.
+**Data source:** `output/vae_covsel_aggregated/vae_covsel_by_covar.csv`.
+Columns used: `sample_N, scenario, structure, var, covar, shape, is_true,
+n_datasets, n_TP, n_FN, n_FP`.
 
-**Two error regimes per (scenario × effect) cell:**
+### How FP and FN rates are calculated
 
-| regime | when | error shown | denominator |
-|---|---|---|---|
-| **FN** (false negative) | `is_true = TRUE` — a real effect | `n_FN / N_cell` | cell dataset total |
-| **FP** (false positive) | `is_true = FALSE` — a null effect | `n_FP / N_cell` | cell dataset total |
+The rate in each tile is built up over three stages — per fit → per cell →
+per tile.
 
-> **Denominator gotcha.** `n_datasets` in the by-covar CSV is the number of
-> datasets in which that `(var, covar)` pair *appeared*, **not** the cell size.
-> A distractor only appears when it is falsely selected, so `n_datasets == n_FP`
-> and `n_FP / n_datasets` is always ≈100 %. The figure therefore divides by
-> `N_cell` (= `n_total` from `vae_diag_rates.csv`, equivalently `N` in
-> `vae_power.csv`) for **both** regimes.
+**Stage 1 — verdict per fit (`.unpack_covsel` in `aggregate_vae_covsel.R`).**
+For a single fitted dataset, VAE's *selected* covariate terms are matched
+against the scenario's *true* set on `(var, covar)` **and shape** (a true
+`power` recovered as `lin` does **not** match). Every effect gets one verdict:
+
+| verdict | meaning | condition |
+|---|---|---|
+| **TP** | true term recovered on the right shape | in true set **and** selected, shapes match |
+| **FN** | true term missed (or recovered on wrong shape) | in true set, **not** matched by a selected term |
+| **FP** | spurious term (wrong pair *or* wrong shape) | selected, **not** matching any true term |
+
+This is written one row per `(fit, var, covar, shape)` to
+`vae_covsel_long.csv`.
+
+**Stage 2 — counts per cell (`compute_vae_covsel_by_covar`).** Rows are grouped
+by `(sample_N, scenario, structure, var, covar, shape)` — a *cell* — and the
+verdicts tallied into `n_TP`, `n_FN`, `n_FP`, with `n_datasets` = number of
+fits contributing and `is_true = any(in_true)` flagging whether that effect is
+truly active in the scenario. Because grouping includes `shape`, a true
+`~BW.power` effect and its spurious `~BW.lin` shape-flip are **separate rows**:
+the true row accrues FN when the shape is wrong, the distractor row accrues FP.
+
+**Stage 3 — rate per tile (`fig_covsel_heatmap.R`).** Each effect is in exactly
+one regime, set by `is_true`, and the tile shows that regime's rate:
+
+| regime | when | rate shown |
+|---|---|---|
+| **FN** (false negative) | `is_true = TRUE` — a real effect | `n_FN / n_datasets` |
+| **FP** (false positive) | `is_true = FALSE` — a null/distractor effect | `n_FP / n_datasets` |
+
+The signed value `err_signed` = `-FN%` (blue) for true effects, `+FP%` (red) for
+distractors, so one diverging colour scale carries both: **blue = missed truth,
+red = spurious selection, white = no error.** A true effect recovered on the
+wrong shape shows as a **blue FN tile stacked on a red FP tile** (the wrong-shape
+row), so shape flips read vertically.
+
+> **Denominator (`n_datasets`).** This is the cell's **fitted-dataset count**,
+> the common denominator for both regimes, so `n_FN / n_datasets` is a per-effect
+> **false-negative rate** (1 − sensitivity) and `n_FP / n_datasets` a per-effect
+> **false-positive rate**. The heatmap additionally runs `.fix_covsel_denom()`,
+> which broadcasts the authoritative per-scenario total (the max `n_datasets`
+> over the cell's *true-effect* rows) to every row. This guards against any
+> upstream CSV that stored `n_datasets` as the per-pair *appearance* count —
+> where a distractor selected `k` times would get `n_datasets = k` and a
+> spurious ≈100 % FP rate — and falls back to the cell-wide total for the null
+> scenario (which has no true-effect row).
 
 **Layout:**
 
@@ -154,27 +181,42 @@ Columns used: `sample_N, scenario, structure, var, covar, is_true, n_FN, n_FP`.
 - y-order = CL block then VC block; **within each block `~BW` and `~BMI` are
   adjacent**, so a true `~BW` (bold outline = FN) sits directly above its
   `~BMI` thief (plain tile = FP) — leakage reads vertically.
-- **fill** = error rate 0–100 % (white → dark red = worse).
+- **fill** = signed error rate (blue = FN on true effects, red = FP on null
+  effects, white = no error).
 - **bold black outline** = TRUE effect (its shading is the FN rate); plain tiles
   are null effects (shading = FP rate).
-- **facet** = `sample_N` (columns). One `structure` per figure (linCmt ≈ ode).
+- **facet** = by default `sample_N` (rows) × `structure` (columns) so `linCmt`
+  and `ode` sit side by side; pass a single `structure=` to get the one-structure
+  `sample_N`-facet layout instead.
 
 ### Signature
 
 ```r
 fig_covsel_heatmap(agg_dir   = "output/vae_covsel_aggregated",
                    sample_N  = NULL,       # NULL = all (40, 80, 300); or subset
-                   structure = "linCmt",   # ONE structure per figure ("linCmt" | "ode")
+                   structure = "both",     # "both" = linCmt + ode side by side (default) | "linCmt" | "ode"
                    labels    = TRUE,       # print error % inside each tile
                    min_fp    = 0,          # blank FP cells below this rate (de-clutter)
                    save      = FALSE,      # TRUE also writes PNG + PDF
                    out_dir   = "output/figures/vae_covsel")
+
+# ---- Covariate-selection error pattern (FP / FN heatmap) -------------------
+source("script/viz/fig_covsel_heatmap.R")
+fig_covsel_heatmap(
+  agg_dir   = "output/vae_covsel_aggregated0722",
+  sample_N  = NULL,        # all N
+  structure = "linCmt",    # one structure per figure; use "ode" to swap
+  save      = TRUE
+)
+fig_covsel_heatmap(agg_dir = "output/vae_covsel_aggregated0722",
+                   structure = "ode", save = TRUE)
 ```
 
 ### Knobs
 
 - **`sample_N`** — `NULL` shows all three N; pass e.g. `300` for the large cohort.
-- **`structure`** — one structure per figure (default `"linCmt"`; `"ode"` to swap).
+- **`structure`** — `"both"` (default) draws `linCmt` + `ode` as side-by-side
+  facet columns; pass `"linCmt"` or `"ode"` for a single-structure figure.
 - **`labels`** — `TRUE` prints the rounded error % in each tile; `FALSE` for a
   cleaner fill-only grid.
 - **`min_fp`** — FP cells below this rate are greyed out to hide near-zero noise

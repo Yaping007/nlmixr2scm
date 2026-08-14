@@ -48,3 +48,48 @@ po/*~
 # RStudio Connect folder
 rsconnect/
 .positai
+
+#large simulation Data/results
+*.rds
+*.csv
+simulated_virtual_dataset/
+simulated_virtual_dataset_eta_filtered/
+simulated_virtual_dataset_eta_filtered_N*/
+tests/testthat/Resultsfromtest*
+tests/testthat/scm_log.txt
+tests/testthat/scm_step_summary.csv
+tests/testthat/scm_all_candidates.csv
+
+# Working files
+scm_log.txt
+scm_step_summary.csv
+scm_all_candidates.csv
+test_run.pid
+virtual_population_*.csv
+virtual_population_*.rds
+
+# R standard
+.Rhistory
+.Rproj.user/
+.Rcheck/
+*.Rout
+renv/library/
+renv/local/
+renv/staging/
+
+share/
+/Inputdataset/
+/logs/
+output/
+.RDataTmp*
+
+# Generated figures and tables (produced on HPCE, disposable)
+figs/
+tables/
+
+output/psn_scm_full0727/
+output/psn_scm_ode0729/
+output/psn_scm_ode0729_N300/
+output/scm_focei_bobyqa_703est_0805/
+output/scm_profile_off/
+output/vae_covsel_full0807_est703/
