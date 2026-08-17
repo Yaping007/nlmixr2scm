@@ -36,6 +36,7 @@ set -euo pipefail
 : "${LSB_JOBINDEX:?LSB_JOBINDEX must be set (LSF populates for job arrays)}"
 
 OUT_ROOT="${OUT_ROOT:-output/vae_covsel_pilot}"
+SHAPES="${SHAPES:-power lin}"
 
 echo "=========================================================="
 echo "Task started : $(date)"
@@ -62,7 +63,8 @@ Rscript "$SCRIPTS_DIR/vae_covsel_driver.R" \
     --scenario  "$SCN" \
     --structure "$STRUCTURE" \
     --dataset   "$LSB_JOBINDEX" \
-    --out_root  "$OUT_ROOT"
+    --out_root  "$OUT_ROOT" \
+    --shapes    "$SHAPES"
 
 exit_code=$?
 echo "=========================================================="

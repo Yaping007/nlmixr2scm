@@ -107,6 +107,16 @@ timed() {  # <raw_out> <console_log> -- rest of args = command
 
 # ---- STAGE 1: scm = base fit (node-0) + forward/backward selection ----------
 echo "===== STAGE 1: scm base+search (${SCM_CFG}) ====="
+# Stale-directory guard (resume after a killed run, e.g. TERM_RUNLIMIT): PsN's
+# `scm` ABORTS if -directory=scm_dir already exists, and a partial scm_dir left
+# by a walltime-killed attempt would make every resubmit of this cell fail
+# instantly.  A cell is only "done" once logs/timing.json exists (written at the
+# very end); if it does NOT, any scm_dir/refit here is an incomplete carcass ->
+# wipe it so this run starts clean.  (SKIP_DONE at the array level already skips
+# cells that DID finish, so this only ever fires on genuinely unfinished cells.)
+if [ ! -f logs/timing.json ]; then
+  rm -rf scm_dir refit
+fi
 timed logs/time_scm_raw.txt logs/scm_console.log \
   scm -config_file="${SCM_CFG}" -directory=scm_dir -nm_version="${NM_VERSION}" \
       ${RUN_ON_LSF_FLAG} -threads="${THREADS}" -clean=0

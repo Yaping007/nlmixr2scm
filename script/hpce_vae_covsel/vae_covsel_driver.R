@@ -76,7 +76,10 @@ parse_args <- function(argv) {
                structure = "linCmt",
                out_root = "output/vae_covsel_pilot",
                input_root = "Inputdataset",
-               true_params_path = "Inputdataset/true_params_long.rds")
+               true_params_path = "Inputdataset/true_params_long.rds",
+               # Continuous-covariate shape menu (space-separated). Default
+               # "power lin" = competing shapes; --shapes power = power-only.
+               shapes = "power lin")
   i <- 1L
   while (i <= length(argv)) {
     a <- argv[i]; val <- function() { i <<- i + 1L; argv[i] }
@@ -88,6 +91,7 @@ parse_args <- function(argv) {
       "--out_root"    = { opts$out_root   <- val() },
       "--input_root"  = { opts$input_root <- val() },
       "--true_params" = { opts$true_params_path <- val() },
+      "--shapes"      = { opts$shapes      <- val() },
       stop(sprintf("Unknown arg: %s", a))
     )
     i <- i + 1L
@@ -182,12 +186,16 @@ base_mod <- switch(opts$structure,
 # (BW=70, CrCL=95); BMI keeps the data median (covCenterType="median"), matching
 # PsN (BMI at median) and SCM (median centering).  The power exponent is
 # centring-invariant, so coefficients stay comparable to truth.
+# Continuous-covariate shape menu from --shapes (space-separated). Default
+# c("power","lin") = competing shapes; c("power") = the power-only covariate
+# space. SEX/RACE stay categorical (TRUE -> auto "cat").
+.cont_shapes <- strsplit(trimws(opts$shapes %||% "power lin"), "\\s+")[[1]]
 vae_ctrl <- nlmixr2est::vaeControl(
   covariateSelection = TRUE,
   shapes = list(
-    BW   = c("power", "lin"),
-    CrCL = c("power", "lin"),
-    BMI  = c("power", "lin"),
+    BW   = .cont_shapes,
+    CrCL = .cont_shapes,
+    BMI  = .cont_shapes,
     SEX  = TRUE,       # categorical -> auto "cat"
     RACE = TRUE,       # categorical -> auto "cat"
     fixCov = TRUE      # search ONLY these five covariates (match SCM/PsN)

@@ -56,6 +56,10 @@ DOSE_MG    <- 100
 # refit tol is written to refit_tol.txt and applied by seed_refit.R.
 STRUCTURE   <- tolower(.opt("--structure", "advan4"))
 stopifnot(STRUCTURE %in% c("advan4", "ode"))
+# Continuous-covariate valid_states menu (PsN numbering: 1=not-incl, 4=exp,
+# 5=power). Default "1,4,5" reproduces nlmixr2's {power, lin} competing shapes;
+# pass --continuous_states 1,5 for the power-only covariate space.
+CONT_STATES <- .opt("--continuous_states", "1,4,5")
 SCREEN_TOL  <- as.integer(.opt("--screen_tol",  "6"))   # rtol=1e-6 (screening)
 SCREEN_ATOL <- as.integer(.opt("--screen_atol", "8"))   # atol=1e-8 (screening)
 REFIT_TOL   <- as.integer(.opt("--refit_tol",  as.character(SCREEN_TOL)))
@@ -268,7 +272,7 @@ cat("wrote base.mod  [structure=", STRUCTURE, "]\n", sep = "")
 #
 # Forward p=0.05, backward p=0.01.  linearize=0 => full re-estimation each step
 # (LRT parity with nlmixr2 runSCM).
-scm_cfg <- '
+scm_cfg <- sprintf('
 model=base.mod
 search_direction=both
 p_forward=0.05
@@ -283,7 +287,7 @@ CL=BW,CRCL,BMI,SEX,RACE
 V2=BW,CRCL,BMI,SEX,RACE
 
 [valid_states]
-continuous=1,4,5
+continuous=%s
 categorical=1,2
 
 [code]
@@ -305,7 +309,7 @@ categorical=1,2
 *:BW-5=5
 *:CRCL-4=5
 *:CRCL-5=5
-'
+', CONT_STATES)
 writeLines(scm_cfg, file.path(out_dir, "run.scm"))
 cat("wrote run.scm\n")
 

@@ -94,6 +94,7 @@ Rscript "$SCRIPTS_DIR/PerformanceEvaluation_scm_bench.R" \
     --screen_atol   "${SCREEN_ATOL:-NA}" \
     --screen_rtol   "${SCREEN_RTOL:-NA}" \
     --warm          "${WARM:-calc}" \
+    --shapes        "${SHAPES:-power lin}" \
     --profile_init_on_stall "${PROFILE_INIT_ON_STALL:-TRUE}" \
     ${REPACK_FLAG} \
     ${RERUN_FLAG} \

@@ -48,6 +48,7 @@ if [ ! -f "$HERE/vae_covsel_array.lsf" ]; then
 fi
 
 OUT_ROOT="${OUT_ROOT:-output/vae_covsel_pilot}"
+SHAPES="${SHAPES:-power lin}"
 SCN_PAD=$(printf '%02d' "$SCN")
 JOBNAME="vaecov_N${SAMPLE_N}_scn${SCN_PAD}_${STRUCTURE}"
 
@@ -64,5 +65,5 @@ bsub \
   -J "${JOBNAME}[${DS_START}-${DS_END}]%${MAXPAR}" \
   -o "${LOGDIR}/${JOBNAME}.%J.%I.out" \
   -e "${LOGDIR}/${JOBNAME}.%J.%I.err" \
-  -env "all, REPO_ROOT=${REPO_ROOT}, SCRIPTS_DIR=${SCRIPTS_DIR}, SAMPLE_N=${SAMPLE_N}, SCN=${SCN}, STRUCTURE=${STRUCTURE}, OUT_ROOT=${OUT_ROOT}" \
+  -env "all, REPO_ROOT=${REPO_ROOT}, SCRIPTS_DIR=${SCRIPTS_DIR}, SAMPLE_N=${SAMPLE_N}, SCN=${SCN}, STRUCTURE=${STRUCTURE}, OUT_ROOT=${OUT_ROOT}, SHAPES=${SHAPES}" \
   < "$HERE/vae_covsel_array.lsf"
