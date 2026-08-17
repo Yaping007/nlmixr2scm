@@ -1,19 +1,20 @@
 # ============================================================================
-# make_warmup_raw_compare.R
-# RAW (not difference) side-by-side of the SCM warm-start (Mechanism B,
-# profileInitOnStall) ON vs OFF, with linCmt AND ode in ONE figure per metric.
-# All panels are N = 80, focei / bobyqa.
+# make_lbfgsb3c_raw_compare.R
+# RAW warm-start ON vs OFF comparison for the focei + lbfgsb3c benchmark,
+# N = 80, ODE only (the lbfgsb3c warm runs contain ode rows only). Mirrors
+# make_warmup_raw_compare.R (bobyqa) with a "_lbfgsb3c" filename suffix.
 #
-#   warmup-on  : output/scm_focei_bobyqa_703est_0805_aggregated
-#   warmup-off : output/scm_profile_off_aggregated   (now includes ode)
+#   warm-up ON  : output/lbfgsb3c_est703_08132026_warmon_aggregated
+#   warm-up OFF : output/lbfgsb3c_est703_08132026_warmoff_aggregated
+#   PsN-SCM     : output/psn_scm_combined_aggregated   (power overlay only)
 #
-# Four combined figures (output/figures/warmup_compare/raw/):
-#   fig_raw_convergence_N80.{png,pdf}  Converged% / CN-below% vs scenario
-#   fig_raw_power_N80.{png,pdf}        Power / PowerCN / PowerMinSuc vs scenario
-#   fig_raw_error_N80.{png,pdf}        MARE% per parameter, scenario 16
-#   fig_raw_covsel_N80.{png,pdf}       FN/FP selection-pattern heatmaps (2x2)
+# Figures (output/figures/warmup_compare/raw/):
+#   fig_raw_convergence_N80_lbfgsb3c.{png,pdf}
+#   fig_raw_power_N80_lbfgsb3c.{png,pdf}
+#   fig_raw_error_N80_lbfgsb3c.{png,pdf}
+#   fig_raw_covsel_N80_lbfgsb3c.{png,pdf}
 #
-# Usage:  source("script/viz/make_warmup_raw_compare.R")
+# Usage:  source("script/viz/make_lbfgsb3c_raw_compare.R")
 # ============================================================================
 
 suppressPackageStartupMessages({
@@ -21,30 +22,30 @@ suppressPackageStartupMessages({
 })
 
 ## helpers for the covsel heatmap (.fix_covsel_denom, .VAR_LAB, .COVAR_ORD,
-## .SHAPE_ORD, .SHAPE_LAB, theme_scm, %||%)
+## .SHAPE_ORD, .SHAPE_LAB, %||%)
 source("script/viz/fig_covsel_heatmap.R")
 
-ON_DIR  <- "output/scm_focei_bobyqa_703est_0805_aggregated"
-OFF_DIR <- "output/scm_profile_off_aggregated"
+ON_DIR  <- "output/lbfgsb3c_est703_08132026_warmon_aggregated"
+OFF_DIR <- "output/lbfgsb3c_est703_08132026_warmoff_aggregated"
 PSN_DIR <- "output/psn_scm_combined_aggregated"
 OUT     <- "output/figures/warmup_compare/raw"
-EST <- "focei"; OUT_OPT <- "bobyqa"; SN <- 80
+EST <- "focei"; OUT_OPT <- "lbfgsb3c"; SN <- 80
 dir.create(OUT, showWarnings = FALSE, recursive = TRUE)
 
 PAL <- c("warm-up ON" = "#0F8B8D", "warm-up OFF" = "#C1666B",
          "PsN-SCM" = "#2B2B2B")
-STRUCT_LAB <- c(linCmt = "linCmt (analytic)", ode = "ODE")
+STRUCT_LAB <- c(ode = "ODE")
+STRUCT_MAP <- c(ode = "ODE")   # PsN "ode" folds to the same ODE panel
 
-## load one metric CSV from both folders, tag condition, keep N=80 focei/bobyqa
+## load one metric CSV from both warm folders, tag condition (N=80, focei/lbfgsb3c, ode)
 load_both <- function(csv) {
   rd <- function(dir, cond) read_csv(file.path(dir, csv), show_col_types = FALSE) |>
     filter(estimator == EST, outer_opt == OUT_OPT, sample_N == SN,
-           structure %in% c("linCmt", "ode")) |>
+           structure == "ode") |>
     mutate(cond = cond)
   bind_rows(rd(ON_DIR, "warm-up ON"), rd(OFF_DIR, "warm-up OFF")) |>
-    mutate(cond      = factor(cond, levels = names(PAL)),
-           struct_f  = factor(STRUCT_LAB[structure],
-                              levels = unname(STRUCT_LAB)))
+    mutate(cond     = factor(cond, levels = names(PAL)),
+           struct_f = factor(STRUCT_LAB[structure], levels = unname(STRUCT_LAB)))
 }
 
 ## ---- 1. convergence --------------------------------------------------------
@@ -63,29 +64,22 @@ p_conv <- ggplot(diag, aes(scenario, pct, colour = cond, group = cond)) +
   scale_y_continuous(labels = function(x) paste0(x, "%")) +
   coord_cartesian(ylim = c(0, 100)) +
   labs(x = "Simulation scenario", y = "Run-quality rate",
-       title = "Convergence & covariance step  (N = 80)") +
+       title = "Convergence & covariance step  (N = 80) [lbfgsb3c]") +
   theme_bw(base_size = 14) +
   theme(legend.position = "top", panel.grid.minor = element_blank(),
         plot.title = element_text(face = "bold"))
-ggsave(file.path(OUT, "fig_raw_convergence_N80_bobyqa.png"), p_conv, width = 11, height = 6.5, dpi = 200)
-ggsave(file.path(OUT, "fig_raw_convergence_N80_bobyqa.pdf"), p_conv, width = 11, height = 6.5)
+ggsave(file.path(OUT, "fig_raw_convergence_N80_lbfgsb3c.png"), p_conv, width = 7, height = 6.5, dpi = 200)
+ggsave(file.path(OUT, "fig_raw_convergence_N80_lbfgsb3c.pdf"), p_conv, width = 7, height = 6.5)
 
-## ---- 2. power (Power only; warm-up ON/OFF + PsN-SCM) -----------------------
-## PsN uses estimator="nonmem_scm"/outer_opt="focei" and its analytic structure
-## is "advan4" (folded to the linCmt analytic panel); ode maps to ODE.
-STRUCT_MAP <- c(linCmt = "linCmt (analytic)", advan4 = "linCmt (analytic)",
-                ode = "ODE")
-
+## ---- 2. power (warm-up ON/OFF + PsN-SCM) -----------------------------------
 read_power <- function(dir, cond, est, oopt) {
   read_csv(file.path(dir, "scm_power.csv"), show_col_types = FALSE) |>
     filter(estimator == est, outer_opt == oopt, sample_N == SN,
-           structure %in% c("linCmt", "advan4", "ode")) |>
+           structure == "ode") |>
     transmute(scenario, Power = Power * 100,
-              struct_f = factor(STRUCT_MAP[structure],
-                                levels = unname(STRUCT_LAB)),
+              struct_f = factor("ODE", levels = unname(STRUCT_LAB)),
               cond = cond)
 }
-
 pw <- bind_rows(
   read_power(ON_DIR,  "warm-up ON",  EST, OUT_OPT),
   read_power(OFF_DIR, "warm-up OFF", EST, OUT_OPT),
@@ -100,14 +94,14 @@ p_pow <- ggplot(pw, aes(scenario, Power, colour = cond, group = cond)) +
   scale_y_continuous(labels = function(x) paste0(x, "%")) +
   coord_cartesian(ylim = c(0, 100)) +
   labs(x = "Simulation scenario", y = "Power (true covariate detected)",
-       title = "Selection power  (N = 80)") +
+       title = "Selection power  (N = 80) [lbfgsb3c]") +
   theme_bw(base_size = 14) +
   theme(legend.position = "top", panel.grid.minor = element_blank(),
         plot.title = element_text(face = "bold"))
-ggsave(file.path(OUT, "fig_raw_power_N80_bobyqa.png"), p_pow, width = 11, height = 5.5, dpi = 200)
-ggsave(file.path(OUT, "fig_raw_power_N80_bobyqa.pdf"), p_pow, width = 11, height = 5.5)
+ggsave(file.path(OUT, "fig_raw_power_N80_lbfgsb3c.png"), p_pow, width = 7, height = 5.5, dpi = 200)
+ggsave(file.path(OUT, "fig_raw_power_N80_lbfgsb3c.pdf"), p_pow, width = 7, height = 5.5)
 
-## ---- 3. estimation accuracy (MARE%, scenario 16, unconditioned) ------------
+## ---- 3. estimation accuracy (MARE%, scenario 16) ---------------------------
 .PARAM_LAB <- c(
   CLBW = "CL~BW", CLcrCL = "CL~CrCL", VcBW = "Vc~BW", VcSEX = "Vc~SEX",
   TVCL = "TVCL", TVVc = "TVVc", TVQ = "TVQ", TVVp = "TVVp", TVKA = "TVKA",
@@ -130,23 +124,34 @@ p_err <- ggplot(err, aes(value, param_lab, colour = cond)) +
   scale_colour_manual(values = PAL, name = NULL) +
   scale_x_continuous(labels = function(x) paste0(x, "%")) +
   labs(x = "MARE (%)", y = "Parameter",
-       title = "Estimation accuracy, scenario 16  (N = 80; lower = better)") +
+       title = "Estimation accuracy, scenario 16  (N = 80; lower = better) [lbfgsb3c]") +
   theme_bw(base_size = 14) +
   theme(legend.position = "top", panel.grid.minor = element_blank(),
         plot.title = element_text(face = "bold"))
-ggsave(file.path(OUT, "fig_raw_error_N80_bobyqa.png"), p_err, width = 10, height = 6.5, dpi = 200)
-ggsave(file.path(OUT, "fig_raw_error_N80_bobyqa.pdf"), p_err, width = 10, height = 6.5)
+ggsave(file.path(OUT, "fig_raw_error_N80_lbfgsb3c.png"), p_err, width = 7, height = 6.5, dpi = 200)
+ggsave(file.path(OUT, "fig_raw_error_N80_lbfgsb3c.pdf"), p_err, width = 7, height = 6.5)
 
-## ---- 4. selection-pattern heatmaps (2x2: structure x condition) ------------
+## ---- 4. selection-pattern heatmaps (rows: condition) -----------------------
+## NB: some lbfgsb3c aggregated dirs ship an EMPTY scm_covsel_by_covar.csv
+## (e.g. warm-off); build_covsel skips any dir with no usable rows.
 build_covsel <- function(dir, cond) {
-  read_csv(file.path(dir, "scm_covsel_by_covar.csv"), show_col_types = FALSE) |>
+  d <- read_csv(file.path(dir, "scm_covsel_by_covar.csv"), show_col_types = FALSE)
+  if (nrow(d) == 0 || !"estimator" %in% names(d)) {
+    warning("No covsel rows for '", cond, "' (", basename(dir), ") - skipped")
+    return(NULL)
+  }
+  d |>
     filter(estimator == EST, outer_opt == OUT_OPT, sample_N == SN,
-           structure %in% c("linCmt", "ode")) |>
+           structure == "ode") |>
     .fix_covsel_denom() |>
     mutate(cond = cond)
 }
 cov_raw <- bind_rows(build_covsel(ON_DIR, "warm-up ON"),
-                     build_covsel(OFF_DIR, "warm-up OFF")) |>
+                     build_covsel(OFF_DIR, "warm-up OFF"))
+if (nrow(cov_raw) == 0) {
+  warning("No covariate-selection data for lbfgsb3c - skipping covsel heatmap.")
+} else {
+cov_raw <- cov_raw |>
   mutate(
     err_rate   = ifelse(is_true, n_FN / n_datasets, n_FP / n_datasets),
     err_signed = ifelse(is_true, -err_rate, err_rate) * 100,
@@ -178,13 +183,14 @@ p_cov <- ggplot(cov_raw, aes(scenario, effect, fill = err_signed)) +
     labels = c("FN 100%","FN 50%","0","FP 50%","FP 100%"), name = NULL) +
   labs(x = "Simulation scenario",
        y = "Covariate effect (param ~ covariate . shape)",
-       title = "Covariate-selection error pattern  (N = 80)") +
+       title = "Covariate-selection error pattern  (N = 80) [lbfgsb3c]") +
   theme_minimal(base_size = 13) +
   theme(panel.grid = element_blank(), legend.position = "top",
         plot.title = element_text(face = "bold"),
         strip.text = element_text(size = 13)) +
   guides(fill = guide_colourbar(barwidth = 16))
-ggsave(file.path(OUT, "fig_raw_covsel_N80_bobyqa.png"), p_cov, width = 13, height = 11, dpi = 200)
-ggsave(file.path(OUT, "fig_raw_covsel_N80_bobyqa.pdf"), p_cov, width = 13, height = 11)
+ggsave(file.path(OUT, "fig_raw_covsel_N80_lbfgsb3c.png"), p_cov, width = 8, height = 11, dpi = 200)
+ggsave(file.path(OUT, "fig_raw_covsel_N80_lbfgsb3c.pdf"), p_cov, width = 8, height = 11)
+}
 
-message("\nRaw warm-up on/off (linCmt + ODE) figures written under ", OUT)
+message("\nRaw warm-up on/off (lbfgsb3c, ODE) figures written under ", OUT)

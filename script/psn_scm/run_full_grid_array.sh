@@ -70,6 +70,10 @@ CORES="${CORES:-4}"
 # export via the STRUCT_TOL_ARGS passthrough (default: TOL=6 ATOL=8 both tiers).
 STRUCT="${STRUCT:-advan4}"
 STRUCT_TOL_ARGS="${STRUCT_TOL_ARGS:-}"
+# Continuous-covariate valid_states menu forwarded to the exporter. Default
+# "1,4,5" = nlmixr2's {power, lin} competing shapes; set CONTINUOUS_STATES=1,5
+# for the power-only covariate space (into a SEPARATE BENCH_ROOT).
+CONTINUOUS_STATES="${CONTINUOUS_STATES:-1,4,5}"
 WALL_MIN="${WALL_MIN:-60}"
 MEM_MB="${MEM_MB:-2000}"
 THROTTLE="${THROTTLE:-400}"
@@ -146,6 +150,7 @@ for N in ${N_LIST}; do
       if ! "${RSCRIPT_BIN}" script/psn_scm/export_one_dataset.R \
              --N "${N}" --scenario "${SCEN}" --dataset "${ds}" \
              --structure "${STRUCT}" ${STRUCT_TOL_ARGS} \
+             --continuous_states "${CONTINUOUS_STATES}" \
              --out_root "${RUNS_ROOT}" >/dev/null 2>&1; then
         echo "  WARN: export failed for ${cell}; skipping" >&2
         n_export_fail=$((n_export_fail + 1))

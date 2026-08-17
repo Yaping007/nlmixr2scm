@@ -579,3 +579,109 @@ fig_covsel_heatmap_scm <- function(
 
   p
 }
+
+# ---- multi-method stack ----------------------------------------------------
+# Stack several per-method covariate-selection heatmaps into ONE vertical
+# figure (one panel per method, shared legend on top).  Each method entry drives
+# either fig_covsel_heatmap_scm() (SCM / PsN) or fig_covsel_heatmap() (VAE) via
+# its own knobs, so this adds NO new plotting logic -- it only arranges the
+# existing panels with patchwork.
+#
+# `methods` is a named list; each element carries:
+#   engine    "scm" (default) -> fig_covsel_heatmap_scm ; "vae" -> fig_covsel_heatmap
+#   agg_dir, structure, sample_N, estimator, outer_opt, params, min_fp, labels
+#   ... any other arg accepted by the chosen engine.
+# The list NAME becomes the panel title (method label).
+#
+# Example (power-only, N=80, three methods stacked vertically):
+#   fig_covsel_heatmap_stack(
+#     methods = list(
+#       "nlmixr2-SCM (bobyqa)" = list(
+#         agg_dir="output/scm_poweronly_est703_08132026_aggregated",
+#         structure="linCmt", estimator="focei", outer_opt="bobyqa"),
+#       "PsN-SCM" = list(
+#         agg_dir="output/psn_scm_poweronly_advan4_aggregated",
+#         structure="advan4", estimator="nonmem_scm", outer_opt="focei"),
+#       "nlmixr2-VAE" = list(engine="vae",
+#         agg_dir="output/vae_covsel_poweronly_N80_08162026_aggregated",
+#         structure="linCmt")),
+#     sample_N = 80, save = TRUE,
+#     out_dir = "output/figures/false_selection_poweronly",
+#     file_tag = "poweronly_N80")
+fig_covsel_heatmap_stack <- function(
+    methods,
+    sample_N  = 80,
+    direction = c("horizontal", "vertical"),
+    layout    = "wide",       # per-panel N layout; "wide" keeps each panel 1-row
+    labels    = TRUE,
+    save      = FALSE,
+    out_dir   = "output/figures/covsel_stack",
+    file_tag  = "stack",
+    panel_size = 5.0,         # inches along the stacking axis, per method panel
+    other_dim  = 6.0,         # inches on the non-stacking axis
+    base_size  = 15) {
+  if (!requireNamespace("patchwork", quietly = TRUE))
+    stop("fig_covsel_heatmap_stack() needs the 'patchwork' package.")
+  direction <- match.arg(direction)
+  horiz <- identical(direction, "horizontal")
+
+  n_m <- length(methods)
+  panels <- lapply(seq_along(methods), function(i) {
+    m <- names(methods)[i]
+    a <- methods[[m]]
+    engine <- a$engine %||% "scm"
+    a$engine <- NULL
+    # shared defaults (overridable per method entry)
+    a$sample_N   <- a$sample_N   %||% sample_N
+    a$layout     <- a$layout     %||% layout
+    a$labels     <- a$labels     %||% labels
+    a$show_title <- FALSE
+    a$save       <- FALSE
+    fn <- if (identical(engine, "vae")) fig_covsel_heatmap else fig_covsel_heatmap_scm
+
+    pp <- do.call(fn, a) +
+      ggplot2::labs(title = m, x = NULL, y = NULL) +
+      # Re-apply ONE identical fill scale + guide on every panel so patchwork's
+      # guides="collect" can merge them into a SINGLE shared legend (the two
+      # engines otherwise set different colourbar barwidths -> two legends).
+      ggplot2::scale_fill_gradient2(
+        low = "#08519C", mid = "white", high = "#B30000",
+        midpoint = 0, na.value = "grey92", name = NULL,
+        limits = c(-100, 100), breaks = seq(-100, 100, 50),
+        labels = c("FN 100%", "FN 50%", "0", "FP 50%", "FP 100%")) +
+      ggplot2::guides(fill = ggplot2::guide_colourbar(barwidth = 20)) +
+      ggplot2::theme(
+        plot.title   = ggplot2::element_text(face = "bold", hjust = 0.5,
+                                             size = base_size + 2),
+        axis.text    = ggplot2::element_text(size = base_size - 3),
+        strip.text   = ggplot2::element_text(size = base_size - 1),
+        plot.margin  = grid::unit(c(4, 6, 4, 6), "pt"))
+    # In a horizontal strip only the leftmost panel keeps the y-axis effect
+    # labels; inner panels drop them to save width (shared row order).
+    if (horiz && i > 1L)
+      pp <- pp + ggplot2::theme(axis.text.y = ggplot2::element_blank(),
+                                axis.ticks.y = ggplot2::element_blank())
+    pp
+  })
+
+  p <- patchwork::wrap_plots(panels, nrow = if (horiz) 1L else n_m,
+                             ncol = if (horiz) n_m else 1L) +
+    patchwork::plot_layout(guides = "collect") +
+    patchwork::plot_annotation(
+      caption = sprintf("Covariate-selection error rate  (N = %d).  Outlined tiles = true effects (FN); fill = FP (red) / FN (blue) rate.", sample_N),
+      theme = ggplot2::theme(
+        plot.caption = ggplot2::element_text(size = base_size - 4, hjust = 0,
+                                             colour = "grey35"))) &
+    ggplot2::theme(legend.position = "top")
+
+  if (isTRUE(save)) {
+    dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+    stub <- file.path(out_dir, sprintf("fig_covsel_stack_%s_%s", direction, file_tag))
+    if (horiz) { w <- panel_size * n_m; h <- other_dim }
+    else       { w <- other_dim;        h <- panel_size * n_m }
+    ggplot2::ggsave(paste0(stub, ".png"), p, width = w, height = h, dpi = 300)
+    ggplot2::ggsave(paste0(stub, ".pdf"), p, width = w, height = h)
+    message("saved: ", stub, ".{png,pdf}")
+  }
+  p
+}

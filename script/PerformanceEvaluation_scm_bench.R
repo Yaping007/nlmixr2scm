@@ -74,6 +74,11 @@ parse_args <- function(argv) {
                screen_atol   = NA_real_,
                screen_rtol   = NA_real_,
                warm          = "calc",
+               # 2026-08-13: continuous-covariate shape menu. Space-separated
+               # list of built-in shapes tested for each continuous cov-param
+               # pair. Default "power lin" = the competing-shape design; pass
+               # --shapes power for the power-only covariate space.
+               shapes        = "power lin",
                # 2026-08-09: profile-on-stall rescue is ON by default (matches
                # the production sweep). Set --profile_init_on_stall FALSE to run
                # the A/B arm that DISABLES the 1-D frozen-base profile, to test
@@ -101,6 +106,7 @@ parse_args <- function(argv) {
       "--screen_atol"      = { v <- val(); opts$screen_atol   <- if (v %in% c("NA","na","")) NA_real_ else as.numeric(v) },
       "--screen_rtol"      = { v <- val(); opts$screen_rtol   <- if (v %in% c("NA","na","")) NA_real_ else as.numeric(v) },
       "--warm"             = { opts$warm <- val() },
+      "--shapes"           = { opts$shapes <- val() },
       "--profile_init_on_stall" = { v <- val(); opts$profile_init_on_stall <- toupper(v) %in% c("TRUE","T","1","YES","ON") },
       stop(sprintf("Unknown arg: %s", a))
     )
@@ -124,6 +130,11 @@ DOSE_MG          <- 100
 scm_bench_vars   <- c("cl", "vc")
 scm_bench_covars <- c("BW", "CrCL", "BMI")
 scm_bench_cats   <- c("SEX", "RACE")
+# Continuous-covariate shape menu. Overridable per run via --shapes (a
+# space-separated list) so the same driver serves both the competing-shape
+# design ("power lin", default) and the power-only covariate space ("power").
+# NOTE: this is a top-level default; run_bench_cell() overrides it from
+# opts$shapes at call time (see below), so a --shapes CLI value wins.
 scm_bench_shapes <- c("power", "lin")
 # Fixed covariate reference (centering) values, matching the data-generating
 # model (scenario16console: BW/70, CrCL/95). Covariates not named here (BMI)
@@ -320,7 +331,11 @@ run_bench_cell <- function(opts) {
       varsVec    = scm_bench_vars,
       covarsVec  = scm_bench_covars,
       catvarsVec = scm_bench_cats,
-      shapes     = scm_bench_shapes,
+      # Shape menu from --shapes (space-separated); falls back to the top-level
+      # scm_bench_shapes default when opts$shapes is unset.
+      shapes     = if (!is.null(opts$shapes))
+                     strsplit(trimws(opts$shapes), "\\s+")[[1]]
+                   else scm_bench_shapes,
       # 2026-08-05: pin the covariate reference (centering) values to the SAME
       # fixed references the DGP used (BW/70, CrCL/95 in scenario16console) so
       # the estimated covariate coefficients and the structural intercept are on
