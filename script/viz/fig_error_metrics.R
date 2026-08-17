@@ -66,6 +66,8 @@ suppressPackageStartupMessages({
 `%||%` <- function(a, b) if (is.null(a) || length(a) == 0L) b else a
 
 # advan4 FIRST -> top facet row (analytic-on-top convention).
+# PsN/NONMEM renders ode as "ADVAN13 (ODE)"; nlmixr2 (focei/vae) overrides ode
+# to plain "ODE" at runtime (see is_nonmem branch in fig_error_metrics()).
 .STRUCT_LAB <- c(advan4 = "ADVAN4 (analytic)", linCmt = "linCmt (analytic)",
                  ode = "ADVAN13 (ODE)")
 
@@ -104,14 +106,11 @@ theme_scm <- function(base_size = 18) {
       panel.grid.minor   = ggplot2::element_blank(),
       legend.position    = "top",
       legend.text        = ggplot2::element_text(size = base_size),
-      strip.text         = ggplot2::element_text(face = "bold",
-                                                 size = base_size),
-      plot.title         = ggplot2::element_text(face = "bold"),
+      strip.text         = ggplot2::element_text(size = base_size),
+      plot.title         = ggplot2::element_text(),
       plot.caption       = ggplot2::element_text(hjust = 0, colour = "grey35"),
-      axis.title.x       = ggplot2::element_text(size = base_size + 1,
-                                                 face = "bold"),
-      axis.title.y       = ggplot2::element_text(size = base_size + 1,
-                                                 face = "bold"),
+      axis.title.x       = ggplot2::element_text(size = base_size + 1),
+      axis.title.y       = ggplot2::element_text(size = base_size + 1),
       axis.text.x        = ggplot2::element_text(size = base_size - 3),
       axis.text.y        = ggplot2::element_text(size = base_size - 3)
     )
@@ -126,6 +125,10 @@ fig_error_metrics <- function(
     estimator  = NULL,     # SCM only (e.g. "ifocei"); needs col
     outer_opt  = NULL,     # SCM only (e.g. "bobyqa"); needs col
     metrics    = c("RMRSE", "MARE"),
+    params     = c("CLBW", "VcSEX", "TVCL", "TVQ",
+                   "var_CL", "var_Vc", "cov_VcCL", "ResErr"),
+                           # NULL = keep all parameters; else a subset of the
+                           # .PARAM_ORD codes (one representative per class)
     drop_fixed = TRUE,     # drop TVKA (fixed -> 0 error, uninformative)
     x_cap      = 100,      # x-axis upper bound (%); larger values squished to
                            # the edge + labelled, so a few huge var/cov terms
@@ -167,6 +170,7 @@ fig_error_metrics <- function(
     dat <- dplyr::filter(dat, outer_opt %in% !!outer_opt)
   }
   if (drop_fixed)          dat <- dplyr::filter(dat, parameter != "TVKA")
+  if (!is.null(params))    dat <- dplyr::filter(dat, parameter %in% !!params)
   if (nrow(dat) == 0L) stop("no rows after filtering (check scenario / sample_N / structure / estimator / outer_opt)")
   # guard: multiple estimator x outer_opt cells would blend distinct estimators
   # at the same (parameter, conditioning) point.
@@ -180,6 +184,12 @@ fig_error_metrics <- function(
   }
 
   # ---- long over the requested metrics -------------------------------------
+  # platform-aware structure labels: PsN/NONMEM (estimator == "nonmem_scm")
+  # keeps ode as "ADVAN13 (ODE)"; nlmixr2 (focei/vae) renders plain "ODE".
+  is_nonmem  <- "estimator" %in% names(dat) && any(dat$estimator == "nonmem_scm")
+  struct_lab_map <- .STRUCT_LAB
+  if (!is_nonmem) struct_lab_map["ode"] <- "ODE"
+
   metric_cols <- c(RMRSE = "RMRSE_pct", MARE = "MARE_pct")[metrics]
   plot_df <- dat |>
     dplyr::select(sample_N, scenario, structure, parameter, param_class,
@@ -194,12 +204,12 @@ fig_error_metrics <- function(
       class_lab   = factor(class_lab, levels = unname(.CLASS_LAB)),
       conditioning = factor(conditioning,
                             levels = c("Unconditioned", "True selection")),
-      struct_lab  = dplyr::coalesce(.STRUCT_LAB[structure], structure),
-      # ORDER rows by the .STRUCT_LAB sequence (advan4 -> linCmt -> ode) so the
-      # analytic panel sits ON TOP; a bare character would sort alphabetically
-      # and wrongly place "ADVAN13 (ODE)" above "ADVAN4 (analytic)".
+      struct_lab  = dplyr::coalesce(struct_lab_map[structure], structure),
+      # ORDER rows by the struct_lab_map sequence (advan4 -> linCmt -> ode) so
+      # the analytic panel sits ON TOP; a bare character would sort
+      # alphabetically and wrongly place ODE above the analytic panel.
       struct_lab  = factor(struct_lab,
-                           levels = intersect(unname(.STRUCT_LAB),
+                           levels = intersect(unname(struct_lab_map),
                                               unique(struct_lab))),
       sampN_lab   = factor(paste0("N = ", sample_N),
                            levels = paste0("N = ", c(40, 80, 300)))
@@ -263,13 +273,13 @@ fig_error_metrics <- function(
                                   breaks = x_brks,
                                   oob = scales::oob_squish,
                                   expand = ggplot2::expansion(mult = c(0, 0.02))) +
-      ggplot2::labs(title = as.character(m),
-                    subtitle = unname(.METRIC_SUB[as.character(m)]),
-                    x = "Relative error metric (%)",
+      ggplot2::labs(title = NULL,
+                    subtitle = NULL,
+                    x = as.character(m),
                     y = if (first) "Parameter" else NULL) +
       theme_scm() +
       ggplot2::theme(
-        plot.title    = ggplot2::element_text(face = "bold", hjust = 0.5,
+        plot.title    = ggplot2::element_text(hjust = 0.5,
                                               size = ggplot2::rel(1.25)),
         plot.subtitle = ggplot2::element_text(hjust = 0.5, colour = "grey35",
                                               size = ggplot2::rel(0.9)),
@@ -277,8 +287,8 @@ fig_error_metrics <- function(
         panel.spacing.x = ggplot2::unit(3, "lines"),
         # N (column) headers on top of every metric panel; structure (row)
         # strips only on the RIGHTMOST panel to avoid repeating them.
-        strip.text.x  = ggplot2::element_text(face = "bold"),
-        strip.text.y  = if (last) ggplot2::element_text(angle = -90, face = "bold")
+        strip.text.x  = ggplot2::element_text(),
+        strip.text.y  = if (last) ggplot2::element_text(angle = -90)
                         else ggplot2::element_blank())
     # annotate off-scale points with their TRUE magnitude at the right edge
     if (any(d$off_scale)) {
@@ -329,7 +339,7 @@ fig_error_metrics <- function(
         title = sprintf("Estimation accuracy by parameter -- scenario %s", scenario),
         x = "Relative error metric (%)", y = NULL, caption = .cap) +
       theme_scm() +
-      ggplot2::theme(strip.text.y = ggplot2::element_text(angle = 0, face = "bold"))
+      ggplot2::theme(strip.text.y = ggplot2::element_text(angle = 0))
     if (isTRUE(labels)) {
       p <- p + ggplot2::geom_text(ggplot2::aes(label = round(value)),
         position = dodge, hjust = -0.3, size = 3, show.legend = FALSE)
@@ -341,16 +351,17 @@ fig_error_metrics <- function(
     n_tag <- if (is.null(sample_N)) "allN" else paste0("N", paste(sample_N, collapse = "-"))
     s_tag <- if (is.null(structure)) "allStruct" else paste(structure, collapse = "-")
     m_tag <- paste(metrics, collapse = "-")
+    p_tag <- if (is.null(params)) "allParams" else "subsetParams"
     est_tag <- if (all(c("estimator", "outer_opt") %in% names(dat)))
                  paste0("_", dat$estimator[1], "_", dat$outer_opt[1]) else ""
     stub  <- file.path(out_dir,
-                       sprintf("fig_error_metrics_scn%s_%s_%s_%s%s",
-                               scenario, n_tag, s_tag, m_tag, est_tag))
+                       sprintf("fig_error_metrics_scn%s_%s_%s_%s_%s%s",
+                               scenario, n_tag, s_tag, m_tag, p_tag, est_tag))
     # width scales with metric x N columns; height with structure (row) count
     n_cols <- length(metrics) * max(1, n_N)
     n_rows <- max(1, n_struct)
-    w <- 4 + 2.6 * n_cols
-    h <- 4 + 3.2 * n_rows
+    w <- 2.6 * n_cols
+    h <- 3.2 * n_rows
     ggplot2::ggsave(paste0(stub, ".png"), p, width = w, height = h, dpi = 200)
     ggplot2::ggsave(paste0(stub, ".pdf"), p, width = w, height = h)
     message("saved: ", stub, ".{png,pdf}")

@@ -141,9 +141,12 @@ suppressPackageStartupMessages({
       strip.background   = element_rect(fill = "grey92", colour = NA),
       strip.text.y       = element_blank(),
       strip.background.y = element_blank(),
-      axis.text.y        = element_text(size = base_size - 3),
-      axis.text.x        = element_text(size = base_size - 3),
-      plot.caption       = element_text(size = base_size - 5, hjust = 0,
+      axis.text.y        = element_text(size = base_size - 2),
+      axis.text.x        = element_text(size = base_size - 2),
+      # widen the gap between the Unconditioned | True selection facet columns
+      # so their 0% / 60% axis ticks don't collide.
+      panel.spacing.x    = grid::unit(2, "lines"),
+      plot.caption       = element_text(size = base_size - 3.5, hjust = 0,
                                         colour = "grey35")
     )
 }
@@ -198,8 +201,8 @@ fig_error_threeway <- function(sources    = .ERR_SOURCES,
     stub <- file.path(out_dir,
       sprintf("fig_error_threeway_scn%d_%s_N%d_%s",
               scenario, structure, sample_N, metric))
-    ggsave(paste0(stub, ".png"), p, width = 11, height = 7, dpi = 200)
-    ggsave(paste0(stub, ".pdf"), p, width = 11, height = 7)
+    ggsave(paste0(stub, ".png"), p, width = 7, height = 7, dpi = 200)
+    ggsave(paste0(stub, ".pdf"), p, width = 7, height = 7)
     message("saved: ", stub, ".{png,pdf}")
   }
   p

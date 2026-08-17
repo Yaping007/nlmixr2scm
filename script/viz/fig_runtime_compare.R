@@ -132,6 +132,7 @@ fig_runtime_bymethod <- function(method    = "PsN-SCM",
                                  sources   = .RT_SOURCES,
                                  log_y     = TRUE,
                                  save      = FALSE,
+                                 show_title = FALSE,
                                  out_dir   = "output/figures/runtime_compare",
                                  base_size = 15) {
   ## load ALL N and BOTH structures for this one method
@@ -151,7 +152,7 @@ fig_runtime_bymethod <- function(method    = "PsN-SCM",
     geom_point(colour = col, size = 1.4) +
     facet_grid(N_lab ~ structure, scales = "free_y") +
     scale_x_continuous(breaks = seq(2, 16, 2)) +
-    labs(title = sprintf("%s wall time by scenario", method),
+    labs(title = if (isTRUE(show_title)) sprintf("%s wall time by scenario", method) else NULL,
          x = "Simulation scenario",
          y = "Median wall time per fit (min), band = IQR",
          caption = .RT_CAVEAT) +
@@ -176,6 +177,7 @@ fig_runtime_threeway <- function(sources   = .RT_SOURCES,
                                  sample_N  = 80,
                                  log_y     = TRUE,
                                  save      = FALSE,
+                                 show_title = FALSE,
                                  out_dir   = "output/figures/runtime_compare",
                                  base_size = 15) {
   raw <- lapply(c("linCmt", "ode"), function(st)
@@ -192,7 +194,7 @@ fig_runtime_threeway <- function(sources   = .RT_SOURCES,
     scale_colour_manual(values = .PAL_METHOD_R[methods], name = "Method") +
     scale_fill_manual(values = .PAL_METHOD_R[methods], guide = "none") +
     scale_x_continuous(breaks = 1:16) +
-    labs(title = sprintf("Wall time by scenario (N = %d)", sample_N),
+    labs(title = if (isTRUE(show_title)) sprintf("Wall time by scenario (N = %d)", sample_N) else NULL,
          x = "Simulation scenario",
          y = "Median wall time per fit (min), band = IQR",
          caption = .RT_CAVEAT) +
@@ -218,6 +220,7 @@ fig_runtime_grid <- function(sources   = .RT_SOURCES,
                              sample_N  = c(40L, 80L, 300L),
                              log_y     = TRUE,
                              save      = FALSE,
+                             show_title = FALSE,
                              out_dir   = "output/figures/runtime_compare",
                              base_size = 15) {
   raw <- lapply(sample_N, function(n)
@@ -238,7 +241,7 @@ fig_runtime_grid <- function(sources   = .RT_SOURCES,
     scale_colour_manual(values = .PAL_METHOD_R[methods], name = "Method") +
     scale_fill_manual(values = .PAL_METHOD_R[methods], guide = "none") +
     scale_x_continuous(breaks = seq(2, 16, 2)) +
-    labs(title = "Wall time by scenario, sample size and model type",
+    labs(title = if (isTRUE(show_title)) "Wall time by scenario, sample size and model type" else NULL,
          x = "Simulation scenario",
          y = "Median wall time per fit (min), band = IQR",
          caption = .RT_CAVEAT) +
@@ -249,8 +252,8 @@ fig_runtime_grid <- function(sources   = .RT_SOURCES,
     dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
     stub <- file.path(out_dir,
       paste0("fig_runtime_grid_allN_", if (log_y) "log2" else "linear"))
-    ggsave(paste0(stub, ".png"), p, width = 12, height = 8, dpi = 200)
-    ggsave(paste0(stub, ".pdf"), p, width = 12, height = 8)
+    ggsave(paste0(stub, ".png"), p, width = 10, height = 8, dpi = 200)
+    ggsave(paste0(stub, ".pdf"), p, width = 10, height = 8)
     message("saved: ", stub, ".{png,pdf}")
   }
   p

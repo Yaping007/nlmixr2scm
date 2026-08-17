@@ -55,9 +55,9 @@ theme_scm <- function(base_size = 14) {
       legend.position  = "top",
       legend.title     = ggplot2::element_text(size = base_size),
       legend.text      = ggplot2::element_text(size = base_size - 1),
-      strip.text       = ggplot2::element_text(size = base_size),
-      axis.title       = ggplot2::element_text(size = base_size),
-      axis.text.x      = ggplot2::element_text(size = base_size - 4),
+      strip.text       = ggplot2::element_text(size = base_size - 2),
+      axis.title       = ggplot2::element_text(size = base_size - 1),
+      axis.text.x      = ggplot2::element_text(size = base_size - 3),
       axis.text.y      = ggplot2::element_text(size = base_size - 2),
       plot.title       = ggplot2::element_text(size = base_size - 2)
     )
@@ -225,8 +225,8 @@ fig_diag_rates <- function(agg_dir   = "output/vae_covsel_aggregated",
     est_tag <- if (all(c("estimator", "outer_opt") %in% names(dat)))
                  paste0("_", dat$estimator[1], "_", dat$outer_opt[1]) else ""
     stub  <- file.path(out_dir, sprintf("fig_diag_rates_%s_%s%s", stru, tag, est_tag))
-    ggplot2::ggsave(paste0(stub, ".png"), p, width = 9, height = 4.5, dpi = 150)
-    ggplot2::ggsave(paste0(stub, ".pdf"), p, width = 9, height = 4.5)
+    ggplot2::ggsave(paste0(stub, ".png"), p, width = 8.5, height = 3.5, dpi = 150)
+    ggplot2::ggsave(paste0(stub, ".pdf"), p, width = 8.5, height = 3.5)
     message("saved: ", stub, ".{png,pdf}")
   }
 

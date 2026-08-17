@@ -138,8 +138,8 @@ theme_scm <- function(base_size = 15) {
     ggplot2::theme(
       panel.grid       = ggplot2::element_blank(),
       legend.position  = "top",
-      strip.text       = ggplot2::element_text(face = "bold"),
-      plot.title       = ggplot2::element_text(face = "bold"),
+      strip.text       = ggplot2::element_text(),
+      plot.title       = ggplot2::element_text(),
       axis.text.x      = ggplot2::element_text(size = base_size - 2),
       axis.text.y      = ggplot2::element_text(size = base_size - 3)
     )
@@ -150,9 +150,11 @@ fig_covsel_heatmap <- function(
     agg_dir      = "output/vae_covsel_aggregated",
     sample_N     = NULL,       # NULL = all (40, 80, 300)
     structure    = "both",     # "both" = linCmt + ode side by side (default) | "linCmt" | "ode"
+    params       = NULL,       # NULL = all params | subset e.g. "CL" to show only CL~* effects
     labels       = TRUE,
     min_fp       = 0,      # blank FP cells below this rate
     layout       = c("slide", "wide"),  # "slide" = N stacked (16:9-friendly)
+    show_title   = FALSE,       # TRUE = add a bold title (default off)
     save         = FALSE,
     out_dir      = "output/figures/vae_covsel",
     csv_name     = "vae_covsel_by_covar.csv",
@@ -217,6 +219,16 @@ fig_covsel_heatmap <- function(
         levels = intersect(c("linCmt (analytic)", "ODE"), unique(struct_f)))
     )
 
+  # optional: restrict to selected structural parameter(s) (e.g. "CL") to shrink
+  # the y-axis from the full CL+VC block to a single param's covariate-shape rows.
+  if (!is.null(params))
+    plot_df <- dplyr::filter(plot_df, toupper(param) %in% toupper(params))
+  if (nrow(plot_df) == 0L) stop("no rows after params filter (check params=)")
+
+  # drop unused N / structure levels so tidyr::complete() below does not
+  # re-fabricate empty panels for filtered-out sample sizes or structures.
+  plot_df <- droplevels(plot_df)
+
   # Complete the (sample_N x scenario x effect) grid.  A FALSE-effect distractor
   # only gets a by-covar row when it was falsely selected in >=1 dataset, so
   # never-selected distractors (genuine 0% FP, common at large N) are simply
@@ -229,8 +241,11 @@ fig_covsel_heatmap <- function(
     tidyr::complete(
       struct_f, sample_N, scenario,
       tidyr::nesting(effect, param, var, covar, shape, v_ord, c_ord, s_ord),
-      fill = list(is_true = FALSE, err_rate = 0, err_show = 0, err_signed = 0)
-    )
+      fill = list(is_true = FALSE, err_rate = 0, err_show = 0, err_signed = 0,
+                  n_FN = 0, n_FP = 0)
+    ) |>
+    # per-tile error COUNT: FN count on true cells, FP count on distractor cells
+    dplyr::mutate(err_count = ifelse(is_true, n_FN, n_FP))
 
   # TOP-DOWN effect order: CL block first, then VC; BW,BMI adjacent within each;
   # within a (var,covar) the TRUE shape sits directly above its distractor shape.
@@ -267,10 +282,23 @@ fig_covsel_heatmap <- function(
       limits = c(-100, 100), breaks = seq(-100, 100, 50),
       labels = c("FN 100%", "FN 50%", "0", "FP 50%", "FP 100%")) +
     ggplot2::labs(
+      title = if (isTRUE(show_title))
+                sprintf("%s  (%s)", title_prefix, structure) else NULL,
       x = "Simulation scenario", y = "Covariate effect (param ~ covariate . shape)"
     ) +
     theme_scm() +
-    ggplot2::guides(fill = ggplot2::guide_colourbar(barwidth = 14))
+    ggplot2::theme(
+      panel.spacing.x = grid::unit(0.6, "lines"),
+      panel.spacing.y = grid::unit(2.2, "lines"),
+      plot.margin   = grid::unit(c(2, 2, 2, 2), "pt"),
+      legend.margin = ggplot2::margin(0, 0, 0, 0),
+      legend.box.spacing = grid::unit(2, "pt"),
+      legend.text   = ggplot2::element_text(size = 16),
+      strip.text    = ggplot2::element_text(size = 20),
+      axis.title    = ggplot2::element_text(size = 20),
+      axis.text     = ggplot2::element_text(size = 19)
+    ) +
+    ggplot2::guides(fill = ggplot2::guide_colourbar(barwidth = 18))
 
   # FACETING: with both structures, use a N(rows) x structure(cols) grid so ode
   # and linCmt share one slide; otherwise keep the single-structure N layout.
@@ -280,24 +308,32 @@ fig_covsel_heatmap <- function(
     p <- p + ggplot2::facet_wrap(~ sample_N, nrow = facet_nrow)
   }
 
-  # square tiles only in the "wide" layout; "slide" lets tiles fill the width
-  if (layout == "wide") p <- p + ggplot2::coord_equal()
+  # square tiles in BOTH layouts (unified with the SCM heatmap)
+  p <- p + ggplot2::coord_equal()
 
   if (isTRUE(labels)) {
-    lab_df <- dplyr::filter(plot_df, !is.na(err_show))
+    # print the raw FN/FP dataset COUNT in each tile (unified with SCM);
+    # never-selected relationships were filled to 0 above, so they show "0".
+    lab_df <- dplyr::filter(plot_df, !is.na(err_count))
     p <- p + ggplot2::geom_text(
       data = lab_df,
-      ggplot2::aes(label = round(err_show * 100)),
-      size = if (both_struct) 4.0 else 3.0,
-      colour = ifelse(lab_df$err_show > 0.55, "white", "grey20"))
+      ggplot2::aes(label = err_count),
+      size = if (both_struct) 5.6 else 5.2,
+      fontface = "bold",
+      colour = ifelse(lab_df$err_show > 0.55, "white", "grey15"))
   }
 
   if (isTRUE(save)) {
     dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
     n_tag <- if (is.null(sample_N)) "allN" else paste0("N", paste(sample_N, collapse = "-"))
     s_tag <- structure
-    stub  <- file.path(out_dir, sprintf("fig_covsel_heatmap_%s_%s", n_tag, s_tag))
-    dims  <- if (both_struct) c(12, 10) else if (layout == "slide") c(13, 9) else c(22, 12)
+    p_tag <- if (is.null(params)) "" else paste0("_", paste(toupper(params), collapse = "-"))
+    stub  <- file.path(out_dir, sprintf("fig_covsel_heatmap_%s_%s%s", n_tag, s_tag, p_tag))
+    # height scales with the number of covariate-effect rows so a params subset
+    # (e.g. CL only) is compact instead of stretched to the full-block height.
+    n_eff <- nlevels(droplevels(plot_df$effect))
+    both_h <- max(4, 1.5 + n_eff * 3 * 0.55)
+    dims  <- if (both_struct) c(14, both_h) else if (layout == "slide") c(9, 15) else c(22, 14)
     ggplot2::ggsave(paste0(stub, ".png"), p, width = dims[1], height = dims[2], dpi = 200)
     ggplot2::ggsave(paste0(stub, ".pdf"), p, width = dims[1], height = dims[2])
     message("saved: ", stub, ".{png,pdf}")
@@ -355,10 +391,11 @@ fig_covsel_heatmap_scm <- function(
     structure    = "linCmt",    # ONE structure per figure ("linCmt" | "ode")
     estimator    = "focei",     # fix ONE estimator cell
     outer_opt    = "bobyqa",    # fix ONE outer optimiser cell
+    params       = NULL,        # NULL = all params | subset e.g. "CL" to show only CL~* effects
     labels       = TRUE,
     min_fp       = 0,           # blank FP cells below this rate
     layout       = c("slide", "wide"),
-    show_title   = TRUE,        # FALSE = drop the plot title (tighter figure)
+    show_title   = FALSE,       # TRUE = add a bold title (default off)
     save         = FALSE,
     out_dir      = "output/figures/scm_covsel",
     csv_name     = "scm_covsel_by_covar.csv",
@@ -397,6 +434,11 @@ fig_covsel_heatmap_scm <- function(
   # scenarios, so broadcast it.  No-op when n_datasets is already correct.
   dat <- .fix_covsel_denom(dat)
 
+  # platform-aware structure labels: PsN/NONMEM (estimator == "nonmem_scm")
+  # keeps ode as "ADVAN13 (ODE)"; nlmixr2 (focei/vae) renders plain "ODE".
+  is_nonmem <- "estimator" %in% names(dat) && any(dat$estimator == "nonmem_scm")
+  ode_lab   <- if (is_nonmem) "ADVAN13 (ODE)" else "ODE"
+
   plot_df <- dat |>
     dplyr::mutate(
       err_type = ifelse(is_true, "FN", "FP"),
@@ -414,7 +456,7 @@ fig_covsel_heatmap_scm <- function(
       s_ord    = match(tolower(shape), .SHAPE_ORD),
       scenario = factor(scenario, levels = sort(unique(scenario))),
       struct_f = dplyr::recode(structure,
-                               linCmt = "linCmt (analytic)", ode = "ADVAN13 (ODE)",
+                               linCmt = "linCmt (analytic)", ode = !!ode_lab,
                                advan4 = "ADVAN4 (analytic)"),
       sample_N = factor(paste0("N = ", sample_N),
                         levels = paste0("N = ", c(40, 80, 300)))
@@ -422,9 +464,15 @@ fig_covsel_heatmap_scm <- function(
     dplyr::filter(!is.na(v_ord), !is.na(c_ord), !is.na(s_ord)) |>
     dplyr::mutate(
       struct_f = factor(struct_f,
-        levels = intersect(c("ADVAN4 (analytic)", "linCmt (analytic)", "ADVAN13 (ODE)"),
+        levels = intersect(c("ADVAN4 (analytic)", "linCmt (analytic)", ode_lab),
                            unique(struct_f)))
     )
+
+  # optional: restrict to selected structural parameter(s) (e.g. "CL") to shrink
+  # the y-axis from the full CL+VC block to a single param's covariate-shape rows.
+  if (!is.null(params))
+    plot_df <- dplyr::filter(plot_df, toupper(param) %in% toupper(params))
+  if (nrow(plot_df) == 0L) stop("no rows after params filter (check params=)")
 
   # drop unused N / structure levels so tidyr::complete() below does not
   # re-fabricate empty panels for filtered-out sample sizes or structures.
@@ -477,12 +525,17 @@ fig_covsel_heatmap_scm <- function(
     ) +
     theme_scm() +
     ggplot2::theme(
-      panel.spacing = grid::unit(0.4, "lines"),
+      panel.spacing.x = grid::unit(0.6, "lines"),
+      panel.spacing.y = grid::unit(2.2, "lines"),
       plot.margin   = grid::unit(c(2, 2, 2, 2), "pt"),
       legend.margin = ggplot2::margin(0, 0, 0, 0),
-      legend.box.spacing = grid::unit(2, "pt")
+      legend.box.spacing = grid::unit(2, "pt"),
+      legend.text   = ggplot2::element_text(size = 16),
+      strip.text    = ggplot2::element_text(size = 20),
+      axis.title    = ggplot2::element_text(size = 20),
+      axis.text     = ggplot2::element_text(size = 19)
     ) +
-    ggplot2::guides(fill = ggplot2::guide_colourbar(barwidth = 14))
+    ggplot2::guides(fill = ggplot2::guide_colourbar(barwidth = 22))
 
   if (both_struct) {
     p <- p + ggplot2::facet_grid(sample_N ~ struct_f)
@@ -503,7 +556,7 @@ fig_covsel_heatmap_scm <- function(
     p <- p + ggplot2::geom_text(
       data = lab_df,
       ggplot2::aes(label = err_count),
-      size = if (both_struct) 3.2 else 3.0,
+      size = if (both_struct) 5.6 else 5.2,
       fontface = "bold",
       colour = ifelse(lab_df$err_show > 0.55, "white", "grey15"))
   }
@@ -511,13 +564,124 @@ fig_covsel_heatmap_scm <- function(
   if (isTRUE(save)) {
     dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
     n_tag <- if (is.null(sample_N)) "allN" else paste0("N", paste(sample_N, collapse = "-"))
+    p_tag <- if (is.null(params)) "" else paste0("_", paste(toupper(params), collapse = "-"))
     stub  <- file.path(out_dir,
-      sprintf("fig_covsel_heatmap_scm_%s_%s_%s", est_tag, n_tag, structure))
-    dims  <- if (both_struct) c(14, 15) else if (layout == "slide") c(9, 15) else c(22, 14)
+      sprintf("fig_covsel_heatmap_scm_%s_%s_%s%s", est_tag, n_tag, structure, p_tag))
+    # height scales with the number of covariate-effect rows so a params subset
+    # (e.g. CL only) is compact instead of stretched to the full-block height.
+    n_eff <- nlevels(droplevels(plot_df$effect))
+    both_h <- max(4, 1.5 + n_eff * 3 * 0.55)
+    dims  <- if (both_struct) c(14, both_h) else if (layout == "slide") c(9, 15) else c(22, 14)
     ggplot2::ggsave(paste0(stub, ".png"), p, width = dims[1], height = dims[2], dpi = 200)
     ggplot2::ggsave(paste0(stub, ".pdf"), p, width = dims[1], height = dims[2])
     message("saved: ", stub, ".{png,pdf}")
   }
 
+  p
+}
+
+# ---- multi-method stack ----------------------------------------------------
+# Stack several per-method covariate-selection heatmaps into ONE vertical
+# figure (one panel per method, shared legend on top).  Each method entry drives
+# either fig_covsel_heatmap_scm() (SCM / PsN) or fig_covsel_heatmap() (VAE) via
+# its own knobs, so this adds NO new plotting logic -- it only arranges the
+# existing panels with patchwork.
+#
+# `methods` is a named list; each element carries:
+#   engine    "scm" (default) -> fig_covsel_heatmap_scm ; "vae" -> fig_covsel_heatmap
+#   agg_dir, structure, sample_N, estimator, outer_opt, params, min_fp, labels
+#   ... any other arg accepted by the chosen engine.
+# The list NAME becomes the panel title (method label).
+#
+# Example (power-only, N=80, three methods stacked vertically):
+#   fig_covsel_heatmap_stack(
+#     methods = list(
+#       "nlmixr2-SCM (bobyqa)" = list(
+#         agg_dir="output/scm_poweronly_est703_08132026_aggregated",
+#         structure="linCmt", estimator="focei", outer_opt="bobyqa"),
+#       "PsN-SCM" = list(
+#         agg_dir="output/psn_scm_poweronly_advan4_aggregated",
+#         structure="advan4", estimator="nonmem_scm", outer_opt="focei"),
+#       "nlmixr2-VAE" = list(engine="vae",
+#         agg_dir="output/vae_covsel_poweronly_N80_08162026_aggregated",
+#         structure="linCmt")),
+#     sample_N = 80, save = TRUE,
+#     out_dir = "output/figures/false_selection_poweronly",
+#     file_tag = "poweronly_N80")
+fig_covsel_heatmap_stack <- function(
+    methods,
+    sample_N  = 80,
+    direction = c("horizontal", "vertical"),
+    layout    = "wide",       # per-panel N layout; "wide" keeps each panel 1-row
+    labels    = TRUE,
+    save      = FALSE,
+    out_dir   = "output/figures/covsel_stack",
+    file_tag  = "stack",
+    panel_size = 5.0,         # inches along the stacking axis, per method panel
+    other_dim  = 6.0,         # inches on the non-stacking axis
+    base_size  = 15) {
+  if (!requireNamespace("patchwork", quietly = TRUE))
+    stop("fig_covsel_heatmap_stack() needs the 'patchwork' package.")
+  direction <- match.arg(direction)
+  horiz <- identical(direction, "horizontal")
+
+  n_m <- length(methods)
+  panels <- lapply(seq_along(methods), function(i) {
+    m <- names(methods)[i]
+    a <- methods[[m]]
+    engine <- a$engine %||% "scm"
+    a$engine <- NULL
+    # shared defaults (overridable per method entry)
+    a$sample_N   <- a$sample_N   %||% sample_N
+    a$layout     <- a$layout     %||% layout
+    a$labels     <- a$labels     %||% labels
+    a$show_title <- FALSE
+    a$save       <- FALSE
+    fn <- if (identical(engine, "vae")) fig_covsel_heatmap else fig_covsel_heatmap_scm
+
+    pp <- do.call(fn, a) +
+      ggplot2::labs(title = m, x = NULL, y = NULL) +
+      # Re-apply ONE identical fill scale + guide on every panel so patchwork's
+      # guides="collect" can merge them into a SINGLE shared legend (the two
+      # engines otherwise set different colourbar barwidths -> two legends).
+      ggplot2::scale_fill_gradient2(
+        low = "#08519C", mid = "white", high = "#B30000",
+        midpoint = 0, na.value = "grey92", name = NULL,
+        limits = c(-100, 100), breaks = seq(-100, 100, 50),
+        labels = c("FN 100%", "FN 50%", "0", "FP 50%", "FP 100%")) +
+      ggplot2::guides(fill = ggplot2::guide_colourbar(barwidth = 20)) +
+      ggplot2::theme(
+        plot.title   = ggplot2::element_text(face = "bold", hjust = 0.5,
+                                             size = base_size + 2),
+        axis.text    = ggplot2::element_text(size = base_size - 3),
+        strip.text   = ggplot2::element_text(size = base_size - 1),
+        plot.margin  = grid::unit(c(4, 6, 4, 6), "pt"))
+    # In a horizontal strip only the leftmost panel keeps the y-axis effect
+    # labels; inner panels drop them to save width (shared row order).
+    if (horiz && i > 1L)
+      pp <- pp + ggplot2::theme(axis.text.y = ggplot2::element_blank(),
+                                axis.ticks.y = ggplot2::element_blank())
+    pp
+  })
+
+  p <- patchwork::wrap_plots(panels, nrow = if (horiz) 1L else n_m,
+                             ncol = if (horiz) n_m else 1L) +
+    patchwork::plot_layout(guides = "collect") +
+    patchwork::plot_annotation(
+      caption = sprintf("Covariate-selection error rate  (N = %d).  Outlined tiles = true effects (FN); fill = FP (red) / FN (blue) rate.", sample_N),
+      theme = ggplot2::theme(
+        plot.caption = ggplot2::element_text(size = base_size - 4, hjust = 0,
+                                             colour = "grey35"))) &
+    ggplot2::theme(legend.position = "top")
+
+  if (isTRUE(save)) {
+    dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+    stub <- file.path(out_dir, sprintf("fig_covsel_stack_%s_%s", direction, file_tag))
+    if (horiz) { w <- panel_size * n_m; h <- other_dim }
+    else       { w <- other_dim;        h <- panel_size * n_m }
+    ggplot2::ggsave(paste0(stub, ".png"), p, width = w, height = h, dpi = 300)
+    ggplot2::ggsave(paste0(stub, ".pdf"), p, width = w, height = h)
+    message("saved: ", stub, ".{png,pdf}")
+  }
   p
 }
