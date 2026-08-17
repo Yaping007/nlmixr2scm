@@ -30,21 +30,18 @@ All cells emit **schema-2.1** records via `package_scm_schema21()`.
 
 | Estimator | Outer optimizers | Notes |
 |---|---|---|
-| focei | **bobyqa** (active), nlminb, lbfgsb3c | Baseline; `focei_bobyqa` re-run under schema 2.1 |
-| irlsfocei | **bobyqa** (active) | IRLS mu-referenced FOCEi, **non-fast** `est="ifocei"` — derivative-free outer, no analytic-gradient build. The IRLS counterpart to `focei_bobyqa` |
-| irlsfoceif | lbfgsb3c (parked) | Fast IRLS mu-referenced FOCEi (`est="ifoceif"`, analytic outer gradient) |
-| foceif | nlminb, lbfgsb3c (parked) | Almquist analytic outer gradient (`fast=TRUE`) |
+| focei | **bobyqa** (active), nlminb, lbfgsb3c (active) | Baseline; `focei_bobyqa` re-run under schema 2.1 |
+| irlsfocei | **bobyqa** (active) | IRLS mu-referenced FOCEi, **non-fast** `est="ifocei"` — derivative-free outer, no analytic-gradient build. The IRLS counterpart to `focei_bobyqa` | !!parked
+| irlsfoceif | lbfgsb3c (parked) | Fast IRLS mu-referenced FOCEi (`est="ifoceif"`, analytic outer gradient) |!!parked
+| foceif | nlminb, lbfgsb3c (parked) | Almquist analytic outer gradient (`fast=TRUE`) |!!parked
 
 **Active comparison (2026-07-23):** the default sweep runs only `focei_bobyqa`
 vs `irlsfocei_bobyqa` to isolate whether the IRLS mu-profiling speeds up the
 SCM search under the same derivative-free outer optimiser. All other combos are
-valid but parked (enable via the `ESTIMATORS`/`*_OPTS` env vars).
+valid but parked (enable via the `ESTIMATORS`/`*_OPTS` env vars). [ IRLS mu-profiling at that time is not significantly faster]
 
 **saem dropped** (2026-07-17): removed from `valid_combos()` and the job grid.
 
-**VAE dropped**: `runSCM()` cannot locate `cl`/`vc` symbols in the ui returned
-by `nlmixr2est::vae()` (labels rewritten to `lTVCL`/`lTVVc`). VAE covariate
-selection has its own driver (`script/vae_covsel_driver.R` + `hpce_vae_covsel/`).
 
 ### Structure note
 
@@ -82,7 +79,7 @@ comes from the fork (`workers`) and, across datasets, from the LSF array width.
 The pinned values are recorded in every record and `meta.json` as
 `scm_workers` (3) and `rx_threads` (1).
 
-### Measuring the parallel benefit correctly (read this)
+### Measuring the parallel benefit correctly (read this: we use the wall time for comparision- too complex/mixed up to get the CPU time- can skip this section)
 
 Every record stores both a WALL-clock and a CPU timing block, but **the
 in-record CPU numbers do NOT prove the fork speedup** — for two reasons:
@@ -156,18 +153,26 @@ The driver `source()`s the helpers automatically, so only
 
 ### R package prerequisites
 
-Dev-branch nlmixr2 stack (install in dependency order):
+Dev-branch nlmixr2  stack (install in dependency order) : rxode2; nlmixr2est; nlmixr2
 
 ```r
-remotes::install_github("nlmixr2/lotri",       upgrade = "never")
-remotes::install_github("nlmixr2/rxode2ll",    upgrade = "never")
-remotes::install_github("nlmixr2/rxode2",      upgrade = "never")
-remotes::install_github("nlmixr2/nlmixr2data", upgrade = "never")
-remotes::install_github("nlmixr2/nlmixr2est",  upgrade = "never")
-remotes::install_github("nlmixr2/nlmixr2",     upgrade = "never")
-module load R          # same module the jobs use
-Rscript -e 'install.packages(".", repos = NULL, type = "source", lib = Sys.getenv("R_LIBS_USER"))' #reinstall nlmixr2scm
+Rscript -e '
+  library(remotes)
+  lp <- .libPaths(); .libPaths(lp[!grepl("installed_pkg", lp)])
+  Sys.setenv(MAKEFLAGS="-j4")
+  remotes::install_github("nlmixr2/rxode2", upgrade="never", force=TRUE)
+'
 
+# Fix: remove the stale lock, then reinstall
+rm -rf /home/liuya8j/R/x86_64-pc-linux-gnu-library/4.5/00LOCK-nlmixr2est
+
+Rscript -e '
+  library(remotes)
+  lp <- .libPaths()
+  .libPaths(lp[!grepl("installed_pkg", lp)])
+  Sys.setenv(MAKEFLAGS = "-j4")
+  remotes::install_github("nlmixr2/nlmixr2est", upgrade = "never", force = TRUE, quiet = FALSE)
+'
 
 ```
 
@@ -309,6 +314,14 @@ ESTIMATORS=focei \
 FOCEI_OPTS=bobyqa \
 DS_START=6 \
   bash script/hpce_scm_estimator/submit_all_arrays.sh 100 50
+
+# matched N=80: focei only, warm ON only, est-7.0.3, linCmt+ode
+STRUCTURES="linCmt ode" NS="80" \
+ESTIMATORS="focei" FOCEI_OPTS="lbfgsb3c" \
+PROFILE_INIT_ON_STALL="TRUE" FORCE_RERUN="1" \
+OUT_ROOT="output/lbfgsb3c_warmon_est703_N80_matched" \
+  bash script/hpce_scm_estimator/submit_all_arrays.sh 100 50 
+   #[in its core submit_all_arrays.sh still calls submit_one_array]
 ```
 
 `submit_all_arrays.sh` env knobs (all optional):
@@ -336,6 +349,8 @@ bash script/hpce_scm_estimator/submit_one_array.sh 300  16 focei lbfgsb3c ode 5 
 
 ODE cells run longer than the linCmt equivalents.
 
+
+
 ## Resume / re-run behaviour
 
 The driver has a 2-tier cache:
@@ -348,6 +363,97 @@ The driver has a 2-tier cache:
 Flags:
 - `--force_rerun` bypasses both caches;
 - `--force_repackage` ignores stale `res_*` but reuses cached `scm_*`.
+
+
+## Aggregation (operating characteristics)
+
+Roll the per-dataset `res_ds*.rds` records up into operating characteristics
+with `script/aggregate_scm_estimator2.1.R` (sibling of
+`aggregate_vae_covsel.R`; the "2.1" suffix marks the schema-2.1 record format,
+distinct from the old-schema `aggregate_bench_refit_results.R`). It scans
+`output/scm_bench/N*/scn*_*/*_*/res_ds*.rds` (skipping the `.fit.rds`
+sidecars), parses the path coordinates (`scn<SS>_<structure>` plus the
+`<est>_<opt>` dir) as a backstop for in-RDS keys, **derives** the true
+covariate set per scenario from the `PsN_scenarios` indicators (SCM records do
+not store `true_set`), recomputes `converged` from numerical evidence, and
+writes 11 CSVs + 1 bundled `.rds` to `output/scm_bench_aggregated/`.
+
+### Command line (HPCE)
+
+```bash
+Rscript "script/aggregate_scm_estimator2.1.R" --root output --sub scm_bench
+# custom output dir:
+# Rscript "script/aggregate_scm_estimator2.1.R" --root output --sub scm_bench --out_dir output/scm_bench_aggregated
+```
+
+### Interactive R
+
+```r
+source("script/aggregate_scm_estimator2.1.R")
+res <- aggregate_scm_bench_run(root = "output", sub = "scm_bench")
+
+res$power           # Power / PowerCN / PowerMinSuc per cell
+res$diag_rates      # %converged, CN, WALL/CPU timing, hog per cell
+subset(res$estim_all, param_class == "covariate_beta")   # clean covariate-beta rel-err
+res$covsel_by_cov   # per-covariate detection rate
+res$relpower        # per-k fraction recovering >= k true covariates
+```
+
+Both approaches write to `output/scm_bench_aggregated/`:
+
+| file | contents |
+|------|----------|
+| `scm_file_index.csv`      | one row per discovered RDS (+ `has_error`) |
+| `scm_diag_long.csv`       | per fit: convergence, CN, WALL/CPU timing, selection tally |
+| `scm_rse_long.csv`        | per (fit, parameter): `rel_err` + `param_class` |
+| `scm_covsel_long.csv`     | per (fit, var, covar): `in_true`/`in_scm`/`verdict` (TP/FN/FP) |
+| `scm_diag_rates.csv`      | per cell: %Converged(Strict), CN, MedObjF, WALL phase timing, hog |
+| `scm_estim_all.csv`       | per (cell, parameter): MedRE / MARE / RMRSE (all fits) |
+| `scm_estim_success.csv`   | same, strict-converged fits only |
+| `scm_estim_cond.csv`      | same, exact-match fits only |
+| `scm_power.csv`           | per cell: Power / PowerCN / PowerMinSuc |
+| `scm_relpower.csv`        | per (cell, k): fraction recovering >= k true covariates |
+| `scm_covsel_by_covar.csv` | per (cell, var, covar): detection rate + TP/FP/FN |
+
+Grouping cell = `(sample_N, scenario, structure, estimator, outer_opt)`. The
+completed sweep is `focei_bobyqa` only, so estimator/outer_opt are effectively
+constant, but the keys generalise to additional cells.
+
+**Selection scoring** is on `(var, covar)` (not functional shape) for parity
+with the VAE pilot and the DGP truth. **Timing note:** `scm_diag_rates` reports
+the WALL phase split (`MedWallBase/Scm/Refit/Total_sec`) -- the usable timing.
+The `MedCpuTotal_sec` / `MedHogFactor` columns are carried through but
+UNDER-report (fork workers not captured by `proc.time()`); use
+`script/aggregate_lsf_cpu.R` for the honest CPU / parallelism story. See
+*Measuring the parallel benefit correctly* above.
+
+**Reference caveat** (estimation metrics only): `covariate_beta` rel-err is
+centring-invariant and clean; `structural_intercept` (TVCL/TVVc) is
+reference-dependent -- interpret with care.
+
+## Manual smoke test (single fit, local Windows)
+
+```r
+setwd("C:/Users/LIUYA8J/OneDrive - Novartis Pharma AG/Internship/GithubRepo/nlmixr2scm")
+source("script/PerformanceEvaluation_scm_bench.R")
+run_bench_cell(list(
+  N = 80, scenario = 16, dataset = 1,
+  estimator = "foceif", outer_opt = "lbfgsb3c",
+  structure = "ode",
+  force_rerun = FALSE, force_repackage = FALSE,
+  out_root = "output/scm_bench",
+  input_root = "Inputdataset",
+  true_params_path = "Inputdataset/true_params_long.rds"
+))
+```
+
+Or via the CLI:
+
+```bash
+Rscript script/PerformanceEvaluation_scm_bench.R \
+  --N 80 --scenario 16 --dataset 1 \
+  --estimator focei --outer_opt bobyqa --structure ode
+```
 
 ## Known bugs & fixes
 
@@ -482,156 +588,4 @@ SCREEN_SIGDIG=3 SCREEN_ATOL=1e-6 SCREEN_RTOL=1e-4 \
   bash script/hpce_scm_estimator/submit_one_array.sh 300 1 focei bobyqa linCmt 10 10
 ```
 
-## Contention-free timing (fork-parallelism benefit)
 
-The bulk sweep runs many tasks per node (`%MAXPAR` shared hosts), so its wall
-times are **contaminated by host contention** and understate the fork speedup.
-To measure the benefit cleanly, run a small A/B on isolated nodes.
-
-`submit_all_arrays.sh` / `submit_one_array.sh` expose two isolation knobs:
-
-| env | effect |
-|-----|--------|
-| `EXCLUSIVE=1` | adds `-x` \u2014 each task owns its whole node, so the 3 fork workers are never starved for cores (trustworthy wall time). |
-| `CHAIN=1`     | submits arrays with an LSF `ended()` dependency chain \u2014 only one array runs at a time (no cross-array contention). |
-
-Strictest, cleanest configuration (single task per node, arrays serialized):
-
-```bash
-CHAIN=1 EXCLUSIVE=1 \
-  STRUCTURES='linCmt ode' NS='40 80 300' SCENARIOS=16 \
-  ESTIMATORS=focei FOCEI_OPTS=bobyqa \
-  bash script/hpce_scm_estimator/submit_all_arrays.sh 20 1
-```
-
-(`MAXPAR=1` \u2192 no intra-array concurrency either.) Use a small dataset count
-(20\u201330) \u2014 exclusive nodes are scarce and medians stabilise quickly.
-
-Then extract the honest numbers:
-
-```bash
-# LSF whole-tree CPU vs wall (authoritative CPU; parses the .out summaries)
-Rscript script/aggregate_lsf_cpu.R --logs logs --out_dir output/scm_timing
-# in-record WALL phase split (base/scm/refit) for the scm_sec speedup ratio
-Rscript script/aggregate_scm_timing.R --root output/scm_bench --out_dir output/scm_timing
-```
-
-### The workers=1 vs workers=3 A/B
-
-The driver takes `--workers` (default 3) and `--rx_threads` (default 1, and
-forced to 1 whenever `workers>1` for fork-safety). `submit_one_array.sh` /
-`submit_all_arrays.sh` forward these via `WORKERS` / `RX_THREADS`, and route
-each arm to its own `OUT_ROOT` + `JOBTAG` so tier-1 caches and LSF logs never
-collide. The wrapper `submit_timing_ab.sh` submits both arms (serial, exclusive):
-
-```bash
-# focei_bobyqa, scn16, all N & structures, 20 datasets, both arms
-bash script/hpce_scm_estimator/submit_timing_ab.sh 20
-#   arm w1 -> output/scm_timing_ab/w1  (WORKERS=1, serial SCM)
-#   arm w3 -> output/scm_timing_ab/w3  (WORKERS=3, forked SCM)
-
-# per-arm WALL phase split, then compare:
-Rscript script/aggregate_scm_timing.R --root output/scm_timing_ab/w1 --out_dir output/scm_timing_ab/agg_w1
-Rscript script/aggregate_scm_timing.R --root output/scm_timing_ab/w3 --out_dir output/scm_timing_ab/agg_w3
-```
-
-The publishable metric is the **SCM-phase wall-time ratio**, per `(N, structure)`:
-
-```
-speedup = wall_scm_med(w1) / wall_scm_med(w3)
-```
-
-from the two `scm_timing_by_cell.csv` files. Both arms ran one task per
-exclusive node, so the wall times are uncontended and the ratio isolates the
-fork benefit from the serial base/refit/covariance phases. `aggregate_lsf_cpu.R`
-provides the corroborating LSF CPU cross-check.
-
-## Aggregation (operating characteristics)
-
-Roll the per-dataset `res_ds*.rds` records up into operating characteristics
-with `script/aggregate_scm_estimator2.1.R` (sibling of
-`aggregate_vae_covsel.R`; the "2.1" suffix marks the schema-2.1 record format,
-distinct from the old-schema `aggregate_bench_refit_results.R`). It scans
-`output/scm_bench/N*/scn*_*/*_*/res_ds*.rds` (skipping the `.fit.rds`
-sidecars), parses the path coordinates (`scn<SS>_<structure>` plus the
-`<est>_<opt>` dir) as a backstop for in-RDS keys, **derives** the true
-covariate set per scenario from the `PsN_scenarios` indicators (SCM records do
-not store `true_set`), recomputes `converged` from numerical evidence, and
-writes 11 CSVs + 1 bundled `.rds` to `output/scm_bench_aggregated/`.
-
-### Command line (HPCE)
-
-```bash
-Rscript "script/aggregate_scm_estimator2.1.R" --root output --sub scm_bench
-# custom output dir:
-# Rscript "script/aggregate_scm_estimator2.1.R" --root output --sub scm_bench --out_dir output/scm_bench_aggregated
-```
-
-### Interactive R
-
-```r
-source("script/aggregate_scm_estimator2.1.R")
-res <- aggregate_scm_bench_run(root = "output", sub = "scm_bench")
-
-res$power           # Power / PowerCN / PowerMinSuc per cell
-res$diag_rates      # %converged, CN, WALL/CPU timing, hog per cell
-subset(res$estim_all, param_class == "covariate_beta")   # clean covariate-beta rel-err
-res$covsel_by_cov   # per-covariate detection rate
-res$relpower        # per-k fraction recovering >= k true covariates
-```
-
-Both approaches write to `output/scm_bench_aggregated/`:
-
-| file | contents |
-|------|----------|
-| `scm_file_index.csv`      | one row per discovered RDS (+ `has_error`) |
-| `scm_diag_long.csv`       | per fit: convergence, CN, WALL/CPU timing, selection tally |
-| `scm_rse_long.csv`        | per (fit, parameter): `rel_err` + `param_class` |
-| `scm_covsel_long.csv`     | per (fit, var, covar): `in_true`/`in_scm`/`verdict` (TP/FN/FP) |
-| `scm_diag_rates.csv`      | per cell: %Converged(Strict), CN, MedObjF, WALL phase timing, hog |
-| `scm_estim_all.csv`       | per (cell, parameter): MedRE / MARE / RMRSE (all fits) |
-| `scm_estim_success.csv`   | same, strict-converged fits only |
-| `scm_estim_cond.csv`      | same, exact-match fits only |
-| `scm_power.csv`           | per cell: Power / PowerCN / PowerMinSuc |
-| `scm_relpower.csv`        | per (cell, k): fraction recovering >= k true covariates |
-| `scm_covsel_by_covar.csv` | per (cell, var, covar): detection rate + TP/FP/FN |
-
-Grouping cell = `(sample_N, scenario, structure, estimator, outer_opt)`. The
-completed sweep is `focei_bobyqa` only, so estimator/outer_opt are effectively
-constant, but the keys generalise to additional cells.
-
-**Selection scoring** is on `(var, covar)` (not functional shape) for parity
-with the VAE pilot and the DGP truth. **Timing note:** `scm_diag_rates` reports
-the WALL phase split (`MedWallBase/Scm/Refit/Total_sec`) -- the usable timing.
-The `MedCpuTotal_sec` / `MedHogFactor` columns are carried through but
-UNDER-report (fork workers not captured by `proc.time()`); use
-`script/aggregate_lsf_cpu.R` for the honest CPU / parallelism story. See
-*Measuring the parallel benefit correctly* above.
-
-**Reference caveat** (estimation metrics only): `covariate_beta` rel-err is
-centring-invariant and clean; `structural_intercept` (TVCL/TVVc) is
-reference-dependent -- interpret with care.
-
-## Manual smoke test (single fit, local Windows)
-
-```r
-setwd("C:/Users/LIUYA8J/OneDrive - Novartis Pharma AG/Internship/GithubRepo/nlmixr2scm")
-source("script/PerformanceEvaluation_scm_bench.R")
-run_bench_cell(list(
-  N = 80, scenario = 16, dataset = 1,
-  estimator = "foceif", outer_opt = "lbfgsb3c",
-  structure = "ode",
-  force_rerun = FALSE, force_repackage = FALSE,
-  out_root = "output/scm_bench",
-  input_root = "Inputdataset",
-  true_params_path = "Inputdataset/true_params_long.rds"
-))
-```
-
-Or via the CLI:
-
-```bash
-Rscript script/PerformanceEvaluation_scm_bench.R \
-  --N 80 --scenario 16 --dataset 1 \
-  --estimator focei --outer_opt bobyqa --structure ode
-```
