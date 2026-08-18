@@ -564,6 +564,9 @@ writes 11 CSVs + 1 bundled `.rds` to `output/scm_bench_aggregated/`.
 Rscript "script/aggregate_scm_estimator2.1.R" --root output --sub scm_bench
 # custom output dir:
 # Rscript "script/aggregate_scm_estimator2.1.R" --root output --sub scm_bench --out_dir output/scm_bench_aggregated
+
+# Rscript "script/aggregate_scm_estimator2.1.R" --root output --sub lbfgsb3c_warmon_est703_N80_matched --out_dir output/lbfgsb3c_warmon_est703_N80_matched_aggregated
+
 ```
 
 ### Interactive R
