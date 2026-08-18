@@ -1,0 +1,4 @@
+cohort,n_pairs,n_within_0.05,mean_abs_delta,max_abs_delta
+N40,20,20,0.0104,0.036
+N80,20,20,0.0044,0.0109
+N300,20,20,0.0021,0.0049

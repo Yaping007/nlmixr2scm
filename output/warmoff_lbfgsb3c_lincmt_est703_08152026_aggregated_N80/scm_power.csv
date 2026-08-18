@@ -1,0 +1,17 @@
+sample_N,scenario,structure,estimator,outer_opt,N,n_exact,n_ok_cn,n_ok_min,n_exact_cn,n_exact_min,Power,PowerCN,PowerMinSuc
+80,1,linCmt,focei,lbfgsb3c,100,90,100,100,90,90,0.9,0.9,0.9
+80,2,linCmt,focei,lbfgsb3c,100,86,100,100,86,86,0.86,0.86,0.86
+80,3,linCmt,focei,lbfgsb3c,100,74,100,100,74,74,0.74,0.74,0.74
+80,4,linCmt,focei,lbfgsb3c,100,74,100,100,74,74,0.74,0.74,0.74
+80,5,linCmt,focei,lbfgsb3c,100,78,100,100,78,78,0.78,0.78,0.78
+80,6,linCmt,focei,lbfgsb3c,99,77,99,99,77,77,0.7777777777777778,0.7777777777777778,0.7777777777777778
+80,7,linCmt,focei,lbfgsb3c,100,74,97,97,74,74,0.74,0.7628865979381443,0.7628865979381443
+80,8,linCmt,focei,lbfgsb3c,100,64,100,100,64,64,0.64,0.64,0.64
+80,9,linCmt,focei,lbfgsb3c,100,70,100,100,70,70,0.7,0.7,0.7
+80,10,linCmt,focei,lbfgsb3c,100,71,100,100,71,71,0.71,0.71,0.71
+80,11,linCmt,focei,lbfgsb3c,100,65,100,100,65,65,0.65,0.65,0.65
+80,12,linCmt,focei,lbfgsb3c,100,50,100,100,50,50,0.5,0.5,0.5
+80,13,linCmt,focei,lbfgsb3c,100,60,97,98,59,60,0.6,0.6082474226804123,0.6122448979591837
+80,14,linCmt,focei,lbfgsb3c,100,61,100,100,61,61,0.61,0.61,0.61
+80,15,linCmt,focei,lbfgsb3c,100,47,100,100,47,47,0.47,0.47,0.47
+80,16,linCmt,focei,lbfgsb3c,100,47,98,98,47,47,0.47,0.47959183673469385,0.47959183673469385
