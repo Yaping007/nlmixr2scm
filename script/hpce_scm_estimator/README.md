@@ -256,6 +256,28 @@ STRUCTURES=ode \
 NS=300 \
 SCENARIOS="1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16" \
   bash script/hpce_scm_estimator/submit_all_arrays.sh 5 30
+
+
+
+
+warm ON
+OUT_ROOT="output/lbfgsb3c_est703_08132026_warmon" PROFILE_INIT_ON_STALL="TRUE"
+STRUCTURES="ode" NS="80" SCENARIOS="1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16"
+FORCE_RERUN="1" ESTIMATORS="focei" FOCEI_OPTS="lbfgsb3c"
+bash script/hpce_scm_estimator/submit_all_arrays.sh 100 50
+
+warm OFF
+OUT_ROOT="output/lbfgsb3c_est703_08132026_warmoff" PROFILE_INIT_ON_STALL="FALSE"
+STRUCTURES="ode" NS="80" SCENARIOS="1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16"
+FORCE_RERUN="1" ESTIMATORS="focei" FOCEI_OPTS="lbfgsb3c"
+bash script/hpce_scm_estimator/submit_all_arrays.sh 100 50
+
+focei+lbfgsb3c, warm ON, competing shapes, N=40 & 300, linCmt+ode
+STRUCTURES="linCmt ode" NS="40 300"
+ESTIMATORS="focei" FOCEI_OPTS="lbfgsb3c"
+PROFILE_INIT_ON_STALL="TRUE" FORCE_RERUN="1"
+OUT_ROOT="output/lbfgsb3c_warmon_est703_N40_300"
+bash script/hpce_scm_estimator/submit_all_arrays.sh 100 50 This is how I submit N=40 and 300
 ```
 
 Monitor and read actual resource usage:

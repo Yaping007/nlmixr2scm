@@ -37,6 +37,8 @@ set -euo pipefail
 
 OUT_ROOT="${OUT_ROOT:-output/vae_covsel_pilot}"
 SHAPES="${SHAPES:-power lin}"
+COLINEAR="${COLINEAR:-on}"
+COLINEAR_CUT="${COLINEAR_CUT:-0.95}"
 
 echo "=========================================================="
 echo "Task started : $(date)"
@@ -47,7 +49,7 @@ echo "Host         : $(hostname)"
 echo "Sample N     : ${SAMPLE_N}"
 echo "Scenario     : ${SCN}"
 echo "Structure    : ${STRUCTURE}"
-echo "Dataset      : ${LSB_JOBINDEX}"
+echo "Colinear     : ${COLINEAR}  (cut ${COLINEAR_CUT})"
 echo "Out root     : ${OUT_ROOT}"
 echo "Repo root    : ${REPO_ROOT}"
 echo "=========================================================="
@@ -64,7 +66,9 @@ Rscript "$SCRIPTS_DIR/vae_covsel_driver.R" \
     --structure "$STRUCTURE" \
     --dataset   "$LSB_JOBINDEX" \
     --out_root  "$OUT_ROOT" \
-    --shapes    "$SHAPES"
+    --shapes    "$SHAPES" \
+    --colinear  "$COLINEAR" \
+    --colinear_cut "$COLINEAR_CUT"
 
 exit_code=$?
 echo "=========================================================="

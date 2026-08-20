@@ -49,6 +49,8 @@ fi
 
 OUT_ROOT="${OUT_ROOT:-output/vae_covsel_pilot}"
 SHAPES="${SHAPES:-power lin}"
+COLINEAR="${COLINEAR:-on}"
+COLINEAR_CUT="${COLINEAR_CUT:-0.95}"
 SCN_PAD=$(printf '%02d' "$SCN")
 JOBNAME="vaecov_N${SAMPLE_N}_scn${SCN_PAD}_${STRUCTURE}"
 
@@ -56,14 +58,16 @@ LOGDIR="$REPO_ROOT/logs/vaecov_N${SAMPLE_N}"
 mkdir -p "$LOGDIR"
 
 echo "Submitting: ${JOBNAME}[${DS_START}-${DS_END}]%${MAXPAR}"
-echo "  REPO_ROOT   = $REPO_ROOT"
 echo "  SCRIPTS_DIR = $SCRIPTS_DIR"
 echo "  OUT_ROOT    = $OUT_ROOT"
+echo "  COLINEAR    = $COLINEAR  (cut $COLINEAR_CUT)"
 echo "  logs        = $LOGDIR/${JOBNAME}.<jobid>.<idx>.{out,err}"
+
+export REPO_ROOT SCRIPTS_DIR SAMPLE_N SCN STRUCTURE OUT_ROOT SHAPES COLINEAR COLINEAR_CUT
 
 bsub \
   -J "${JOBNAME}[${DS_START}-${DS_END}]%${MAXPAR}" \
   -o "${LOGDIR}/${JOBNAME}.%J.%I.out" \
   -e "${LOGDIR}/${JOBNAME}.%J.%I.err" \
-  -env "all, REPO_ROOT=${REPO_ROOT}, SCRIPTS_DIR=${SCRIPTS_DIR}, SAMPLE_N=${SAMPLE_N}, SCN=${SCN}, STRUCTURE=${STRUCTURE}, OUT_ROOT=${OUT_ROOT}, SHAPES=${SHAPES}" \
+  -env "all" \
   < "$HERE/vae_covsel_array.lsf"

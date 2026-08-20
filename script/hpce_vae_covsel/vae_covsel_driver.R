@@ -79,7 +79,14 @@ parse_args <- function(argv) {
                true_params_path = "Inputdataset/true_params_long.rds",
                # Continuous-covariate shape menu (space-separated). Default
                # "power lin" = competing shapes; --shapes power = power-only.
-               shapes = "power lin")
+               shapes = "power lin",
+               # PR #921 correlation-aware covariate selection. "on" (default)
+               # enables covSelectColinear; "off" reproduces the pre-PR engine.
+               colinear = "on",
+               # Covariate-colinearity clustering cut (mechanism A). Raised to
+               # 0.95 so BW-BMI (r ~ 0.88) never clusters -> isolates the
+               # Vc-CL parameter-correlation refinement (mechanism B).
+               colinear_cut = 0.95)
   i <- 1L
   while (i <= length(argv)) {
     a <- argv[i]; val <- function() { i <<- i + 1L; argv[i] }
@@ -92,6 +99,8 @@ parse_args <- function(argv) {
       "--input_root"  = { opts$input_root <- val() },
       "--true_params" = { opts$true_params_path <- val() },
       "--shapes"      = { opts$shapes      <- val() },
+      "--colinear"    = { opts$colinear    <- val() },
+      "--colinear_cut" = { opts$colinear_cut <- as.numeric(val()) },
       stop(sprintf("Unknown arg: %s", a))
     )
     i <- i + 1L
@@ -190,8 +199,15 @@ base_mod <- switch(opts$structure,
 # c("power","lin") = competing shapes; c("power") = the power-only covariate
 # space. SEX/RACE stay categorical (TRUE -> auto "cat").
 .cont_shapes <- strsplit(trimws(opts$shapes %||% "power lin"), "\\s+")[[1]]
+# PR #921 A/B toggle: "on" -> covSelectColinear = TRUE (correlation-aware
+# selection); "off" -> FALSE (pre-PR per-dimension engine).
+.colinear_on <- identical(tolower(trimws(opts$colinear %||% "on")), "on")
+.colinear_cut <- suppressWarnings(as.numeric(opts$colinear_cut %||% 0.95))
+if (!is.finite(.colinear_cut)) .colinear_cut <- 0.95
 vae_ctrl <- nlmixr2est::vaeControl(
   covariateSelection = TRUE,
+  covSelectColinear  = .colinear_on,
+  covSelectColinearCut = .colinear_cut,
   shapes = list(
     BW   = .cont_shapes,
     CrCL = .cont_shapes,
@@ -374,6 +390,9 @@ rec$dataset_id  <- opts$dataset
 rec$estimator   <- "vae"
 rec$structure   <- opts$structure
 rec$outer_opt   <- NA_character_
+# PR #921 A/B arm tag: "on" (covSelectColinear=TRUE) vs "off" (pre-PR engine).
+rec$colinear    <- if (isTRUE(.colinear_on)) "on" else "off"
+rec$colinear_cut <- .colinear_cut
 
 write_fit_sidecar(rec, out_rds, fit = fit)
 

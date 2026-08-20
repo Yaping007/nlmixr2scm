@@ -47,6 +47,11 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [ -n "${SCENARIOS:-}" ]  || SCENARIOS="1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16"
 [ -n "${STRUCTURES:-}" ] || STRUCTURES="linCmt ode"
 
+# Arm/output overrides: export so the child submit_one_array.sh inherits them.
+export OUT_ROOT="${OUT_ROOT:-output/vae_covsel_pilot}"
+export COLINEAR="${COLINEAR:-on}"
+export COLINEAR_CUT="${COLINEAR_CUT:-0.95}"
+
 echo "=========================================================="
 echo "VAE covsel pilot submission"
 echo "  NS         = $NS"
@@ -55,7 +60,8 @@ echo "  STRUCTURES = $STRUCTURES"
 echo "  NDS        = $NDS   (datasets per cell)"
 echo "  MAXPAR     = $MAXPAR"
 echo "  DS_START   = $DS_START"
-echo "  OUT_ROOT   = ${OUT_ROOT:-output/vae_covsel_pilot}"
+echo "  OUT_ROOT   = $OUT_ROOT"
+echo "  COLINEAR   = $COLINEAR  (cut $COLINEAR_CUT)"
 echo "=========================================================="
 
 n_cells=0

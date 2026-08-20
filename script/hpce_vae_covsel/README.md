@@ -236,6 +236,19 @@ OUT_ROOT=output/vae_covsel_full0723_est710 \
   bash script/hpce_vae_covsel/submit_all_arrays.sh 245 40 1
 
   OUT_ROOT=output/vae_covsel_full0807_est703 bash script/hpce_vae_covsel/submit_all_arrays.sh 100 1 1
+
+  COLINEAR=on COLINEAR_CUT=0.95 OUT_ROOT=output/vae_covsel_colON_N80   bash script/hpce_vae_covsel/submit_one_array.sh 80 16 ode 100 6 1
+
+  COLINEAR=on COLINEAR_CUT=0.95 OUT_ROOT=output/vae_covsel_colON_N80 \
+NS=80 STRUCTURES=ode SCENARIOS="1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16" \
+  bash script/hpce_vae_covsel/submit_all_arrays.sh 100 6 1
+
+  COLINEAR=on COLINEAR_CUT=0.8 OUT_ROOT=output/vae_covsel_colON_N80 \
+NS=80 STRUCTURES=ode SCENARIOS="1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16" \
+  bash script/hpce_vae_covsel/submit_all_arrays.sh 100 6 1
+  
+
+
 ```
 
 Monitor and inspect resource usage:
